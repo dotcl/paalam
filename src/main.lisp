@@ -420,7 +420,10 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
 (defun load-clip () (setf *clip* (%read-state "clip.lisp")))
 (defun save-clip () (%write-state "clip.lisp" *clip*))
 (defun clip-add (source page)
-  (when source
+  "素材に (source . page) を追加 (重複はスキップ)。"
+  (when (and source
+             (not (member-if (lambda (e) (and (string-equal (car e) source) (eql (cdr e) page)))
+                             *clip*)))
     (setf *clip* (append *clip* (list (cons source page))))
     (save-clip)))
 (defun clip-clear () (setf *clip* nil) (save-clip))
@@ -807,7 +810,11 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
         ((string= kn "B") (toggle-bookmark (viewer-source vw) (%cur-page vw)) (%update-title vw))
         ((string= kn "OemOpenBrackets")  (%goto-bookmark vw -1))   ; [ 前のしおり
         ((string= kn "OemCloseBrackets") (%goto-bookmark vw  1))   ; ] 次のしおり
-        ((string= kn "A") (clip-add (viewer-source vw) (%cur-page vw)) (%update-title vw)) ; 素材に追加
+        ((string= kn "A")                                          ; 素材に追加 (見開きは両ページ)
+         (let ((sp (viewer-spreads vw)))
+           (when (plusp (length sp))
+             (dolist (p (aref sp (viewer-sindex vw))) (clip-add (viewer-source vw) p))))
+         (%update-title vw))
         ((string= kn "E")                                            ; 掃き出し (zip)
          (let ((out (%export-clip)))
            (when out
