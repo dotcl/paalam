@@ -1331,6 +1331,41 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
 (defun %s-combo-value (combo choices)
   (cdr (nth (max 0 (dotnet:invoke combo "get_SelectedIndex")) choices)))
 
+;;; ファイル関連付け (#11, Windows): per-user (HKCU) なので管理者権限不要。ProgID を登録し
+;;; 対応拡張子の OpenWithProgids に追加 (「プログラムから開く」に出る)。既定化は OS 仕様で
+;;; 自動不可なので、登録後に「既定のアプリ」設定へ誘導する。レジストリ書き込みは Lisp から
+;;; Microsoft.Win32.Registry を叩く (C# シムを増やさない方針)。
+(defparameter *progid* "Paalam.Document")
+(defparameter *assoc-extensions*
+  (append *image-extensions* '("zip" "cbz" "rar" "cbr" "7z" "cb7" "tar" "cbt" "pdf"))
+  "関連付け対象の拡張子 (paalam が開けるもの)。")
+
+(defun %reg-set (path name value)
+  "HKCU\\PATH のサブキー (無ければ作成) に (NAME -> VALUE) を書く。NAME=\"\" で既定値。"
+  (let* ((cu (dotnet:static "Microsoft.Win32.Registry" "CurrentUser"))
+         (k  (dotnet:invoke cu "CreateSubKey" path)))
+    (unwind-protect (dotnet:invoke k "SetValue" name value)
+      (ignore-errors (dotnet:invoke k "Close")))))
+
+(defun %register-file-associations ()
+  "ProgID 登録 + 各拡張子の OpenWithProgids に追加 (per-user)。exe は自分自身。"
+  (ignore-errors (dotnet:load-assembly "Microsoft.Win32.Registry"))
+  (let ((exe (dotnet:static "System.Environment" "ProcessPath")))
+    (%reg-set (format nil "Software\\Classes\\~a" *progid*) "" "paalam 画像 / 書庫 / PDF")
+    (%reg-set (format nil "Software\\Classes\\~a\\DefaultIcon" *progid*) "" (format nil "~a,0" exe))
+    (%reg-set (format nil "Software\\Classes\\~a\\shell\\open\\command" *progid*) ""
+              (format nil "\"~a\" \"%1\"" exe))
+    (dolist (ext *assoc-extensions*)
+      (%reg-set (format nil "Software\\Classes\\.~a\\OpenWithProgids" ext) *progid* ""))))
+
+(defun %open-default-apps ()
+  "Windows の「既定のアプリ」設定を開く (既定化はユーザ操作が要るため誘導)。"
+  (ignore-errors
+    (let ((psi (dotnet:new "System.Diagnostics.ProcessStartInfo")))
+      (dotnet:invoke psi "set_FileName" "ms-settings:defaultapps")
+      (dotnet:invoke psi "set_UseShellExecute" t)
+      (dotnet:static "System.Diagnostics.Process" "Start" psi))))
+
 (defun %settings-apply (vw cb-spread cb-fps cb-rec combo tb-cache tb-pf tb-th
                         fit-combo bg-combo interp-combo)
   "コントロールの現在値をグローバルへ反映し永続化、変更内容に応じて再描画する。"
@@ -1404,7 +1439,9 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
                          (dolist (k (%effective-keys c)) (push (cons k (command-id c)) acc)))
                        (nreverse acc))))
          (kb-stack (dotnet:new "Avalonia.Controls.StackPanel"))
-         (content  (dotnet:new "Avalonia.Controls.ContentControl")))
+         (content  (dotnet:new "Avalonia.Controls.ContentControl"))
+         (win-p (dotnet:static "System.OperatingSystem" "IsWindows"))  ; 関連付けは Windows のみ (#11)
+         (assoc-status (dotnet:new "Avalonia.Controls.TextBlock")))
     (let ((items (dotnet:invoke combo "get_Items")))
       (dotnet:invoke items "Add" "右開き (RTL)")
       (dotnet:invoke items "Add" "左開き (LTR)"))
@@ -1493,18 +1530,41 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
                  (dotnet:invoke scr "set_Content" kb-stack)
                  (page (list (%s-header "キー割当 (キー → 機能。1 キー 1 機能、複数可)")
                              scr addbtn))))
-             (pages (list (cons "レイアウト" panel-layout)
-                          (cons "画質"      panel-quality)
-                          (cons "先読み"    panel-perf)
-                          (cons "キー割当"  panel-keys)))
+             (panel-assoc
+               (page (list (%s-header "関連付け (Windows / 管理者権限不要)")
+                           (let ((d (dotnet:new "Avalonia.Controls.TextBlock")))
+                             (dotnet:invoke d "set_Text"
+                               "画像 / 書庫 / PDF を paalam に関連付けます (現在のユーザのみ)。登録後、Windows の『既定のアプリ』で paalam を選ぶと既定で開けます。")
+                             (dotnet:invoke d "set_TextWrapping"
+                                            (dotnet:static "Avalonia.Media.TextWrapping" "Wrap"))
+                             (dotnet:invoke d "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 0d0 0d0 8d0))
+                             d)
+                           (%s-button "この PC で関連付ける"
+                             (lambda ()
+                               (handler-case
+                                   (progn
+                                     (%register-file-associations)
+                                     (dotnet:invoke assoc-status "set_Text"
+                                       "登録しました。続いて『既定のアプリ』で paalam を選べます。")
+                                     (%open-default-apps))
+                                 (error (e)
+                                   (dotnet:invoke assoc-status "set_Text" (format nil "失敗: ~a" e))))))
+                           assoc-status)))
+             (pages (append (list (cons "レイアウト" panel-layout)
+                                  (cons "画質"      panel-quality)
+                                  (cons "先読み"    panel-perf)
+                                  (cons "キー割当"  panel-keys))
+                            (when win-p (list (cons "関連付け" panel-assoc)))))
              (tree (dotnet:new "Avalonia.Controls.TreeView"))
              (leaf-layout  (tvi "レイアウト"))
              (leaf-quality (tvi "画質"))
              (leaf-perf    (tvi "先読み"))
              (leaf-keys    (tvi "キー割当"))
+             (leaf-assoc   (tvi "関連付け"))
              (g-view (tvi "表示" (list leaf-layout leaf-quality)))
              (g-perf (tvi "性能" (list leaf-perf)))
              (g-op   (tvi "操作" (list leaf-keys)))
+             (g-system (tvi "システム" (list leaf-assoc)))
              (root (dotnet:new "Avalonia.Controls.DockPanel"))
              (grid (dotnet:new "Avalonia.Controls.Grid"))
              (btns (dotnet:new "Avalonia.Controls.StackPanel")))
@@ -1512,7 +1572,8 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
         (let ((items (dotnet:invoke tree "get_Items")))
           (dotnet:invoke items "Add" g-view)
           (dotnet:invoke items "Add" g-perf)
-          (dotnet:invoke items "Add" g-op))
+          (dotnet:invoke items "Add" g-op)
+          (when win-p (dotnet:invoke items "Add" g-system)))   ; 関連付けは Windows のみ
         (dotnet:add-event tree "SelectionChanged"
           (lambda (s e) (declare (ignore s e))
             (let ((item (dotnet:invoke tree "get_SelectedItem")))
