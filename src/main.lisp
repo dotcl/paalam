@@ -525,7 +525,9 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
       (with-lock-held ((loader-lock ld))
         (loop while (and (null (loader-queue ld)) (not (loader-done ld)))
               do (condition-wait (loader-cv ld) (loader-lock ld)))
-        (when (and (loader-done ld) (null (loader-queue ld))) (return))
+        ;; done なら待ち行列 (prefetch) を捨てて即終了。stop 時に古い queue を
+        ;; 全部ロードし終えるまで join がブロックするのを防ぐ (DnD/再オープンの固まり)。
+        (when (loader-done ld) (return))
         (setf index (pop (loader-queue ld))))
       (when index
         (let ((bmp (ignore-errors (book-load-image (loader-book ld) index))))
