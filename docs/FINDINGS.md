@@ -144,12 +144,15 @@ Avalonia 固有の追加摩擦:
 - `Window` + `Image` + `Bitmap(path)` 表示、`StartWithClassicDesktopLifetime` 完走 → EXIT 0
 - **`net10.0` (`-windows` 不要)・STA 不要・Windows Desktop ランタイム非依存** → #281 に WPF より素直
 
-Avalonia 固有の罠:
-- **contrib (define-class) が DotCL.Runtime NuGet に無い** → vendor して `load`
-  (`*package*`=CL-USER で読むと `self` 等が利用側と一致)。dotcl-internal #293。
+Avalonia 固有の罠 (下記 #290/#292/#293 は **dotcl 0.1.11 で解決済み**。0.1.11 の
+DotCL.Runtime.targets が dotcl.core と contrib を出力に自動コピーするので、main.lisp は
+`(require :dotnet-class)`/`(require :dotcl-thread)` で解決し、FluentTheme も引数なしで作れる。
+履歴として残す):
+- **contrib (define-class) が DotCL.Runtime NuGet に無い** (〜0.1.10) → vendor して `load`
+  (`*package*`=CL-USER で読むと `self` 等が利用側と一致)。dotcl-internal #293 (0.1.11 解決)。
 - **Avalonia 12 `FluentTheme` は引数なし ctor 無し** (`Uri baseUri=null`)。`dotnet:new` 0 引数版
   (Activator) では作れない → `(dotnet:new "...FluentTheme" nil)` と省略可引数を明示。
-  dotcl-internal #292。画像表示自体にテーマは不要。
+  dotcl-internal #292 (0.1.11 で引数なし可)。画像表示自体にテーマは不要。
 - Bitmap は `Avalonia.Media.Imaging.Bitmap` (WPF の `BitmapImage` と別型) → book-load-image は
   backend 依存。WPF/Avalonia を同居させるなら画像ロードを backend ごとに分ける。
 
