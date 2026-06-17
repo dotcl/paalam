@@ -506,14 +506,17 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
             (cached (%thumb-get (car item) (cdr item))))
         (dotnet:invoke img "set_Width" 200d0)
         (dotnet:invoke img "set_Stretch" (dotnet:static "Avalonia.Media.Stretch" "Uniform"))
-        ;; × ボタン (右上)。クリックで削除。誤爆しにくいよう明示的に。
+        ;; × ボタン (右上)。赤背景+白太字で削除と分かるよう目立たせる。
         (dotnet:invoke xbtn "set_Content" "×")
+        (dotnet:invoke xbtn "set_Foreground" (dotnet:static "Avalonia.Media.Brushes" "White"))
+        (dotnet:invoke xbtn "set_Background" (dotnet:static "Avalonia.Media.Brushes" "Firebrick"))
+        (dotnet:invoke xbtn "set_FontWeight" (dotnet:static "Avalonia.Media.FontWeight" "Bold"))
+        (dotnet:invoke xbtn "set_FontSize" 14d0)
         (dotnet:invoke xbtn "set_HorizontalAlignment"
                        (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Right"))
         (dotnet:invoke xbtn "set_VerticalAlignment"
                        (dotnet:static "Avalonia.Layout.VerticalAlignment" "Top"))
-        (dotnet:invoke xbtn "set_Padding" (dotnet:new "Avalonia.Thickness" 4d0 0d0))
-        (dotnet:invoke xbtn "set_Opacity" 0.75d0)
+        (dotnet:invoke xbtn "set_Padding" (dotnet:new "Avalonia.Thickness" 7d0 2d0))
         (dotnet:add-event xbtn "Click"
                           (lambda (s e) (declare (ignore s e)) (%clip-remove-at vw idx)))
         (dotnet:invoke cell "set_Margin" (dotnet:new "Avalonia.Thickness" 4d0))
