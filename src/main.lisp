@@ -1295,9 +1295,15 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
       (dotnet:invoke c "Add" control))
     row))
 
+(defun %set-check (cb on)
+  "CheckBox.IsChecked (bool?) を確実に true/false に。Lisp nil をそのまま渡すと .NET null
+= 中間(indeterminate)状態になるので、false はボックス化した System.Boolean(既定=false) を渡す。"
+  (dotnet:invoke cb "set_IsChecked" (if on t (dotnet:new "System.Boolean"))))
+
 (defun %s-checkbox (checked)
   (let ((cb (dotnet:new "Avalonia.Controls.CheckBox")))
-    (dotnet:invoke cb "set_IsChecked" checked) cb))
+    (dotnet:invoke cb "set_IsThreeState" nil)
+    (%set-check cb checked) cb))
 
 (defun %s-textbox (n)
   (let ((tb (dotnet:new "Avalonia.Controls.TextBox")))
@@ -1539,7 +1545,8 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
                                   (let ((cb (dotnet:new "Avalonia.Controls.CheckBox")))
                                     (dotnet:invoke cb "set_Content" (format nil ".~a" ext))
                                     (dotnet:invoke cb "set_Width" 92d0)
-                                    (dotnet:invoke cb "set_IsChecked" (and win-p (%assoc-registered-p ext)))
+                                    (dotnet:invoke cb "set_IsThreeState" nil)
+                                    (%set-check cb (and win-p (%assoc-registered-p ext)))
                                     (cons ext cb)))
                                 *assoc-extensions*)))
              (dotnet:invoke wrap "set_Width" 380d0)
@@ -1548,10 +1555,10 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
                         (let ((acc '()))
                           (dolist (b boxes) (when (dotnet:invoke (cdr b) "get_IsChecked") (push (car b) acc)))
                           (nreverse acc)))
-                      (set-all (v) (dolist (b boxes) (dotnet:invoke (cdr b) "set_IsChecked" v)))
+                      (set-all (v) (dolist (b boxes) (%set-check (cdr b) v)))
                       (sync ()  ; レジストリの実状態をチェックに反映
                         (dolist (b boxes)
-                          (dotnet:invoke (cdr b) "set_IsChecked" (%assoc-registered-p (car b))))))
+                          (%set-check (cdr b) (%assoc-registered-p (car b))))))
                (let ((row (dotnet:new "Avalonia.Controls.StackPanel")))
                  (dotnet:invoke row "set_Orientation" (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
                  (let ((rc (dotnet:invoke row "get_Children")))
