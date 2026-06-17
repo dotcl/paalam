@@ -125,6 +125,49 @@ public static class DialogHelper
         }
         catch { /* キャンセル等は無視 */ }
     }
+
+    public static async void PickOpenBook(Avalonia.Controls.Window win, Action<string> onPicked)
+    {
+        try
+        {
+            var files = await win.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+            {
+                AllowMultiple = false,
+                FileTypeFilter = new[]
+                {
+                    new FilePickerFileType("画像 / 書庫 / PDF")
+                    {
+                        Patterns = new[]
+                        {
+                            "*.jpg","*.jpeg","*.png","*.gif","*.bmp","*.webp","*.tif","*.tiff",
+                            "*.zip","*.cbz","*.rar","*.cbr","*.7z","*.cb7","*.tar","*.cbt","*.pdf"
+                        }
+                    }
+                }
+            });
+            if (files != null && files.Count > 0)
+            {
+                var p = files[0].TryGetLocalPath();
+                if (!string.IsNullOrEmpty(p)) onPicked(p!);
+            }
+        }
+        catch { }
+    }
+
+    public static async void PickOpenFolder(Avalonia.Controls.Window win, Action<string> onPicked)
+    {
+        try
+        {
+            var folders = await win.StorageProvider.OpenFolderPickerAsync(
+                new FolderPickerOpenOptions { AllowMultiple = false });
+            if (folders != null && folders.Count > 0)
+            {
+                var p = folders[0].TryGetLocalPath();
+                if (!string.IsNullOrEmpty(p)) onPicked(p!);
+            }
+        }
+        catch { }
+    }
 }
 
 internal static class Program

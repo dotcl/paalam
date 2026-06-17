@@ -1004,11 +1004,9 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
         ((string= kn "Home") (setf (viewer-sindex vw) 0) (show-spread vw))
         ((string= kn "End")  (setf (viewer-sindex vw) (1- (length (viewer-spreads vw))))
                              (show-spread vw))
-        ((string= kn "S") (setf *spread* (not *spread*)) (%recompute vw (%cur-page vw))
-                          (save-settings))
-        ((string= kn "D") (setf *page-direction* (if (eq *page-direction* :rtl) :ltr :rtl))
-                          (show-spread vw) (save-settings))
-        ((string= kn "R") (setf *recursive* (not *recursive*)) (save-settings) (%reopen vw))
+        ((string= kn "S") (%toggle-spread vw))
+        ((string= kn "D") (%toggle-direction vw))
+        ((string= kn "R") (%toggle-recursive vw))
         ((member kn '("D0" "NumPad0") :test #'string=) (reset-view vw))
         ((member kn '("F11" "F") :test #'string=) (%set-fullscreen vw (not (%fullscreen-p vw))))
         ((string= kn "Escape") (if (%fullscreen-p vw) (%set-fullscreen vw nil) (%quit vw)))
@@ -1040,6 +1038,54 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
       (let ((env (dotnet:static "System.Environment" "GetEnvironmentVariable" "PAALAM_PATH")))
         (and env (plusp (length env)) env))
       *default-image*))
+
+;;; 表示トグル (キー / メニュー 共用)
+(defun %toggle-spread (vw)
+  (setf *spread* (not *spread*)) (%recompute vw (%cur-page vw)) (save-settings))
+(defun %toggle-direction (vw)
+  (setf *page-direction* (if (eq *page-direction* :rtl) :ltr :rtl))
+  (show-spread vw) (save-settings))
+(defun %toggle-recursive (vw)
+  (setf *recursive* (not *recursive*)) (save-settings) (%reopen vw))
+
+(defun %open-file-dialog (vw win)
+  (dotnet:static "Paalam.DialogHelper" "PickOpenBook" win
+                 (dotnet:make-delegate "System.Action`1[System.String]"
+                                       (lambda (p) (open-path vw p)))))
+(defun %open-folder-dialog (vw win)
+  (dotnet:static "Paalam.DialogHelper" "PickOpenFolder" win
+                 (dotnet:make-delegate "System.Action`1[System.String]"
+                                       (lambda (p) (open-path vw p)))))
+
+;;; メニューバー (#21)
+(defun %menu-item (header &optional click)
+  (let ((mi (dotnet:new "Avalonia.Controls.MenuItem")))
+    (dotnet:invoke mi "set_Header" header)
+    (when click
+      (dotnet:add-event mi "Click" (lambda (s e) (declare (ignore s e)) (funcall click))))
+    mi))
+(defun %menu-add (parent item) (dotnet:invoke (dotnet:invoke parent "get_Items") "Add" item))
+
+(defun %build-menu (vw win)
+  (let ((menu   (dotnet:new "Avalonia.Controls.Menu"))
+        (m-file (%menu-item "ファイル"))
+        (m-view (%menu-item "表示"))
+        (m-clip (%menu-item "素材")))
+    (%menu-add m-file (%menu-item "開く (ファイル)…" (lambda () (%open-file-dialog vw win))))
+    (%menu-add m-file (%menu-item "開く (フォルダ)…" (lambda () (%open-folder-dialog vw win))))
+    (%menu-add m-file (%menu-item "終了 (Q)" (lambda () (%quit vw))))
+    (%menu-add m-view (%menu-item "全画面 (F11)" (lambda () (%set-fullscreen vw (not (%fullscreen-p vw))))))
+    (%menu-add m-view (%menu-item "見開き (S)" (lambda () (%toggle-spread vw))))
+    (%menu-add m-view (%menu-item "綴じ方向 (D)" (lambda () (%toggle-direction vw))))
+    (%menu-add m-view (%menu-item "再帰収集 (R)" (lambda () (%toggle-recursive vw))))
+    (%menu-add m-view (%menu-item "フィット (0)" (lambda () (reset-view vw))))
+    (%menu-add m-view (%menu-item "素材ペイン (P)" (lambda () (%toggle-clip-pane vw))))
+    (%menu-add m-clip (%menu-item "掃き出し… (E)" (lambda () (%pane-export vw))))
+    (let ((items (dotnet:invoke menu "get_Items")))
+      (dotnet:invoke items "Add" m-file)
+      (dotnet:invoke items "Add" m-view)
+      (dotnet:invoke items "Add" m-clip))
+    menu))
 
 (defun build-main-window ()
   "現在の *target-path* の本を開き、見開き対応の Avalonia Window を返す
@@ -1116,7 +1162,15 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
         (dotnet:static "Paalam.DragDropHelper" "EnableClipDrop" pane
                        (dotnet:make-delegate "System.Action`1[System.String]"
                                              (lambda (p) (%clip-drop vw p))))
-        (dotnet:invoke win "set_Content" root))
+        ;; メニューバー (#21): Window.Content を DockPanel [Menu(Top) | root] に包む。
+        (let ((dock (dotnet:new "Avalonia.Controls.DockPanel"))
+              (menu (%build-menu vw win)))
+          (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" menu
+                         (dotnet:static "Avalonia.Controls.Dock" "Top"))
+          (let ((dc (dotnet:invoke dock "get_Children")))
+            (dotnet:invoke dc "Add" menu)
+            (dotnet:invoke dc "Add" root))
+          (dotnet:invoke win "set_Content" dock)))
       (dotnet:invoke win "set_Background" (dotnet:static "Avalonia.Media.Brushes" "Black"))
       (dotnet:invoke win "set_Width"  1200d0)
       (dotnet:invoke win "set_Height" 800d0)
