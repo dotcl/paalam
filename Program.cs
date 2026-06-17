@@ -1,13 +1,23 @@
-// paalam — WPF 画像ビューア (dotcl 組み込みホスト)
+// paalam — Avalonia 画像ビューア (dotcl 組み込みホスト, クロスプラット)
 //
-// C# は起動配線だけ。UI / ロジックは src/main.lisp (Common Lisp) 側。
-// dotcl repo には依存せず DotCL.Runtime NuGet だけで組み込む (dotcl-internal #281)。
+// C# は boot とアセンブリ先読みだけ。UI/ロジックは src/main.lisp 側。
+// dotcl/Avalonia とも NuGet 経由のみ (dotcl repo 非依存; #281)。
 
+using System;
 using System.IO;
-using System.Windows;
 using DotCL;
 
 namespace Paalam;
+
+// dotcl の dotnet:new はコンストラクタ多重定義解決が弱く (プリミティブ型しか
+// スコアしない)、Bitmap(string) と Bitmap(Stream) を区別できず Stream を string に
+// 変換しようとして失敗する。1 メソッドだけの曖昧さ回避シムで Stream ctor を確実に呼ぶ。
+// (dotcl-internal の overload 解決改善が入れば不要)
+public static class Imaging
+{
+    public static Avalonia.Media.Imaging.Bitmap BitmapFromStream(System.IO.Stream s)
+        => new Avalonia.Media.Imaging.Bitmap(s);
+}
 
 internal static class Program
 {
@@ -16,36 +26,27 @@ internal static class Program
     {
         try
         {
-            // WPF 本体を先にロード (dotcl 側が単純名で型解決できるように)。
-            _ = typeof(Application).Assembly;
+            // dotcl の型解決前に Avalonia アセンブリを AppDomain にロードしておく。
+            _ = typeof(Avalonia.Application).Assembly;
+            _ = typeof(Avalonia.Controls.Window).Assembly;
+            _ = typeof(Avalonia.AppBuilderDesktopExtensions).Assembly; // Avalonia.Desktop
+            _ = typeof(Avalonia.Themes.Fluent.FluentTheme).Assembly;
 
-            // dotcl ランタイム起動: Initialize → core ロード → main.lisp ロード。
             DotclHost.Initialize();
-            var core = DotclHost.FindCore()
-                ?? throw new InvalidOperationException(
-                    "dotcl.core が見つかりません (paalam.exe と同じ場所に配置されるはず)");
-            DotclHost.LoadCore(core);
+            DotclHost.LoadCore(DotclHost.FindCore()
+                ?? throw new InvalidOperationException("dotcl.core が見つかりません"));
+            DotclHost.LoadLispFile(Path.Combine(AppContext.BaseDirectory, "main.lisp"));
 
-            var mainLisp = Path.Combine(AppContext.BaseDirectory, "main.lisp");
-            DotclHost.LoadLispFile(mainLisp);
-
-            // 第 1 引数 (フォルダ/アーカイブ/画像) を Lisp に渡す。無ければ null。
+            // 第 1 引数 (フォルダ/アーカイブ/画像) を渡す。run-paalam は窓が閉じるまで blocking。
             var cmd = Environment.GetCommandLineArgs();
             object? target = cmd.Length > 1 ? cmd[1] : null;
-
-            // Lisp 側 build-app が Application を組んで返す。STAThread Main 上で Run。
-            var result = DotclHost.Call("BUILD-APP", target);
-            if (result is LispDotNetObject obj && obj.Value is Application app)
-                app.Run();
-            else
-                throw new InvalidOperationException(
-                    $"BUILD-APP が System.Windows.Application を返しませんでした (got: {result})");
+            DotclHost.Call("RUN-PAALAM", target);
         }
         catch (Exception ex)
         {
-            // WinExe はコンソールを持たないので boot trace/例外はログに残す。
-            var log = Path.Combine(AppContext.BaseDirectory, "paalam-boot.log");
-            File.WriteAllText(log, ex.ToString());
+            File.WriteAllText(
+                Path.Combine(AppContext.BaseDirectory, "paalam-boot.log"), ex.ToString());
+            Console.Error.WriteLine(ex);
             throw;
         }
     }

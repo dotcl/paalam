@@ -1,32 +1,38 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <!-- クロスプラット: net10.0 (-windows 不要)。GUI は Avalonia。
+       dotcl/Avalonia とも NuGet 経由のみ。dotcl repo への参照は持たない (#281)。 -->
   <PropertyGroup>
-    <OutputType>WinExe</OutputType>
-    <TargetFramework>net10.0-windows</TargetFramework>
-    <UseWPF>true</UseWPF>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Paalam</RootNamespace>
     <AssemblyName>paalam</AssemblyName>
+    <!-- experiments/ 配下 (spike の .cs / obj 等) を本体ビルドから除外。 -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);experiments\**</DefaultItemExcludes>
   </PropertyGroup>
 
-  <!-- dotcl は NuGet 経由のみ。dotcl repo への相対参照は持たない (#281)。 -->
   <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.0.4" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.0.4" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.0.4" />
     <PackageReference Include="DotCL.Runtime" Version="0.1.10" GeneratePathProperty="true" />
   </ItemGroup>
 
-  <!-- DotCL.Runtime 0.1.10 の contentFiles は buildAction=Content のみで
-       copyToOutput=true が無く、dotcl.core が出力にコピーされない
-       → FindCore() が見つけられない。復元先 ($(PkgDotCL_Runtime)) から明示コピーする。
-       (dotcl-internal #281 のドッグフード: パッケージ側を直すまでの回避策) -->
+  <!-- dotcl.core は DotCL.Runtime の contentFiles に copyToOutput=true が無いので
+       明示コピー (dotcl-internal #290 の回避策)。 -->
   <ItemGroup>
     <None Include="$(PkgDotCL_Runtime)\contentFiles\any\net10.0\dotcl.core"
           Link="dotcl.core" CopyToOutputDirectory="PreserveNewest" Visible="false" />
   </ItemGroup>
 
-  <!-- Lisp 本体を出力直下に main.lisp として配置 (実行時 LoadLispFile)。 -->
+  <!-- Lisp 本体と、define-class 用 contrib (NuGet に無いので vendor; #293) を出力直下へ。 -->
   <ItemGroup>
     <Content Include="src\main.lisp" Link="main.lisp">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="src\vendor-dotnet-class.lisp" Link="vendor-dotnet-class.lisp">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>

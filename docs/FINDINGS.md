@@ -122,11 +122,21 @@ host 経路では WPF が **単純名で解決**でき (Desktop ランタイム�
 - 自己完結 (前提不要・サイズ大): `dotnet publish -c Release -r win-arm64 --self-contained -o dist`。
 - NativeAOT は dotcl が実行時 Reflection.Emit するため**不可**。
 
-## クロスプラット退避路: Avalonia (スパイク実証済み 2026-06-17)
+## 本体を Avalonia に pivot (2026-06-17) — 現在の primary
 
-WPF は Windows 専用だが、dotcl 自体は Win/Mac/Linux クロスプラット。GUI だけが
-Windows に縛っている。**Avalonia (OSS, MIT, 無償)** に薄い UI 層を載せ替えれば
-クロスプラット化できる。`experiments/avalonia-spike/` で核心を実証:
+**paalam 本体は WPF から Avalonia (OSS, MIT, クロスプラット) に載せ替え済み。**
+`paalam.csproj` は `net10.0` (-windows 不要) + Avalonia 12.0.4 + DotCL.Runtime のみ。
+`book-*` 抽象はそのまま流用し、UI 層 (画像ロード / Window / KeyDown / 起動) だけ
+Avalonia 化した。DIR / ZIP 両 backend で起動・ページ送り・配布 (dotnet publish) を確認 (EXIT 0)。
+WPF 版はコミット履歴 (e360798〜abea19e) と `experiments/wpf-smoke|window-show.lisp` に残る。
+
+Avalonia 固有の追加摩擦:
+- **`Bitmap(string)` と `Bitmap(Stream)` を dotnet:new が区別できない** (overload 解決が
+  ラップ引数の代入可能性を見ない) → C# シム `Paalam.Imaging.BitmapFromStream(Stream)`
+  経由で zip エントリを読む。dotcl-internal #294。
+- dev 反復: Avalonia は host 必須なので script-mode の高速反復は無く、`dotnet run` が dev ループ。
+
+### スパイク (核心実証) — `experiments/avalonia-spike/`
 
 - `dotnet:static-generic` で `AppBuilder.Configure<App>()` を駆動 → **ジェネリック起動 OK**
 - ネイティブ Skia (SkiaSharp/HarfBuzz) は csproj+RID で自動解決 (cross-platform native 同梱)
