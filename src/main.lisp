@@ -499,17 +499,31 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
          (pending '()))                  ; (img . (source . page)) 未キャッシュ分
     (dotnet:invoke children "Clear")
     (loop for item in snapshot for i from 0 do
-      (let ((img (dotnet:new "Avalonia.Controls.Image")) (idx i)
+      (let ((img  (dotnet:new "Avalonia.Controls.Image"))
+            (cell (dotnet:new "Avalonia.Controls.Grid"))   ; img + × を重ねる
+            (xbtn (dotnet:new "Avalonia.Controls.Button"))
+            (idx i)
             (cached (%thumb-get (car item) (cdr item))))
         (dotnet:invoke img "set_Width" 200d0)
         (dotnet:invoke img "set_Stretch" (dotnet:static "Avalonia.Media.Stretch" "Uniform"))
-        (dotnet:invoke img "set_Margin" (dotnet:new "Avalonia.Thickness" 4d0))
-        (dotnet:add-event img "PointerPressed"
+        ;; × ボタン (右上)。クリックで削除。誤爆しにくいよう明示的に。
+        (dotnet:invoke xbtn "set_Content" "×")
+        (dotnet:invoke xbtn "set_HorizontalAlignment"
+                       (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Right"))
+        (dotnet:invoke xbtn "set_VerticalAlignment"
+                       (dotnet:static "Avalonia.Layout.VerticalAlignment" "Top"))
+        (dotnet:invoke xbtn "set_Padding" (dotnet:new "Avalonia.Thickness" 4d0 0d0))
+        (dotnet:invoke xbtn "set_Opacity" 0.75d0)
+        (dotnet:add-event xbtn "Click"
                           (lambda (s e) (declare (ignore s e)) (%clip-remove-at vw idx)))
+        (dotnet:invoke cell "set_Margin" (dotnet:new "Avalonia.Thickness" 4d0))
+        (let ((cc (dotnet:invoke cell "get_Children")))
+          (dotnet:invoke cc "Add" img)
+          (dotnet:invoke cc "Add" xbtn))
         (if cached
             (dotnet:invoke img "set_Source" cached)
             (push (cons img item) pending))
-        (dotnet:invoke children "Add" img)))
+        (dotnet:invoke children "Add" cell)))
     (when pending
       (setf pending (nreverse pending))
       (make-thread
