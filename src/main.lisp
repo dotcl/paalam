@@ -191,10 +191,19 @@
   "保存対象の (設定キー . 特殊変数シンボル)。ここに足すだけで永続化対象になる。")
 
 (defun %config-dir ()
-  (concatenate 'string
-               (dotnet:static "System.Environment" "GetFolderPath"
-                              (dotnet:static "System.Environment+SpecialFolder" "ApplicationData"))
-               "/paalam/"))
+  "per-user 設定ディレクトリ + paalam/。
+Win=%APPDATA%, Linux=~/.config (XDG) は GetFolderPath(ApplicationData) が正しく返す。
+macOS だけ GetFolderPath が ~/.config を返す .NET の癖があるので
+Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtime #40353)。"
+  (let ((base
+          (if (dotnet:static "System.OperatingSystem" "IsMacOS")
+              (concatenate 'string
+                           (dotnet:static "System.Environment" "GetFolderPath"
+                                          (dotnet:static "System.Environment+SpecialFolder" "UserProfile"))
+                           "/Library/Application Support")
+              (dotnet:static "System.Environment" "GetFolderPath"
+                             (dotnet:static "System.Environment+SpecialFolder" "ApplicationData")))))
+    (concatenate 'string base "/paalam/")))
 
 (defun %config-file () (concatenate 'string (%config-dir) "settings.lisp"))
 
