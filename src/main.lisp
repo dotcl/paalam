@@ -175,35 +175,105 @@
 ;;; viewer: book + 現在ページ + UI 結線
 ;;; ------------------------------------------------------------------
 
-(defstruct viewer book (index 0) image window)
-
+;;; --- 表示設定 (将来のカスタマイズ UI / 設定ファイルの対象) ---------
 (defparameter *page-direction* :rtl
   "綴じ方向。:rtl = NeeView 既定 (右開き/漫画) で ← が次・→ が前。:ltr は逆。")
+(defparameter *spread* t
+  "見開き表示。t = 2 ページ並べ、nil = 単ページ。")
+(defparameter *first-page-single* t
+  "見開き時、先頭ページ (表紙) を単独表示する (漫画の慣習)。")
 
-(defun show-page (vw i)
-  (let* ((book (viewer-book vw))
-         (n (book-page-count book)))
-    (when (plusp n)
-      (let ((i (max 0 (min i (1- n)))))
-        (setf (viewer-index vw) i)
-        (dotnet:invoke (viewer-image vw) "set_Source" (book-load-image book i))
-        (dotnet:invoke (viewer-window vw) "set_Title"
-                       (format nil "paalam — ~a (~d/~d)"
-                               (book-page-name book i) (1+ i) n))))))
+;;; viewer: book + 見開き単位 (spreads) + 現在位置 + 2 枚の Image
+;;; spreads = 各見開きの page-index リスト (1 or 2 個) の vector。
+;;; 単ページ/見開きを同じ仕組みで扱う (単ページ時は全要素 1 個)。
+(defstruct viewer book spreads (sindex 0) window left-img right-img)
+
+(defun compute-spreads (n)
+  "n ページを *spread* / *first-page-single* に従って見開き単位へ分割。"
+  (let ((spreads '()) (i 0))
+    (cond
+      ((<= n 0))
+      ((not *spread*)
+       (loop for k from 0 below n do (push (list k) spreads)))
+      (t
+       (when *first-page-single*
+         (push (list 0) spreads) (setf i 1))
+       (loop while (< i n) do
+         (if (< (1+ i) n)
+             (progn (push (list i (1+ i)) spreads) (incf i 2))
+             (progn (push (list i) spreads) (incf i))))))
+    (coerce (nreverse spreads) 'vector)))
+
+(defun spread-index-of (spreads page)
+  "page を含む見開きの index (見つからなければ 0)。"
+  (or (position-if (lambda (pages) (member page pages)) spreads) 0))
+
+(defun %halign (name) (dotnet:static "Avalonia.Layout.HorizontalAlignment" name))
+
+(defun %place-image (img source col span halign)
+  (dotnet:invoke img "set_Source" source)
+  (dotnet:invoke img "set_IsVisible" (and source t))
+  (dotnet:static "Avalonia.Controls.Grid" "SetColumn" img col)
+  (dotnet:static "Avalonia.Controls.Grid" "SetColumnSpan" img span)
+  (dotnet:invoke img "set_HorizontalAlignment" (%halign halign)))
+
+(defun %spread-title (vw pages)
+  (let* ((book (viewer-book vw)) (n (book-page-count book)))
+    (if (= (length pages) 1)
+        (format nil "paalam — ~a (~d/~d)"
+                (book-page-name book (first pages)) (1+ (first pages)) n)
+        (destructuring-bind (lo hi) pages
+          (format nil "paalam — ~a｜~a (~d-~d/~d)"
+                  (book-page-name book lo) (book-page-name book hi) (1+ lo) (1+ hi) n)))))
+
+(defun show-spread (vw)
+  "現在の見開きを描画 (sindex は範囲クランプ)。"
+  (let* ((spreads (viewer-spreads vw)) (m (length spreads)))
+    (when (plusp m)
+      (let* ((si (max 0 (min (viewer-sindex vw) (1- m))))
+             (pages (aref spreads si))
+             (book (viewer-book vw))
+             (li (viewer-left-img vw))
+             (ri (viewer-right-img vw)))
+        (setf (viewer-sindex vw) si)
+        (if (= (length pages) 1)
+            (progn
+              (%place-image li (book-load-image book (first pages)) 0 2 "Center")
+              (%place-image ri nil 1 1 "Left"))
+            (destructuring-bind (lo hi) pages
+              ;; rtl(右開き): 下位 index=lo を右に、hi を左に。ltr は逆。
+              (let ((left-page  (if (eq *page-direction* :rtl) hi lo))
+                    (right-page (if (eq *page-direction* :rtl) lo hi)))
+                (%place-image li (book-load-image book left-page)  0 1 "Right")
+                (%place-image ri (book-load-image book right-page) 1 1 "Left"))))
+        (dotnet:invoke (viewer-window vw) "set_Title" (%spread-title vw pages))))))
+
+(defun %recompute (vw keep-page)
+  "spreads を計算し直し、keep-page を含む見開きへ位置を合わせて再描画。"
+  (setf (viewer-spreads vw) (compute-spreads (book-page-count (viewer-book vw))))
+  (setf (viewer-sindex vw) (spread-index-of (viewer-spreads vw) keep-page))
+  (show-spread vw))
+
+(defun %cur-page (vw)
+  (let ((sp (viewer-spreads vw)))
+    (if (plusp (length sp)) (first (aref sp (viewer-sindex vw))) 0)))
 
 (defun %on-key (vw e)
-  "Window KeyDown ハンドラ。←/→/PageUp/PageDown/Space/Home/End でページ送り。
-左右矢印は *page-direction* で反転。"
+  "Window KeyDown。←/→/PageUp/Down/Space/Home/End で送り、S=見開き切替, D=綴じ方向切替。"
   (let ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString")))
-    (flet ((next () (show-page vw (1+ (viewer-index vw))))
-           (prev () (show-page vw (1- (viewer-index vw)))))
+    (flet ((nexts () (incf (viewer-sindex vw)) (show-spread vw))
+           (prevs () (decf (viewer-sindex vw)) (show-spread vw)))
       (cond
-        ((member kn '("PageDown" "Next" "Space") :test #'string=) (next))
-        ((member kn '("PageUp" "Prior" "Back") :test #'string=) (prev))
-        ((string= kn "Left")  (if (eq *page-direction* :rtl) (next) (prev)))
-        ((string= kn "Right") (if (eq *page-direction* :rtl) (prev) (next)))
-        ((string= kn "Home") (show-page vw 0))
-        ((string= kn "End")  (show-page vw (1- (book-page-count (viewer-book vw)))))))))
+        ((member kn '("PageDown" "Next" "Space") :test #'string=) (nexts))
+        ((member kn '("PageUp" "Prior" "Back") :test #'string=) (prevs))
+        ((string= kn "Left")  (if (eq *page-direction* :rtl) (nexts) (prevs)))
+        ((string= kn "Right") (if (eq *page-direction* :rtl) (prevs) (nexts)))
+        ((string= kn "Home") (setf (viewer-sindex vw) 0) (show-spread vw))
+        ((string= kn "End")  (setf (viewer-sindex vw) (1- (length (viewer-spreads vw))))
+                             (show-spread vw))
+        ((string= kn "S") (setf *spread* (not *spread*)) (%recompute vw (%cur-page vw)))
+        ((string= kn "D") (setf *page-direction* (if (eq *page-direction* :rtl) :ltr :rtl))
+                          (show-spread vw))))))
 
 ;;; ------------------------------------------------------------------
 ;;; ウィンドウ / アプリ (Avalonia)
@@ -222,20 +292,38 @@
       *default-image*))
 
 (defun build-main-window ()
-  "現在の *target-path* の本を開き、Avalonia Window を返す (呼び出しスレッド上で構築)。"
+  "現在の *target-path* の本を開き、見開き対応の Avalonia Window を返す
+(呼び出しスレッド上で構築)。2 列 Grid に 2 枚の Image を中央で突き合わせる。"
   (multiple-value-bind (book start) (open-book (%resolve-path *target-path*))
-    (let* ((win (dotnet:new "Avalonia.Controls.Window"))
-           (img (dotnet:new "Avalonia.Controls.Image"))
-           (vw  (make-viewer :book book :index start :image img :window win)))
-      (dotnet:invoke img "set_Stretch" (dotnet:static "Avalonia.Media.Stretch" "Uniform"))
-      (dotnet:invoke win "set_Content" img)
-      (dotnet:invoke win "set_Width"  1000d0)
-      (dotnet:invoke win "set_Height" 720d0)
+    (let* ((win  (dotnet:new "Avalonia.Controls.Window"))
+           (grid (dotnet:new "Avalonia.Controls.Grid"))
+           (li   (dotnet:new "Avalonia.Controls.Image"))
+           (ri   (dotnet:new "Avalonia.Controls.Image"))
+           (spreads (compute-spreads (book-page-count book)))
+           (vw   (make-viewer :book book :spreads spreads
+                              :sindex (spread-index-of spreads start)
+                              :window win :left-img li :right-img ri)))
+      ;; 2 つの star 列 (既定 ColumnDefinition = 1*)
+      (let ((cols (dotnet:invoke grid "get_ColumnDefinitions")))
+        (dotnet:invoke cols "Add" (dotnet:new "Avalonia.Controls.ColumnDefinition"))
+        (dotnet:invoke cols "Add" (dotnet:new "Avalonia.Controls.ColumnDefinition")))
+      ;; 両 Image: Uniform フィット・縦中央
+      (dolist (im (list li ri))
+        (dotnet:invoke im "set_Stretch" (dotnet:static "Avalonia.Media.Stretch" "Uniform"))
+        (dotnet:invoke im "set_VerticalAlignment"
+                       (dotnet:static "Avalonia.Layout.VerticalAlignment" "Center")))
+      (let ((children (dotnet:invoke grid "get_Children")))
+        (dotnet:invoke children "Add" li)
+        (dotnet:invoke children "Add" ri))
+      (dotnet:invoke win "set_Content" grid)
+      (dotnet:invoke win "set_Background" (dotnet:static "Avalonia.Media.Brushes" "Black"))
+      (dotnet:invoke win "set_Width"  1200d0)
+      (dotnet:invoke win "set_Height" 800d0)
       (dotnet:add-event win "KeyDown"
                         (lambda (s e) (declare (ignore s)) (%on-key vw e)))
       (dotnet:add-event win "Closed"
                         (lambda (s e) (declare (ignore s e)) (book-close book)))
-      (show-page vw start)
+      (show-spread vw)
       win)))
 
 (defun %maybe-autoclose (life)

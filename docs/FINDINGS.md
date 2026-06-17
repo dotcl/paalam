@@ -163,8 +163,12 @@ Avalonia 固有の罠:
    (←/→/PageUp/Down/Space/Home/End)。注: WPF Key.ToString は PageDown→"Next"、
    PageUp→"PageUp" と非対称なので handler は両名を見る。単一画像は親フォルダを
    本にして初期ページに (NeeView 挙動)。
-3. Fit モード (幅/高/全体) + ホイールズーム + ドラッグパン
-4. ZIP 書庫を「本」として開く (`System.IO.Compression`, 標準同梱)
-5. 見開き 2 ページ表示 + 綴じ方向 (右/左)
-6. 本棚 (フォルダツリー) + サムネイル + 履歴 + ブックマーク
-7. (拡張) RAR/7z = SharpCompress, PDF = Docnet, WebP/AVIF = SkiaSharp (NuGet)
+3. ✅ ZIP/CBZ 書庫を「本」として開く (`System.IO.Compression`, 標準同梱)
+4. ✅ 見開き 2 ページ表示 + 綴じ方向 (右/左)。Avalonia の 2 列 Grid に Image を 2 枚
+   中央で突き合わせ。`compute-spreads` が *spread* / *first-page-single* に従い
+   見開き単位へ分割 (表紙単独・奇数末尾も処理)。単/見開きは同じ仕組み。
+   キー: S=見開き切替, D=綴じ方向切替。**設定は defparameter (*page-direction* /
+   *spread* / *first-page-single*) として切り出し済み — 将来の設定 UI / 設定ファイルの土台。**
+5. Fit モード (幅/高/全体) + ホイールズーム + ドラッグパン
+6. 本棚 (フォルダツリー) + サムネイル + 履歴 + ブックマーク + 設定 UI
+7. (拡張) RAR/7z = SharpCompress, PDF = Docnet, AVIF 等 = 追加 codec (NuGet)
