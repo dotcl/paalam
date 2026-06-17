@@ -478,6 +478,62 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
         (maphash (lambda (k v) (declare (ignore k)) (ignore-errors (book-close v))) books))
       out)))
 
+;;; 素材ペイン (#18 Phase 2): 集めたページをサムネ一覧で表示。サムネは背景
+;;; スレッドで非同期ロードして後から差し込む (NAS でも UI を固めない)。
+
+(defun %clip-remove-at (vw idx)
+  "idx 番目の素材を取り除いてペイン更新。"
+  (setf *clip* (loop for e in *clip* for i from 0 unless (= i idx) collect e))
+  (save-clip)
+  (%update-title vw)
+  (%rebuild-clip-pane vw))
+
+(defun %rebuild-clip-pane (vw)
+  "clip-stack を作り直す。空 Image を即配置し、背景でサムネをロードして差し込む。"
+  (let* ((stack (viewer-clip-stack vw))
+         (children (dotnet:invoke stack "get_Children"))
+         (snapshot (copy-list *clip*))
+         (imgs '()))
+    (dotnet:invoke children "Clear")
+    (loop for item in snapshot for i from 0 do
+      (let ((img (dotnet:new "Avalonia.Controls.Image")) (idx i))
+        (dotnet:invoke img "set_Width" 200d0)
+        (dotnet:invoke img "set_Stretch" (dotnet:static "Avalonia.Media.Stretch" "Uniform"))
+        (dotnet:invoke img "set_Margin" (dotnet:new "Avalonia.Thickness" 4d0))
+        (dotnet:add-event img "PointerPressed"
+                          (lambda (s e) (declare (ignore s e)) (%clip-remove-at vw idx)))
+        (dotnet:invoke children "Add" img)
+        (push img imgs)))
+    (setf imgs (nreverse imgs))
+    (when snapshot
+      (make-thread
+       (lambda ()
+         (let ((books (make-hash-table :test 'equal)))
+           (unwind-protect
+                (loop for item in snapshot for img in imgs do
+                  (ignore-errors
+                    (let* ((src (car item)) (page (cdr item))
+                           (book (or (gethash src books)
+                                     (setf (gethash src books) (open-book src))))
+                           (bmp (book-load-image book page)))
+                      (when bmp
+                        (%ui-post (lambda () (dotnet:invoke img "set_Source" bmp)))))))
+             (maphash (lambda (k v) (declare (ignore k)) (ignore-errors (book-close v))) books))))
+       :name "paalam-thumbs"))))
+
+(defun %pane-export (vw)
+  "素材を zip に掃き出してクリア + ペイン更新。"
+  (let ((out (%export-clip)))
+    (when out
+      (clip-clear) (%update-title vw) (%rebuild-clip-pane vw)
+      (dotnet:invoke (viewer-window vw) "set_Title" (format nil "掃き出し完了 → ~a" out)))))
+
+(defun %toggle-clip-pane (vw)
+  (let* ((pane (viewer-clip-pane vw))
+         (vis (dotnet:invoke pane "get_IsVisible")))
+    (dotnet:invoke pane "set_IsVisible" (not vis))
+    (unless vis (%rebuild-clip-pane vw))))
+
 ;;; ------------------------------------------------------------------
 ;;; 先読みローダー (#17): 単一ワーカースレッドが書庫アクセスを一手に担い、
 ;;; デコード済み Bitmap を cache。UI は cache を読むだけ。ロード完了は
@@ -610,7 +666,8 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
 ;;; loader = 先読みローダー。
 (defstruct viewer book spreads (sindex 0) window left-img right-img source loader
            viewport scale-xf trans-xf (zoom 1d0) (tx 0d0) (ty 0d0)
-           (dragging nil) (lx 0d0) (ly 0d0))
+           (dragging nil) (lx 0d0) (ly 0d0)
+           clip-pane clip-stack)        ; 素材ペイン (#18 Phase 2)
 
 (defun %reopen (vw)
   "source を開き直して book/loader/spreads を差し替える (再帰トグル等)。現在ページは維持。"
@@ -860,13 +917,10 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
          (let ((sp (viewer-spreads vw)))
            (when (plusp (length sp))
              (dolist (p (aref sp (viewer-sindex vw))) (clip-add (viewer-source vw) p))))
-         (%update-title vw))
-        ((string= kn "E")                                            ; 掃き出し (zip)
-         (let ((out (%export-clip)))
-           (when out
-             (clip-clear) (%update-title vw)
-             (dotnet:invoke (viewer-window vw) "set_Title"
-                            (format nil "掃き出し完了 → ~a" out)))))))))
+         (%update-title vw)
+         (when (dotnet:invoke (viewer-clip-pane vw) "get_IsVisible") (%rebuild-clip-pane vw)))
+        ((string= kn "P") (%toggle-clip-pane vw))                     ; 素材ペイン開閉
+        ((string= kn "E") (%pane-export vw))))))                      ; 掃き出し (zip)
 
 ;;; ------------------------------------------------------------------
 ;;; ウィンドウ / アプリ (Avalonia)
@@ -927,7 +981,35 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
       ;; viewport (clip) > stage
       (dotnet:invoke vport "set_ClipToBounds" t)
       (dotnet:invoke vport "set_Child" grid)
-      (dotnet:invoke win "set_Content" vport)
+      ;; root: [viewport* | 素材ペイン(Auto, 既定非表示)] (#18 Phase 2)
+      (let* ((root  (dotnet:new "Avalonia.Controls.Grid"))
+             (pane  (dotnet:new "Avalonia.Controls.DockPanel"))
+             (ebtn  (dotnet:new "Avalonia.Controls.Button"))
+             (scr   (dotnet:new "Avalonia.Controls.ScrollViewer"))
+             (stack (dotnet:new "Avalonia.Controls.StackPanel")))
+        (let ((cols (dotnet:invoke root "get_ColumnDefinitions"))
+              (cd   (dotnet:new "Avalonia.Controls.ColumnDefinition")))
+          (dotnet:invoke cols "Add" (dotnet:new "Avalonia.Controls.ColumnDefinition")) ; star
+          (dotnet:invoke cd "set_Width" (dotnet:static "Avalonia.Controls.GridLength" "Auto"))
+          (dotnet:invoke cols "Add" cd))
+        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" vport 0)
+        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" pane  1)
+        (dotnet:invoke pane "set_Width" 220d0)
+        (dotnet:invoke pane "set_IsVisible" nil)
+        (dotnet:invoke pane "set_Background" (dotnet:static "Avalonia.Media.Brushes" "DimGray"))
+        (dotnet:invoke ebtn "set_Content" "掃き出し (zip)")
+        (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" ebtn
+                       (dotnet:static "Avalonia.Controls.Dock" "Top"))
+        (dotnet:add-event ebtn "Click" (lambda (s e) (declare (ignore s e)) (%pane-export vw)))
+        (dotnet:invoke scr "set_Content" stack)
+        (let ((pc (dotnet:invoke pane "get_Children")))
+          (dotnet:invoke pc "Add" ebtn)
+          (dotnet:invoke pc "Add" scr))
+        (let ((rc (dotnet:invoke root "get_Children")))
+          (dotnet:invoke rc "Add" vport)
+          (dotnet:invoke rc "Add" pane))
+        (setf (viewer-clip-pane vw) pane (viewer-clip-stack vw) stack)
+        (dotnet:invoke win "set_Content" root))
       (dotnet:invoke win "set_Background" (dotnet:static "Avalonia.Media.Brushes" "Black"))
       (dotnet:invoke win "set_Width"  1200d0)
       (dotnet:invoke win "set_Height" 800d0)
