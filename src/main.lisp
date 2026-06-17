@@ -1055,15 +1055,29 @@ UI スレッドで呼ぶこと。"
 
 (defun %command (id) (find id *commands* :key #'command-id))
 
-;;; *keymap*: キー名 (Avalonia Key.ToString) → コマンド id。既定は各コマンドの
-;;; keys から構築。段階2でユーザ設定の上書き/永続化を被せる。
-(defparameter *keymap* (make-hash-table :test 'equal))
-(defun reset-keymap ()
-  "*keymap* を各コマンドの既定キーで作り直す。"
+;;; キー割当 (#10 段階2): ユーザ上書きを *keybinds* に持ち、無いコマンドは既定キー。
+;;; *keymap* (キー名→id) はそこから構築。keymap.lisp に永続化 (設定ウィンドウで編集)。
+(defparameter *keybinds* nil
+  "ユーザ上書き ((command-id . (key ...)) ...)。エントリの無いコマンドは既定キー。")
+(defparameter *keymap* (make-hash-table :test 'equal)
+  "キー名 (Avalonia Key.ToString) → コマンド id。*keybinds*+既定から構築。")
+
+(defun %effective-keys (c)
+  "コマンド C の実効キー (上書きがあればそれ、無ければ既定)。"
+  (let ((o (assoc (command-id c) *keybinds*)))
+    (if o (cdr o) (command-keys c))))
+
+(defun rebuild-keymap ()
+  "*keybinds*+既定から *keymap* を作り直す。"
   (clrhash *keymap*)
   (dolist (c *commands*)
-    (dolist (k (command-keys c)) (setf (gethash k *keymap*) (command-id c)))))
-(reset-keymap)
+    (dolist (k (%effective-keys c)) (setf (gethash k *keymap*) (command-id c)))))
+(rebuild-keymap)
+
+(defun load-keybinds ()
+  (let ((d (%read-state "keymap.lisp"))) (when (listp d) (setf *keybinds* d)))
+  (rebuild-keymap))
+(defun save-keybinds () (%write-state "keymap.lisp" *keybinds*))
 
 (defun %command-primary-key (id)
   "ID の代表キー (メニュー表示用; 既定キー順を優先、無ければ keymap から拾う)。"
@@ -1187,6 +1201,31 @@ UI スレッドで呼ぶこと。"
            (%recompute vw (%cur-page vw)))
           (t (show-spread vw)))))
 
+(defparameter *modifier-keys*
+  '("LeftShift" "RightShift" "LeftCtrl" "RightCtrl" "LeftAlt" "RightAlt" "LWin" "RWin")
+  "単体では割当に使わない修飾キー (capture 中は無視して本命キーを待つ)。")
+
+(defun %capture-key (owner on-key)
+  "小窓を出し、次に押されたキー名を ON-KEY に渡して閉じる。Esc=キャンセル、修飾キー単体は無視。"
+  (let ((w  (dotnet:new "Avalonia.Controls.Window"))
+        (tb (dotnet:new "Avalonia.Controls.TextBlock")))
+    (dotnet:invoke tb "set_Text" "割り当てるキーを押してください (Esc でキャンセル)")
+    (dotnet:invoke tb "set_Margin" (dotnet:new "Avalonia.Thickness" 24d0))
+    (dotnet:invoke w "set_Title" "キー割当")
+    (dotnet:invoke w "set_SizeToContent"
+                   (dotnet:static "Avalonia.Controls.SizeToContent" "WidthAndHeight"))
+    (dotnet:invoke w "set_WindowStartupLocation"
+                   (dotnet:static "Avalonia.Controls.WindowStartupLocation" "CenterOwner"))
+    (dotnet:invoke w "set_Content" tb)
+    (dotnet:add-event w "KeyDown"
+      (lambda (s e) (declare (ignore s))
+        (let ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString")))
+          (unless (member kn *modifier-keys* :test #'string=)
+            (dotnet:invoke e "set_Handled" t)
+            (dotnet:invoke w "Close")
+            (unless (string= kn "Escape") (funcall on-key kn))))))
+    (dotnet:invoke w "ShowDialog" owner)))
+
 (defun %open-settings (vw)
   (let* ((owner (viewer-window vw))
          (swin  (dotnet:new "Avalonia.Controls.Window"))
@@ -1197,39 +1236,92 @@ UI スレッドで呼ぶこと。"
          (cb-rec    (%s-checkbox *recursive*))
          (tb-cache  (%s-textbox *cache-size*))
          (tb-pf     (%s-textbox *prefetch-ahead*))
-         (tb-th     (%s-textbox *loader-threads*)))
+         (tb-th     (%s-textbox *loader-threads*))
+         ;; キー割当の作業用コピー ((id . (key ...)) ...)。OK まで *keybinds* は触らない。
+         (work (mapcar (lambda (c) (cons (command-id c) (copy-list (%effective-keys c)))) *commands*))
+         (kb-stack (dotnet:new "Avalonia.Controls.StackPanel")))
     (let ((items (dotnet:invoke combo "get_Items")))
       (dotnet:invoke items "Add" "右開き (RTL)")
       (dotnet:invoke items "Add" "左開き (LTR)"))
     (dotnet:invoke combo "set_SelectedIndex" (if (eq *page-direction* :rtl) 0 1))
     (dotnet:invoke panel "set_Margin" (dotnet:new "Avalonia.Thickness" 16d0))
-    (flet ((add (x) (dotnet:invoke (dotnet:invoke panel "get_Children") "Add" x)))
-      (add (%s-header "表示"))
-      (add (%s-row "綴じ方向" combo))
-      (add (%s-row "見開き" cb-spread))
-      (add (%s-row "表紙を単独表示" cb-fps))
-      (add (%s-row "サブフォルダも再帰収集" cb-rec))
-      (add (%s-header "性能 (先読み)"))
-      (add (%s-row "キャッシュ最大ページ数" tb-cache))
-      (add (%s-row "先読み見開き数" tb-pf))
-      (add (%s-row "ローダースレッド数" tb-th))
-      (let ((btns (dotnet:new "Avalonia.Controls.StackPanel")))
-        (dotnet:invoke btns "set_Orientation"
-                       (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
-        (dotnet:invoke btns "set_HorizontalAlignment"
-                       (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Right"))
-        (dotnet:invoke btns "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 16d0 0d0 0d0))
-        (let ((bc (dotnet:invoke btns "get_Children")))
-          (dotnet:invoke bc "Add"
-            (%s-button "キャンセル" (lambda () (dotnet:invoke swin "Close"))))
-          (dotnet:invoke bc "Add"
-            (%s-button "OK"
-              (lambda ()
-                (%settings-apply vw cb-spread cb-fps cb-rec combo tb-cache tb-pf tb-th)
-                (dotnet:invoke swin "Close")))))
-        (add btns)))
+    (labels
+        ((keys-str (ks)
+           (if ks (format nil "~{~a~^ / ~}" (mapcar #'%key-label ks)) "(なし)"))
+         (assign (id k)
+           ;; 後勝ち: 同じキーを持つ他コマンドから外し、このコマンドの唯一の割当にする。
+           (dolist (e work)
+             (unless (eq (car e) id) (setf (cdr e) (remove k (cdr e) :test #'string=))))
+           (setf (cdr (assoc id work)) (list k))
+           (refresh))
+         (clear (id) (setf (cdr (assoc id work)) nil) (refresh))
+         (refresh ()
+           (let ((ch (dotnet:invoke kb-stack "get_Children")))
+             (dotnet:invoke ch "Clear")
+             (dolist (c *commands*)
+               (let* ((id   (command-id c))
+                      (row  (dotnet:new "Avalonia.Controls.DockPanel"))
+                      (lbl  (dotnet:new "Avalonia.Controls.TextBlock"))
+                      (kt   (dotnet:new "Avalonia.Controls.TextBlock"))
+                      (bchg (%s-button "変更" (lambda () (%capture-key swin (lambda (k) (assign id k))))))
+                      (bclr (%s-button "解除" (lambda () (clear id)))))
+                 (dotnet:invoke lbl "set_Text" (command-label c))
+                 (dotnet:invoke lbl "set_Width" 130d0)
+                 (dotnet:invoke lbl "set_VerticalAlignment"
+                                (dotnet:static "Avalonia.Layout.VerticalAlignment" "Center"))
+                 (dotnet:invoke kt "set_Text" (keys-str (cdr (assoc id work))))
+                 (dotnet:invoke kt "set_VerticalAlignment"
+                                (dotnet:static "Avalonia.Layout.VerticalAlignment" "Center"))
+                 (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" lbl
+                                (dotnet:static "Avalonia.Controls.Dock" "Left"))
+                 (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" bclr
+                                (dotnet:static "Avalonia.Controls.Dock" "Right"))
+                 (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" bchg
+                                (dotnet:static "Avalonia.Controls.Dock" "Right"))
+                 (dotnet:invoke row "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 2d0))
+                 (let ((rc (dotnet:invoke row "get_Children")))
+                   (dotnet:invoke rc "Add" lbl)
+                   (dotnet:invoke rc "Add" bclr)
+                   (dotnet:invoke rc "Add" bchg)
+                   (dotnet:invoke rc "Add" kt))
+                 (dotnet:invoke ch "Add" row))))))
+      (flet ((add (x) (dotnet:invoke (dotnet:invoke panel "get_Children") "Add" x)))
+        (add (%s-header "表示"))
+        (add (%s-row "綴じ方向" combo))
+        (add (%s-row "見開き" cb-spread))
+        (add (%s-row "表紙を単独表示" cb-fps))
+        (add (%s-row "サブフォルダも再帰収集" cb-rec))
+        (add (%s-header "性能 (先読み)"))
+        (add (%s-row "キャッシュ最大ページ数" tb-cache))
+        (add (%s-row "先読み見開き数" tb-pf))
+        (add (%s-row "ローダースレッド数" tb-th))
+        (add (%s-header "キー割当 (後勝ち: 既存割当は自動で外れる)"))
+        (refresh)
+        (let ((scr (dotnet:new "Avalonia.Controls.ScrollViewer")))
+          (dotnet:invoke scr "set_MaxHeight" 240d0)
+          (dotnet:invoke scr "set_Content" kb-stack)
+          (add scr))
+        (let ((btns (dotnet:new "Avalonia.Controls.StackPanel")))
+          (dotnet:invoke btns "set_Orientation"
+                         (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
+          (dotnet:invoke btns "set_HorizontalAlignment"
+                         (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Right"))
+          (dotnet:invoke btns "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 16d0 0d0 0d0))
+          (let ((bc (dotnet:invoke btns "get_Children")))
+            (dotnet:invoke bc "Add"
+              (%s-button "キャンセル" (lambda () (dotnet:invoke swin "Close"))))
+            (dotnet:invoke bc "Add"
+              (%s-button "OK"
+                (lambda ()
+                  (%settings-apply vw cb-spread cb-fps cb-rec combo tb-cache tb-pf tb-th)
+                  (setf *keybinds*
+                        (mapcar (lambda (e) (cons (car e) (copy-list (cdr e)))) work))
+                  (rebuild-keymap)
+                  (save-keybinds)
+                  (dotnet:invoke swin "Close")))))
+          (add btns))))
     (dotnet:invoke swin "set_Title" "設定")
-    (dotnet:invoke swin "set_Width" 400d0)
+    (dotnet:invoke swin "set_Width" 460d0)
     (dotnet:invoke swin "set_SizeToContent"
                    (dotnet:static "Avalonia.Controls.SizeToContent" "Height"))
     (dotnet:invoke swin "set_WindowStartupLocation"
@@ -1445,6 +1537,7 @@ UI スレッドで呼ぶこと。"
   (setf *debug* (let ((e (dotnet:static "System.Environment" "GetEnvironmentVariable" "PAALAM_DEBUG")))
                   (and e (plusp (length e)) t)))
   (load-settings)
+  (load-keybinds)
   (load-history)
   (load-bookmarks)
   (load-clip)
