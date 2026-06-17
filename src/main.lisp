@@ -186,7 +186,21 @@
 ;;; viewer: book + 見開き単位 (spreads) + 現在位置 + 2 枚の Image
 ;;; spreads = 各見開きの page-index リスト (1 or 2 個) の vector。
 ;;; 単ページ/見開きを同じ仕組みで扱う (単ページ時は全要素 1 個)。
-(defstruct viewer book spreads (sindex 0) window left-img right-img)
+;;; zoom/tx/ty + scale-xf/trans-xf は stage の RenderTransform (ズーム/パン)。
+(defstruct viewer book spreads (sindex 0) window left-img right-img
+           viewport scale-xf trans-xf (zoom 1d0) (tx 0d0) (ty 0d0)
+           (dragging nil) (lx 0d0) (ly 0d0))
+
+(defun apply-transform (vw)
+  (dotnet:invoke (viewer-scale-xf vw) "set_ScaleX" (viewer-zoom vw))
+  (dotnet:invoke (viewer-scale-xf vw) "set_ScaleY" (viewer-zoom vw))
+  (dotnet:invoke (viewer-trans-xf vw) "set_X" (viewer-tx vw))
+  (dotnet:invoke (viewer-trans-xf vw) "set_Y" (viewer-ty vw)))
+
+(defun reset-view (vw)
+  "ズーム/パンをフィット (等倍・原点) に戻す。"
+  (setf (viewer-zoom vw) 1d0 (viewer-tx vw) 0d0 (viewer-ty vw) 0d0)
+  (apply-transform vw))
 
 (defun compute-spreads (n)
   "n ページを *spread* / *first-page-single* に従って見開き単位へ分割。"
@@ -246,7 +260,8 @@
                     (right-page (if (eq *page-direction* :rtl) lo hi)))
                 (%place-image li (book-load-image book left-page)  0 1 "Right")
                 (%place-image ri (book-load-image book right-page) 1 1 "Left"))))
-        (dotnet:invoke (viewer-window vw) "set_Title" (%spread-title vw pages))))))
+        (dotnet:invoke (viewer-window vw) "set_Title" (%spread-title vw pages))
+        (reset-view vw)))))
 
 (defun %recompute (vw keep-page)
   "spreads を計算し直し、keep-page を含む見開きへ位置を合わせて再描画。"
@@ -258,8 +273,44 @@
   (let ((sp (viewer-spreads vw)))
     (if (plusp (length sp)) (first (aref sp (viewer-sindex vw))) 0)))
 
+(defparameter *zoom-step* 1.2d0 "ホイール 1 ノッチあたりの倍率。")
+(defparameter *zoom-min* 0.1d0)
+(defparameter *zoom-max* 10d0)
+
+(defun %pos-xy (e elem)
+  "PointerEventArgs の elem 基準座標を (values x y) で。"
+  (let ((p (dotnet:invoke e "GetPosition" elem)))
+    (values (dotnet:invoke p "get_X") (dotnet:invoke p "get_Y"))))
+
+(defun %on-wheel (vw e)
+  "ホイールズーム。カーソル位置を固定点にして拡大縮小する。"
+  (let* ((dy (dotnet:invoke (dotnet:invoke e "get_Delta") "get_Y"))
+         (s  (viewer-zoom vw))
+         (s2 (max *zoom-min* (min *zoom-max* (* s (if (> dy 0) *zoom-step* (/ 1d0 *zoom-step*)))))))
+    (multiple-value-bind (cx cy) (%pos-xy e (viewer-viewport vw))
+      ;; t' = c - (s'/s)(c - t)  (origin top-left, screen = s*p + t)
+      (let ((r (/ s2 s)))
+        (setf (viewer-tx vw) (- cx (* r (- cx (viewer-tx vw))))
+              (viewer-ty vw) (- cy (* r (- cy (viewer-ty vw))))
+              (viewer-zoom vw) s2)))
+    (apply-transform vw)))
+
+(defun %on-press (vw e)
+  (multiple-value-bind (x y) (%pos-xy e (viewer-viewport vw))
+    (setf (viewer-dragging vw) t (viewer-lx vw) x (viewer-ly vw) y)))
+
+(defun %on-move (vw e)
+  (when (viewer-dragging vw)
+    (multiple-value-bind (x y) (%pos-xy e (viewer-viewport vw))
+      (incf (viewer-tx vw) (- x (viewer-lx vw)))
+      (incf (viewer-ty vw) (- y (viewer-ly vw)))
+      (setf (viewer-lx vw) x (viewer-ly vw) y)
+      (apply-transform vw))))
+
+(defun %on-release (vw e) (declare (ignore e)) (setf (viewer-dragging vw) nil))
+
 (defun %on-key (vw e)
-  "Window KeyDown。←/→/PageUp/Down/Space/Home/End で送り、S=見開き切替, D=綴じ方向切替。"
+  "Window KeyDown。←/→/PageUp/Down/Space/Home/End で送り、S=見開き切替, D=綴じ方向切替, 0=フィット。"
   (let ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString")))
     (flet ((nexts () (incf (viewer-sindex vw)) (show-spread vw))
            (prevs () (decf (viewer-sindex vw)) (show-spread vw)))
@@ -273,7 +324,8 @@
                              (show-spread vw))
         ((string= kn "S") (setf *spread* (not *spread*)) (%recompute vw (%cur-page vw)))
         ((string= kn "D") (setf *page-direction* (if (eq *page-direction* :rtl) :ltr :rtl))
-                          (show-spread vw))))))
+                          (show-spread vw))
+        ((member kn '("D0" "NumPad0") :test #'string=) (reset-view vw))))))
 
 ;;; ------------------------------------------------------------------
 ;;; ウィンドウ / アプリ (Avalonia)
@@ -295,19 +347,23 @@
   "現在の *target-path* の本を開き、見開き対応の Avalonia Window を返す
 (呼び出しスレッド上で構築)。2 列 Grid に 2 枚の Image を中央で突き合わせる。"
   (multiple-value-bind (book start) (open-book (%resolve-path *target-path*))
-    (let* ((win  (dotnet:new "Avalonia.Controls.Window"))
-           (grid (dotnet:new "Avalonia.Controls.Grid"))
-           (li   (dotnet:new "Avalonia.Controls.Image"))
-           (ri   (dotnet:new "Avalonia.Controls.Image"))
+    (let* ((win   (dotnet:new "Avalonia.Controls.Window"))
+           (vport (dotnet:new "Avalonia.Controls.Border"))   ; クリップ用ビューポート
+           (grid  (dotnet:new "Avalonia.Controls.Grid"))     ; 見開き stage
+           (li    (dotnet:new "Avalonia.Controls.Image"))
+           (ri    (dotnet:new "Avalonia.Controls.Image"))
+           (scale (dotnet:new "Avalonia.Media.ScaleTransform"))
+           (trans (dotnet:new "Avalonia.Media.TranslateTransform"))
+           (grp   (dotnet:new "Avalonia.Media.TransformGroup"))
            (spreads (compute-spreads (book-page-count book)))
            (vw   (make-viewer :book book :spreads spreads
                               :sindex (spread-index-of spreads start)
-                              :window win :left-img li :right-img ri)))
+                              :window win :left-img li :right-img ri
+                              :viewport vport :scale-xf scale :trans-xf trans)))
       ;; 2 つの star 列 (既定 ColumnDefinition = 1*)
       (let ((cols (dotnet:invoke grid "get_ColumnDefinitions")))
         (dotnet:invoke cols "Add" (dotnet:new "Avalonia.Controls.ColumnDefinition"))
         (dotnet:invoke cols "Add" (dotnet:new "Avalonia.Controls.ColumnDefinition")))
-      ;; 両 Image: Uniform フィット・縦中央
       (dolist (im (list li ri))
         (dotnet:invoke im "set_Stretch" (dotnet:static "Avalonia.Media.Stretch" "Uniform"))
         (dotnet:invoke im "set_VerticalAlignment"
@@ -315,12 +371,30 @@
       (let ((children (dotnet:invoke grid "get_Children")))
         (dotnet:invoke children "Add" li)
         (dotnet:invoke children "Add" ri))
-      (dotnet:invoke win "set_Content" grid)
+      ;; stage に RenderTransform (ズーム/パン)。原点は左上で translate を親座標系に。
+      (let ((gc (dotnet:invoke grp "get_Children")))
+        (dotnet:invoke gc "Add" scale)
+        (dotnet:invoke gc "Add" trans))
+      (dotnet:invoke grid "set_RenderTransform" grp)
+      (dotnet:invoke grid "set_RenderTransformOrigin"
+                     (dotnet:static "Avalonia.RelativePoint" "TopLeft"))
+      ;; viewport (clip) > stage
+      (dotnet:invoke vport "set_ClipToBounds" t)
+      (dotnet:invoke vport "set_Child" grid)
+      (dotnet:invoke win "set_Content" vport)
       (dotnet:invoke win "set_Background" (dotnet:static "Avalonia.Media.Brushes" "Black"))
       (dotnet:invoke win "set_Width"  1200d0)
       (dotnet:invoke win "set_Height" 800d0)
       (dotnet:add-event win "KeyDown"
                         (lambda (s e) (declare (ignore s)) (%on-key vw e)))
+      (dotnet:add-event win "PointerWheelChanged"
+                        (lambda (s e) (declare (ignore s)) (%on-wheel vw e)))
+      (dotnet:add-event win "PointerPressed"
+                        (lambda (s e) (declare (ignore s)) (%on-press vw e)))
+      (dotnet:add-event win "PointerMoved"
+                        (lambda (s e) (declare (ignore s)) (%on-move vw e)))
+      (dotnet:add-event win "PointerReleased"
+                        (lambda (s e) (declare (ignore s)) (%on-release vw e)))
       (dotnet:add-event win "Closed"
                         (lambda (s e) (declare (ignore s e)) (book-close book)))
       (show-spread vw)
