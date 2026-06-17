@@ -1061,6 +1061,127 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
                  (dotnet:make-delegate "System.Action`1[System.String]"
                                        (lambda (p) (open-path vw p)))))
 
+;;; 設定ウィンドウ (#9): メニュー「設定…」から別ウィンドウで開く。OK で確定保存、
+;;; キャンセルで破棄 (グローバル特殊変数は OK を押すまで一切触らない)。永続化基盤
+;;; (*settings*/save-settings, #8) にそのまま乗せ、反映は変更内容に応じて再描画。
+(defun %parse-int (s default min)
+  "S を整数に。パース失敗 or MIN 未満なら DEFAULT を返す。"
+  (let ((v (ignore-errors (parse-integer (string-trim '(#\Space #\Tab) s) :junk-allowed t))))
+    (if (and v (>= v min)) v default)))
+
+(defun %s-header (text)
+  (let ((tb (dotnet:new "Avalonia.Controls.TextBlock")))
+    (dotnet:invoke tb "set_Text" text)
+    (dotnet:invoke tb "set_FontWeight" (dotnet:static "Avalonia.Media.FontWeight" "Bold"))
+    (dotnet:invoke tb "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 10d0 0d0 4d0))
+    tb))
+
+(defun %s-row (label control)
+  "[label(固定幅) ........ control] の横並び行。"
+  (let ((row (dotnet:new "Avalonia.Controls.DockPanel"))
+        (tb  (dotnet:new "Avalonia.Controls.TextBlock")))
+    (dotnet:invoke tb "set_Text" label)
+    (dotnet:invoke tb "set_Width" 170d0)
+    (dotnet:invoke tb "set_VerticalAlignment"
+                   (dotnet:static "Avalonia.Layout.VerticalAlignment" "Center"))
+    (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" tb
+                   (dotnet:static "Avalonia.Controls.Dock" "Left"))
+    (dotnet:invoke row "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 3d0))
+    (let ((c (dotnet:invoke row "get_Children")))
+      (dotnet:invoke c "Add" tb)
+      (dotnet:invoke c "Add" control))
+    row))
+
+(defun %s-checkbox (checked)
+  (let ((cb (dotnet:new "Avalonia.Controls.CheckBox")))
+    (dotnet:invoke cb "set_IsChecked" checked) cb))
+
+(defun %s-textbox (n)
+  (let ((tb (dotnet:new "Avalonia.Controls.TextBox")))
+    (dotnet:invoke tb "set_Text" (format nil "~d" n))
+    (dotnet:invoke tb "set_Width" 80d0)
+    (dotnet:invoke tb "set_HorizontalAlignment"
+                   (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Left"))
+    tb))
+
+(defun %s-button (label click)
+  (let ((b (dotnet:new "Avalonia.Controls.Button")))
+    (dotnet:invoke b "set_Content" label)
+    (dotnet:invoke b "set_MinWidth" 80d0)
+    (dotnet:invoke b "set_Margin" (dotnet:new "Avalonia.Thickness" 6d0 0d0 0d0 0d0))
+    (dotnet:add-event b "Click" (lambda (s e) (declare (ignore s e)) (funcall click)))
+    b))
+
+(defun %settings-apply (vw cb-spread cb-fps cb-rec combo tb-cache tb-pf tb-th)
+  "コントロールの現在値をグローバルへ反映し永続化、変更内容に応じて再描画する。"
+  (let ((old-spread *spread*) (old-fps *first-page-single*)
+        (old-rec *recursive*) (old-threads *loader-threads*))
+    (setf *spread*            (and (dotnet:invoke cb-spread "get_IsChecked") t)
+          *first-page-single* (and (dotnet:invoke cb-fps "get_IsChecked") t)
+          *recursive*         (and (dotnet:invoke cb-rec "get_IsChecked") t)
+          *page-direction*    (if (zerop (dotnet:invoke combo "get_SelectedIndex")) :rtl :ltr)
+          *cache-size*        (%parse-int (dotnet:invoke tb-cache "get_Text") *cache-size* 1)
+          *prefetch-ahead*    (%parse-int (dotnet:invoke tb-pf "get_Text") *prefetch-ahead* 0)
+          *loader-threads*    (%parse-int (dotnet:invoke tb-th "get_Text") *loader-threads* 1))
+    (save-settings)
+    ;; 反映の重さ順: recursive/スレッド数は本を開き直す、見開き構成変化は再計算、
+    ;; 綴じ方向/キャッシュ/先読みは現見開きを再描画 (先読み要求もここで更新される)。
+    (cond ((or (not (eq old-rec *recursive*)) (/= old-threads *loader-threads*))
+           (%reopen vw))
+          ((or (not (eq old-spread *spread*)) (not (eq old-fps *first-page-single*)))
+           (%recompute vw (%cur-page vw)))
+          (t (show-spread vw)))))
+
+(defun %open-settings (vw)
+  (let* ((owner (viewer-window vw))
+         (swin  (dotnet:new "Avalonia.Controls.Window"))
+         (panel (dotnet:new "Avalonia.Controls.StackPanel"))
+         (combo (dotnet:new "Avalonia.Controls.ComboBox"))
+         (cb-spread (%s-checkbox *spread*))
+         (cb-fps    (%s-checkbox *first-page-single*))
+         (cb-rec    (%s-checkbox *recursive*))
+         (tb-cache  (%s-textbox *cache-size*))
+         (tb-pf     (%s-textbox *prefetch-ahead*))
+         (tb-th     (%s-textbox *loader-threads*)))
+    (let ((items (dotnet:invoke combo "get_Items")))
+      (dotnet:invoke items "Add" "右開き (RTL)")
+      (dotnet:invoke items "Add" "左開き (LTR)"))
+    (dotnet:invoke combo "set_SelectedIndex" (if (eq *page-direction* :rtl) 0 1))
+    (dotnet:invoke panel "set_Margin" (dotnet:new "Avalonia.Thickness" 16d0))
+    (flet ((add (x) (dotnet:invoke (dotnet:invoke panel "get_Children") "Add" x)))
+      (add (%s-header "表示"))
+      (add (%s-row "綴じ方向" combo))
+      (add (%s-row "見開き" cb-spread))
+      (add (%s-row "表紙を単独表示" cb-fps))
+      (add (%s-row "サブフォルダも再帰収集" cb-rec))
+      (add (%s-header "性能 (先読み)"))
+      (add (%s-row "キャッシュ最大ページ数" tb-cache))
+      (add (%s-row "先読み見開き数" tb-pf))
+      (add (%s-row "ローダースレッド数" tb-th))
+      (let ((btns (dotnet:new "Avalonia.Controls.StackPanel")))
+        (dotnet:invoke btns "set_Orientation"
+                       (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
+        (dotnet:invoke btns "set_HorizontalAlignment"
+                       (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Right"))
+        (dotnet:invoke btns "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 16d0 0d0 0d0))
+        (let ((bc (dotnet:invoke btns "get_Children")))
+          (dotnet:invoke bc "Add"
+            (%s-button "キャンセル" (lambda () (dotnet:invoke swin "Close"))))
+          (dotnet:invoke bc "Add"
+            (%s-button "OK"
+              (lambda ()
+                (%settings-apply vw cb-spread cb-fps cb-rec combo tb-cache tb-pf tb-th)
+                (dotnet:invoke swin "Close")))))
+        (add btns)))
+    (dotnet:invoke swin "set_Title" "設定")
+    (dotnet:invoke swin "set_Width" 400d0)
+    (dotnet:invoke swin "set_SizeToContent"
+                   (dotnet:static "Avalonia.Controls.SizeToContent" "Height"))
+    (dotnet:invoke swin "set_WindowStartupLocation"
+                   (dotnet:static "Avalonia.Controls.WindowStartupLocation" "CenterOwner"))
+    (dotnet:invoke swin "set_Content" panel)
+    (dotnet:invoke swin "ShowDialog" owner)))
+
 ;;; メニューバー (#21)
 ;;; Menu/MenuItem はキーボードフォーカスを保持する。クリック後フォーカスが
 ;;; メニューに残ると、矢印/Space/Esc 等がメニューのナビに食われて viewer の
@@ -1084,6 +1205,7 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
         (m-clip (%menu-item vw "素材")))
     (%menu-add m-file (%menu-item vw "開く (ファイル)…" (lambda () (%open-file-dialog vw win))))
     (%menu-add m-file (%menu-item vw "開く (フォルダ)…" (lambda () (%open-folder-dialog vw win))))
+    (%menu-add m-file (%menu-item vw "設定…" (lambda () (%open-settings vw))))
     (%menu-add m-file (%menu-item vw "終了 (Q)" (lambda () (%quit vw))))
     (%menu-add m-view (%menu-item vw "全画面 (F11)" (lambda () (%set-fullscreen vw (not (%fullscreen-p vw))))))
     (%menu-add m-view (%menu-item vw "見開き (S)" (lambda () (%toggle-spread vw))))
