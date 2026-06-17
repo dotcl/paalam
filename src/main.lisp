@@ -770,7 +770,8 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
            viewport scale-xf trans-xf (zoom 1d0) (tx 0d0) (ty 0d0)
            (dragging nil) (lx 0d0) (ly 0d0)
            clip-pane clip-stack         ; 素材ペイン (#18 Phase 2)
-           (reorder-from nil))          ; ドラッグ並べ替え中の元 index (Phase 3)
+           (reorder-from nil)           ; ドラッグ並べ替え中の元 index (Phase 3)
+           menu)                        ; メニューバー (#21; 全画面時に隠す)
 
 (defun %reopen (vw)
   "source を開き直して book/loader/spreads を差し替える (再帰トグル等)。現在ページは維持。"
@@ -986,7 +987,10 @@ UI スレッドで呼ぶこと。"
 
 (defun %set-fullscreen (vw on)
   (dotnet:invoke (viewer-window vw) "set_WindowState"
-                 (dotnet:static "Avalonia.Controls.WindowState" (if on "FullScreen" "Normal"))))
+                 (dotnet:static "Avalonia.Controls.WindowState" (if on "FullScreen" "Normal")))
+  ;; 全画面では没入のためメニューバーを隠す (DockPanel が root を全面に広げる)。
+  (when (viewer-menu vw)
+    (dotnet:invoke (viewer-menu vw) "set_IsVisible" (not on))))
 
 (defun %quit (vw) (dotnet:invoke (viewer-window vw) "Close"))
 
@@ -1058,29 +1062,36 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
                                        (lambda (p) (open-path vw p)))))
 
 ;;; メニューバー (#21)
-(defun %menu-item (header &optional click)
+;;; Menu/MenuItem はキーボードフォーカスを保持する。クリック後フォーカスが
+;;; メニューに残ると、矢印/Space/Esc 等がメニューのナビに食われて viewer の
+;;; KeyDown まで届かない。そこでクリック後は必ずビューポートへフォーカスを戻す。
+(defun %focus-viewport (vw)
+  (ignore-errors (dotnet:invoke (viewer-viewport vw) "Focus")))
+
+(defun %menu-item (vw header &optional click)
   (let ((mi (dotnet:new "Avalonia.Controls.MenuItem")))
     (dotnet:invoke mi "set_Header" header)
     (when click
-      (dotnet:add-event mi "Click" (lambda (s e) (declare (ignore s e)) (funcall click))))
+      (dotnet:add-event mi "Click"
+        (lambda (s e) (declare (ignore s e)) (funcall click) (%focus-viewport vw))))
     mi))
 (defun %menu-add (parent item) (dotnet:invoke (dotnet:invoke parent "get_Items") "Add" item))
 
 (defun %build-menu (vw win)
   (let ((menu   (dotnet:new "Avalonia.Controls.Menu"))
-        (m-file (%menu-item "ファイル"))
-        (m-view (%menu-item "表示"))
-        (m-clip (%menu-item "素材")))
-    (%menu-add m-file (%menu-item "開く (ファイル)…" (lambda () (%open-file-dialog vw win))))
-    (%menu-add m-file (%menu-item "開く (フォルダ)…" (lambda () (%open-folder-dialog vw win))))
-    (%menu-add m-file (%menu-item "終了 (Q)" (lambda () (%quit vw))))
-    (%menu-add m-view (%menu-item "全画面 (F11)" (lambda () (%set-fullscreen vw (not (%fullscreen-p vw))))))
-    (%menu-add m-view (%menu-item "見開き (S)" (lambda () (%toggle-spread vw))))
-    (%menu-add m-view (%menu-item "綴じ方向 (D)" (lambda () (%toggle-direction vw))))
-    (%menu-add m-view (%menu-item "再帰収集 (R)" (lambda () (%toggle-recursive vw))))
-    (%menu-add m-view (%menu-item "フィット (0)" (lambda () (reset-view vw))))
-    (%menu-add m-view (%menu-item "素材ペイン (P)" (lambda () (%toggle-clip-pane vw))))
-    (%menu-add m-clip (%menu-item "掃き出し… (E)" (lambda () (%pane-export vw))))
+        (m-file (%menu-item vw "ファイル"))
+        (m-view (%menu-item vw "表示"))
+        (m-clip (%menu-item vw "素材")))
+    (%menu-add m-file (%menu-item vw "開く (ファイル)…" (lambda () (%open-file-dialog vw win))))
+    (%menu-add m-file (%menu-item vw "開く (フォルダ)…" (lambda () (%open-folder-dialog vw win))))
+    (%menu-add m-file (%menu-item vw "終了 (Q)" (lambda () (%quit vw))))
+    (%menu-add m-view (%menu-item vw "全画面 (F11)" (lambda () (%set-fullscreen vw (not (%fullscreen-p vw))))))
+    (%menu-add m-view (%menu-item vw "見開き (S)" (lambda () (%toggle-spread vw))))
+    (%menu-add m-view (%menu-item vw "綴じ方向 (D)" (lambda () (%toggle-direction vw))))
+    (%menu-add m-view (%menu-item vw "再帰収集 (R)" (lambda () (%toggle-recursive vw))))
+    (%menu-add m-view (%menu-item vw "フィット (0)" (lambda () (reset-view vw))))
+    (%menu-add m-view (%menu-item vw "素材ペイン (P)" (lambda () (%toggle-clip-pane vw))))
+    (%menu-add m-clip (%menu-item vw "掃き出し… (E)" (lambda () (%pane-export vw))))
     (let ((items (dotnet:invoke menu "get_Items")))
       (dotnet:invoke items "Add" m-file)
       (dotnet:invoke items "Add" m-view)
@@ -1128,6 +1139,9 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
       (dotnet:invoke grid "set_RenderTransformOrigin"
                      (dotnet:static "Avalonia.RelativePoint" "TopLeft"))
       ;; viewport (clip) > stage
+      ;; Focusable にしておき、起動時/メニュー操作後にここへフォーカスを置くことで
+      ;; 矢印等のキーが必ず Window の KeyDown まで届く (メニューに吸われない)。
+      (dotnet:invoke vport "set_Focusable" t)
       (dotnet:invoke vport "set_ClipToBounds" t)
       (dotnet:invoke vport "set_Child" grid)
       ;; root: [viewport* | 素材ペイン(Auto, 既定非表示)] (#18 Phase 2)
@@ -1165,6 +1179,7 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
         ;; メニューバー (#21): Window.Content を DockPanel [Menu(Top) | root] に包む。
         (let ((dock (dotnet:new "Avalonia.Controls.DockPanel"))
               (menu (%build-menu vw win)))
+          (setf (viewer-menu vw) menu)
           (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" menu
                          (dotnet:static "Avalonia.Controls.Dock" "Top"))
           (let ((dc (dotnet:invoke dock "get_Children")))
@@ -1176,6 +1191,9 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
       (dotnet:invoke win "set_Height" 800d0)
       (dotnet:add-event win "KeyDown"
                         (lambda (s e) (declare (ignore s)) (%on-key vw e)))
+      ;; 起動直後からキー操作が効くよう、表示時にビューポートへフォーカス。
+      (dotnet:add-event win "Opened"
+                        (lambda (s e) (declare (ignore s e)) (%focus-viewport vw)))
       (dotnet:add-event win "PointerWheelChanged"
                         (lambda (s e) (declare (ignore s)) (%on-wheel vw e)))
       (dotnet:add-event win "PointerPressed"
