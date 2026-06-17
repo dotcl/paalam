@@ -5,6 +5,8 @@
 
 using System;
 using System.IO;
+using Avalonia.Input;
+using Avalonia.Platform.Storage;
 using DotCL;
 
 namespace Paalam;
@@ -34,6 +36,32 @@ public sealed class PdfDoc
         using var data = sk.Encode(SkiaSharp.SKEncodedImageFormat.Png, 90);
         using var ms = new System.IO.MemoryStream(data.ToArray());
         return new Avalonia.Media.Imaging.Bitmap(ms);
+    }
+}
+
+// ドラッグ&ドロップ配線を C# 側に封じ込める (Avalonia DnD はルーテッドイベントで
+// Lisp から直接扱いにくいため)。Lisp は onDrop(path) を受け取るだけ。
+public static class DragDropHelper
+{
+    public static void Enable(Avalonia.Controls.Window win, Action<string> onDrop)
+    {
+        // Avalonia 12: DnD は IDataTransfer + DataFormat (旧 IDataObject/DataFormats は廃止)。
+        DragDrop.SetAllowDrop(win, true);
+        win.AddHandler(DragDrop.DragOverEvent, (s, e) =>
+        {
+            e.DragEffects = e.DataTransfer.Contains(DataFormat.File)
+                ? DragDropEffects.Copy : DragDropEffects.None;
+        });
+        win.AddHandler(DragDrop.DropEvent, (s, e) =>
+        {
+            var files = e.DataTransfer.TryGetFiles();
+            if (files == null) return;
+            foreach (var f in files)
+            {
+                var p = f.TryGetLocalPath();
+                if (!string.IsNullOrEmpty(p)) { onDrop(p!); break; }
+            }
+        });
     }
 }
 

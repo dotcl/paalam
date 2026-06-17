@@ -502,6 +502,26 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
                                                 (min keep (max 0 (1- (book-page-count book))))))
       (show-spread vw))))
 
+(defun open-path (vw path)
+  "別の本 (DnD 等) を開いて差し替える。履歴があればそのページ、無ければ先頭から。
+UI スレッドで呼ぶこと。"
+  (handler-case
+      (multiple-value-bind (book start) (open-book path)
+        (ignore-errors (loader-stop (viewer-loader vw)))
+        (ignore-errors (book-close (viewer-book vw)))
+        (let* ((spreads (compute-spreads (book-page-count book)))
+               (resume (history-page path))
+               (page (if resume (min resume (max 0 (1- (book-page-count book)))) start)))
+          (setf (viewer-source vw) path
+                (viewer-book vw) book
+                (viewer-loader vw) (open-loader
+                                    book
+                                    (lambda (i) (%ui-post (lambda () (%on-page-loaded vw i)))))
+                (viewer-spreads vw) spreads
+                (viewer-sindex vw) (spread-index-of spreads page))
+          (show-spread vw)))
+    (error (e) (log-err "open-path" e))))
+
 (defun apply-transform (vw)
   (dotnet:invoke (viewer-scale-xf vw) "set_ScaleX" (viewer-zoom vw))
   (dotnet:invoke (viewer-scale-xf vw) "set_ScaleY" (viewer-zoom vw))
@@ -784,6 +804,10 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
                           (ignore-errors (save-history))   ; 最終ページを永続化 (#7)
                           (ignore-errors (loader-stop (viewer-loader vw)))
                           (book-close book)))
+      ;; ドラッグ&ドロップで別の本を開く (#19)。配線は C# シムに封じ込め。
+      (dotnet:static "Paalam.DragDropHelper" "Enable" win
+                     (dotnet:make-delegate "System.Action`1[System.String]"
+                                           (lambda (p) (open-path vw p))))
       ;; 先読みローダーを起動 (vw を closure で参照するので vw 作成後)。
       (setf (viewer-loader vw)
             (open-loader book
