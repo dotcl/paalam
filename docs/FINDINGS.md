@@ -125,7 +125,10 @@ host 経路では WPF が **単純名で解決**でき (Desktop ランタイム�
 ## 次の段階 (MVP ロードマップ)
 
 1. ✅ WPF 経路の実証 + ✅ WPF host 配布経路の実証 (本メモ)
-2. フォルダ内画像の前後ページ送り (キー操作: ←/→/PageUp/Down)
+2. ✅ book 抽象 (directory/zip backend, 自然順) + ページ送り
+   (←/→/PageUp/Down/Space/Home/End)。注: WPF Key.ToString は PageDown→"Next"、
+   PageUp→"PageUp" と非対称なので handler は両名を見る。単一画像は親フォルダを
+   本にして初期ページに (NeeView 挙動)。
 3. Fit モード (幅/高/全体) + ホイールズーム + ドラッグパン
 4. ZIP 書庫を「本」として開く (`System.IO.Compression`, 標準同梱)
 5. 見開き 2 ページ表示 + 綴じ方向 (右/左)

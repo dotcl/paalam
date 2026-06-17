@@ -29,8 +29,12 @@ internal static class Program
             var mainLisp = Path.Combine(AppContext.BaseDirectory, "main.lisp");
             DotclHost.LoadLispFile(mainLisp);
 
+            // 第 1 引数 (フォルダ/アーカイブ/画像) を Lisp に渡す。無ければ null。
+            var cmd = Environment.GetCommandLineArgs();
+            object? target = cmd.Length > 1 ? cmd[1] : null;
+
             // Lisp 側 build-app が Application を組んで返す。STAThread Main 上で Run。
-            var result = DotclHost.Call("BUILD-APP");
+            var result = DotclHost.Call("BUILD-APP", target);
             if (result is LispDotNetObject obj && obj.Value is Application app)
                 app.Run();
             else
