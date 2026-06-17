@@ -310,6 +310,10 @@
 (defparameter *fit-mode* :whole
   "フィットモード。:whole=全体(中央), :width=幅フィット(縦スクロール),
 :height=高フィット(横スクロール)。実効スケール = フィット基準 × user zoom (#15)。")
+(defparameter *background-color* "Black"
+  "ウィンドウ背景 (= フィット時の余白/レターボックス) のブラシ名。Avalonia.Media.Brushes の名前 (#2)。")
+(defparameter *interpolation* :high
+  "拡大時の補間品質。:high=HighQuality (なめらか), :low=LowQuality (くっきり寄り) (#2)。")
 
 ;;; --- 設定の永続化 (s式 plist / OS の app data) ---------------------
 (defparameter *settings*
@@ -318,6 +322,8 @@
     (:first-page-single . *first-page-single*)
     (:recursive         . *recursive*)
     (:fit-mode          . *fit-mode*)
+    (:background-color  . *background-color*)
+    (:interpolation     . *interpolation*)
     (:cache-size        . *cache-size*)
     (:prefetch-ahead    . *prefetch-ahead*)
     (:loader-threads    . *loader-threads*))
@@ -862,6 +868,20 @@ UI スレッドで呼ぶこと。"
   (dotnet:invoke (viewer-trans-xf vw) "set_X" (viewer-tx vw))
   (dotnet:invoke (viewer-trans-xf vw) "set_Y" (viewer-ty vw)))
 
+(defun %apply-background (vw)
+  "ウィンドウ背景 (余白/レターボックス) を *background-color* に設定 (#2)。"
+  (ignore-errors
+    (dotnet:invoke (viewer-window vw) "set_Background"
+                   (dotnet:static "Avalonia.Media.Brushes" *background-color*))))
+
+(defun %apply-interpolation (vw)
+  "拡大補間品質を左右画像に設定 (#2)。"
+  (let ((mode (dotnet:static "Avalonia.Media.Imaging.BitmapInterpolationMode"
+                             (if (eq *interpolation* :low) "LowQuality" "HighQuality"))))
+    (dolist (img (list (viewer-left-img vw) (viewer-right-img vw)))
+      (ignore-errors
+        (dotnet:static "Avalonia.Media.RenderOptions" "SetBitmapInterpolationMode" img mode)))))
+
 (defun %viewport-size (vw)
   "viewport の現在サイズ (DIP)。レイアウト前は 0。"
   (let ((b (dotnet:invoke (viewer-viewport vw) "get_Bounds")))
@@ -1295,7 +1315,24 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
     (dotnet:add-event b "Click" (lambda (s e) (declare (ignore s e)) (funcall click)))
     b))
 
-(defun %settings-apply (vw cb-spread cb-fps cb-rec combo tb-cache tb-pf tb-th)
+;;; 設定コンボの選択肢 (表示ラベル . 値)。
+(defparameter *fit-choices*    '(("全体" . :whole) ("幅フィット" . :width) ("高さフィット" . :height)))
+(defparameter *bg-choices*     '(("黒" . "Black") ("濃い灰" . "DimGray") ("灰" . "Gray") ("白" . "White")))
+(defparameter *interp-choices* '(("高品質 (なめらか)" . :high) ("低品質 (くっきり寄り)" . :low)))
+
+(defun %s-choice-combo (choices current &optional (test #'eql))
+  "(ラベル . 値) の CHOICES から ComboBox を作り、CURRENT の項目を選択。"
+  (let ((c (dotnet:new "Avalonia.Controls.ComboBox")))
+    (let ((items (dotnet:invoke c "get_Items")))
+      (dolist (ch choices) (dotnet:invoke items "Add" (car ch))))
+    (dotnet:invoke c "set_SelectedIndex" (or (position current choices :key #'cdr :test test) 0))
+    c))
+
+(defun %s-combo-value (combo choices)
+  (cdr (nth (max 0 (dotnet:invoke combo "get_SelectedIndex")) choices)))
+
+(defun %settings-apply (vw cb-spread cb-fps cb-rec combo tb-cache tb-pf tb-th
+                        fit-combo bg-combo interp-combo)
   "コントロールの現在値をグローバルへ反映し永続化、変更内容に応じて再描画する。"
   (let ((old-spread *spread*) (old-fps *first-page-single*)
         (old-rec *recursive*) (old-threads *loader-threads*))
@@ -1303,12 +1340,17 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
           *first-page-single* (and (dotnet:invoke cb-fps "get_IsChecked") t)
           *recursive*         (and (dotnet:invoke cb-rec "get_IsChecked") t)
           *page-direction*    (if (zerop (dotnet:invoke combo "get_SelectedIndex")) :rtl :ltr)
+          *fit-mode*          (%s-combo-value fit-combo *fit-choices*)
+          *background-color*  (%s-combo-value bg-combo *bg-choices*)
+          *interpolation*     (%s-combo-value interp-combo *interp-choices*)
           *cache-size*        (%parse-int (dotnet:invoke tb-cache "get_Text") *cache-size* 1)
           *prefetch-ahead*    (%parse-int (dotnet:invoke tb-pf "get_Text") *prefetch-ahead* 0)
           *loader-threads*    (%parse-int (dotnet:invoke tb-th "get_Text") *loader-threads* 1))
     (save-settings)
+    (%apply-background vw)       ; 背景色 (#2)
+    (%apply-interpolation vw)    ; 補間品質 (#2)
     ;; 反映の重さ順: recursive/スレッド数は本を開き直す、見開き構成変化は再計算、
-    ;; 綴じ方向/キャッシュ/先読みは現見開きを再描画 (先読み要求もここで更新される)。
+    ;; それ以外 (綴じ方向/フィット/背景/補間/キャッシュ/先読み) は現見開きを再描画。
     (cond ((or (not (eq old-rec *recursive*)) (/= old-threads *loader-threads*))
            (%reopen vw))
           ((or (not (eq old-spread *spread*)) (not (eq old-fps *first-page-single*)))
@@ -1351,6 +1393,9 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
          (tb-cache  (%s-textbox *cache-size*))
          (tb-pf     (%s-textbox *prefetch-ahead*))
          (tb-th     (%s-textbox *loader-threads*))
+         (fit-combo    (%s-choice-combo *fit-choices* *fit-mode*))
+         (bg-combo     (%s-choice-combo *bg-choices* *background-color* #'string=))
+         (interp-combo (%s-choice-combo *interp-choices* *interpolation*))
          ;; キー割当の作業用コピー: キー指向で (key . command-id) の集合。1 キー 1 機能、
          ;; 同じ機能に複数キーは複数行で表す。OK まで *keybinds* は触らない。
          ;; 保持用コンス。(car kbox) が作業リスト。クロージャからは (setf (car kbox) ..) で
@@ -1415,6 +1460,9 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
         (add (%s-row "見開き" cb-spread))
         (add (%s-row "表紙を単独表示" cb-fps))
         (add (%s-row "サブフォルダも再帰収集" cb-rec))
+        (add (%s-row "フィット" fit-combo))
+        (add (%s-row "背景色" bg-combo))
+        (add (%s-row "拡大補間" interp-combo))
         (add (%s-header "性能 (先読み)"))
         (add (%s-row "キャッシュ最大ページ数" tb-cache))
         (add (%s-row "先読み見開き数" tb-pf))
@@ -1439,7 +1487,8 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
             (dotnet:invoke bc "Add"
               (%s-button "OK"
                 (lambda ()
-                  (%settings-apply vw cb-spread cb-fps cb-rec combo tb-cache tb-pf tb-th)
+                  (%settings-apply vw cb-spread cb-fps cb-rec combo tb-cache tb-pf tb-th
+                                   fit-combo bg-combo interp-combo)
                   ;; キー指向の作業リストを機能ごとにまとめ直して確定 (削除は空リストで反映)。
                   (setf *keybinds*
                         (mapcar (lambda (c)
@@ -1609,7 +1658,8 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
             (dotnet:invoke dc "Add" menu)
             (dotnet:invoke dc "Add" root))
           (dotnet:invoke win "set_Content" dock)))
-      (dotnet:invoke win "set_Background" (dotnet:static "Avalonia.Media.Brushes" "Black"))
+      (%apply-background vw)          ; 背景色 (= 余白/レターボックス, #2)
+      (%apply-interpolation vw)       ; 拡大補間品質 (#2)
       (dotnet:invoke win "set_Width"  1200d0)
       (dotnet:invoke win "set_Height" 800d0)
       (dotnet:add-event win "KeyDown"
