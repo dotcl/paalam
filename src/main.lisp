@@ -183,6 +183,50 @@
 (defparameter *first-page-single* t
   "見開き時、先頭ページ (表紙) を単独表示する (漫画の慣習)。")
 
+;;; --- 設定の永続化 (s式 plist / OS の app data) ---------------------
+(defparameter *settings*
+  '((:page-direction    . *page-direction*)
+    (:spread            . *spread*)
+    (:first-page-single . *first-page-single*))
+  "保存対象の (設定キー . 特殊変数シンボル)。ここに足すだけで永続化対象になる。")
+
+(defun %config-dir ()
+  (concatenate 'string
+               (dotnet:static "System.Environment" "GetFolderPath"
+                              (dotnet:static "System.Environment+SpecialFolder" "ApplicationData"))
+               "/paalam/"))
+
+(defun %config-file () (concatenate 'string (%config-dir) "settings.lisp"))
+
+(defun save-settings ()
+  "現在の設定値を s式 plist で書き出す。"
+  (handler-case
+      (progn
+        (dotnet:static "System.IO.Directory" "CreateDirectory" (%config-dir))
+        (with-open-file (s (%config-file) :direction :output
+                           :if-exists :supersede :if-does-not-exist :create)
+          (let ((plist '()))
+            (dolist (e *settings*)
+              (setf plist (list* (car e) (symbol-value (cdr e)) plist)))
+            (with-standard-io-syntax (prin1 plist s) (terpri s)))))
+    (error (e) (log-err "save-settings" e))))
+
+(defun load-settings ()
+  "設定ファイルがあれば読み込んで反映。無ければ/壊れていれば既定値で作り直す。"
+  (let ((file (%config-file)))
+    (handler-case
+        (if (dotnet:static "System.IO.File" "Exists" file)
+            (with-open-file (s file :direction :input)
+              (let* ((*read-eval* nil) (plist (read s nil nil)))
+                (when (consp plist)
+                  (loop for (k v) on plist by #'cddr
+                        for e = (assoc k *settings*)
+                        when e do (setf (symbol-value (cdr e)) v)))))
+            (save-settings))
+      (error (e)
+        (log-err "load-settings" e)
+        (ignore-errors (save-settings))))))   ; 壊れていたら既定で作り直す
+
 ;;; viewer: book + 見開き単位 (spreads) + 現在位置 + 2 枚の Image
 ;;; spreads = 各見開きの page-index リスト (1 or 2 個) の vector。
 ;;; 単ページ/見開きを同じ仕組みで扱う (単ページ時は全要素 1 個)。
@@ -322,9 +366,10 @@
         ((string= kn "Home") (setf (viewer-sindex vw) 0) (show-spread vw))
         ((string= kn "End")  (setf (viewer-sindex vw) (1- (length (viewer-spreads vw))))
                              (show-spread vw))
-        ((string= kn "S") (setf *spread* (not *spread*)) (%recompute vw (%cur-page vw)))
+        ((string= kn "S") (setf *spread* (not *spread*)) (%recompute vw (%cur-page vw))
+                          (save-settings))
         ((string= kn "D") (setf *page-direction* (if (eq *page-direction* :rtl) :ltr :rtl))
-                          (show-spread vw))
+                          (show-spread vw) (save-settings))
         ((member kn '("D0" "NumPad0") :test #'string=) (reset-view vw))))))
 
 ;;; ------------------------------------------------------------------
@@ -438,6 +483,7 @@
 (defun run-paalam (&optional target)
   "host 入口。AppBuilder.Configure<Paalam.App>().UsePlatformDetect()
    .StartWithClassicDesktopLifetime(args) を駆動する (窓が閉じるまで blocking)。"
+  (load-settings)
   (setf *target-path* target)
   (let* ((b    (dotnet:static-generic "Avalonia.AppBuilder" "Configure" (list "Paalam.App")))
          (b    (dotnet:static "Avalonia.AppBuilderDesktopExtensions" "UsePlatformDetect" b))
