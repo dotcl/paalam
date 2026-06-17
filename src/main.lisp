@@ -808,6 +808,7 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
            (reorder-from nil)           ; ドラッグ並べ替え中の元 index (Phase 3)
            (reorder-img nil)            ; ドラッグ中のサムネ (不透明度を戻す用; #20)
            (reorder-line nil)           ; 挿入位置インジケータ Border (#20)
+           (dnd-overlay nil)            ; DnD ドロップ可否ハイライト枠 (#20)
            menu)                        ; メニューバー (#21; 全画面時に隠す)
 
 (defun %reopen (vw)
@@ -1493,7 +1494,8 @@ UI スレッドで呼ぶこと。"
              (pane  (dotnet:new "Avalonia.Controls.DockPanel"))
              (ebtn  (dotnet:new "Avalonia.Controls.Button"))
              (scr   (dotnet:new "Avalonia.Controls.ScrollViewer"))
-             (stack (dotnet:new "Avalonia.Controls.StackPanel")))
+             (stack (dotnet:new "Avalonia.Controls.StackPanel"))
+             (overlay (dotnet:new "Avalonia.Controls.Border")))   ; DnD ドロップ可否ハイライト枠 (#20)
         (let ((cols (dotnet:invoke root "get_ColumnDefinitions"))
               (cd   (dotnet:new "Avalonia.Controls.ColumnDefinition")))
           (dotnet:invoke cols "Add" (dotnet:new "Avalonia.Controls.ColumnDefinition")) ; star
@@ -1504,6 +1506,13 @@ UI スレッドで呼ぶこと。"
         (dotnet:invoke pane "set_Width" 220d0)
         (dotnet:invoke pane "set_IsVisible" nil)
         (dotnet:invoke pane "set_Background" (dotnet:static "Avalonia.Media.Brushes" "DimGray"))
+        ;; DnD ハイライト枠: 全面を覆う太枠 (中身は透明)。当たり判定を切ってドロップを邪魔しない。
+        (dotnet:invoke overlay "set_BorderBrush" (dotnet:static "Avalonia.Media.Brushes" "DeepSkyBlue"))
+        (dotnet:invoke overlay "set_BorderThickness" (dotnet:new "Avalonia.Thickness" 4d0))
+        (dotnet:invoke overlay "set_IsHitTestVisible" nil)
+        (dotnet:invoke overlay "set_IsVisible" nil)
+        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" overlay 0)
+        (dotnet:static "Avalonia.Controls.Grid" "SetColumnSpan" overlay 2)
         (dotnet:invoke ebtn "set_Content" "掃き出し (zip)")
         (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" ebtn
                        (dotnet:static "Avalonia.Controls.Dock" "Top"))
@@ -1514,12 +1523,19 @@ UI スレッドで呼ぶこと。"
           (dotnet:invoke pc "Add" scr))
         (let ((rc (dotnet:invoke root "get_Children")))
           (dotnet:invoke rc "Add" vport)
-          (dotnet:invoke rc "Add" pane))
-        (setf (viewer-clip-pane vw) pane (viewer-clip-stack vw) stack)
-        ;; ペインへの DnD で素材追加 (#18 Phase 2b)。
+          (dotnet:invoke rc "Add" pane)
+          (dotnet:invoke rc "Add" overlay))   ; 最後に追加 = 最前面
+        (setf (viewer-clip-pane vw) pane (viewer-clip-stack vw) stack
+              (viewer-dnd-overlay vw) overlay)
+        ;; ペインへの DnD で素材追加 (#18 Phase 2b)。DnD 中はペイン背景を強調 (#20)。
         (dotnet:static "Paalam.DragDropHelper" "EnableClipDrop" pane
                        (dotnet:make-delegate "System.Action`1[System.String]"
-                                             (lambda (p) (%clip-drop vw p))))
+                                             (lambda (p) (%clip-drop vw p)))
+                       (dotnet:make-delegate "System.Action`1[System.Boolean]"
+                                             (lambda (on)
+                                               (dotnet:invoke pane "set_Background"
+                                                 (dotnet:static "Avalonia.Media.Brushes"
+                                                                (if on "SteelBlue" "DimGray"))))))
         ;; メニューバー (#21): Window.Content を DockPanel [Menu(Top) | root] に包む。
         (let ((dock (dotnet:new "Avalonia.Controls.DockPanel"))
               (menu (%build-menu vw win)))
@@ -1552,9 +1568,12 @@ UI スレッドで呼ぶこと。"
                           (ignore-errors (loader-stop (viewer-loader vw)))
                           (book-close book)))
       ;; ドラッグ&ドロップで別の本を開く (#19)。配線は C# シムに封じ込め。
+      ;; DnD 中はウィンドウ全面にハイライト枠を出す (#20)。
       (dotnet:static "Paalam.DragDropHelper" "Enable" win
                      (dotnet:make-delegate "System.Action`1[System.String]"
-                                           (lambda (p) (open-path vw p))))
+                                           (lambda (p) (open-path vw p)))
+                     (dotnet:make-delegate "System.Action`1[System.Boolean]"
+                                           (lambda (on) (dotnet:invoke (viewer-dnd-overlay vw) "set_IsVisible" (and on t)))))
       ;; 先読みローダーを起動 (vw を closure で参照するので vw 作成後)。
       (setf (viewer-loader vw)
             (open-loader path

@@ -53,17 +53,22 @@ public sealed class PdfDoc
 // Lisp から直接扱いにくいため)。Lisp は onDrop(path) を受け取るだけ。
 public static class DragDropHelper
 {
-    public static void Enable(Avalonia.Controls.Window win, Action<string> onDrop)
+    // onHighlight: DnD のドロップ可否フィードバックを Lisp 側に通知する (見た目は Lisp が描く)。
+    // ファイルがドラッグされて来たら true、出たら/ドロップしたら false。
+    public static void Enable(Avalonia.Controls.Window win, Action<string> onDrop, Action<bool> onHighlight)
     {
         // Avalonia 12: DnD は IDataTransfer + DataFormat (旧 IDataObject/DataFormats は廃止)。
         DragDrop.SetAllowDrop(win, true);
         win.AddHandler(DragDrop.DragOverEvent, (s, e) =>
         {
-            e.DragEffects = e.DataTransfer.Contains(DataFormat.File)
-                ? DragDropEffects.Copy : DragDropEffects.None;
+            bool hasFiles = e.DataTransfer.Contains(DataFormat.File);
+            e.DragEffects = hasFiles ? DragDropEffects.Copy : DragDropEffects.None;
+            onHighlight(hasFiles);
         });
+        win.AddHandler(DragDrop.DragLeaveEvent, (s, e) => onHighlight(false));
         win.AddHandler(DragDrop.DropEvent, (s, e) =>
         {
+            onHighlight(false);
             var files = e.DataTransfer.TryGetFiles();
             if (files == null) return;
             foreach (var f in files)
@@ -76,17 +81,20 @@ public static class DragDropHelper
 
     // 素材ペイン用: ドロップされた全パスを onDrop に渡す。e.Handled=true で
     // ウィンドウ側の「本を開く」DnD と区別 (ペインに落としたら素材に追加)。
-    public static void EnableClipDrop(Avalonia.Controls.Control pane, Action<string> onDrop)
+    public static void EnableClipDrop(Avalonia.Controls.Control pane, Action<string> onDrop, Action<bool> onHighlight)
     {
         DragDrop.SetAllowDrop(pane, true);
         pane.AddHandler(DragDrop.DragOverEvent, (s, e) =>
         {
-            e.DragEffects = e.DataTransfer.Contains(DataFormat.File)
-                ? DragDropEffects.Copy : DragDropEffects.None;
+            bool hasFiles = e.DataTransfer.Contains(DataFormat.File);
+            e.DragEffects = hasFiles ? DragDropEffects.Copy : DragDropEffects.None;
+            onHighlight(hasFiles);
             e.Handled = true;
         });
+        pane.AddHandler(DragDrop.DragLeaveEvent, (s, e) => { onHighlight(false); e.Handled = true; });
         pane.AddHandler(DragDrop.DropEvent, (s, e) =>
         {
+            onHighlight(false);
             var files = e.DataTransfer.TryGetFiles();
             if (files != null)
                 foreach (var f in files)
