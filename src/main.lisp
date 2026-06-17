@@ -307,6 +307,9 @@
   "見開き時、先頭ページ (表紙) を単独表示する (漫画の慣習)。")
 (defparameter *recursive* t
   "フォルダを本として開くとき、サブフォルダの画像も再帰的に集める。")
+(defparameter *fit-mode* :whole
+  "フィットモード。:whole=全体(中央), :width=幅フィット(縦スクロール),
+:height=高フィット(横スクロール)。実効スケール = フィット基準 × user zoom (#15)。")
 
 ;;; --- 設定の永続化 (s式 plist / OS の app data) ---------------------
 (defparameter *settings*
@@ -314,6 +317,7 @@
     (:spread            . *spread*)
     (:first-page-single . *first-page-single*)
     (:recursive         . *recursive*)
+    (:fit-mode          . *fit-mode*)
     (:cache-size        . *cache-size*)
     (:prefetch-ahead    . *prefetch-ahead*)
     (:loader-threads    . *loader-threads*))
@@ -803,6 +807,8 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
 ;;; loader = 先読みローダー。
 (defstruct viewer book spreads (sindex 0) window left-img right-img source loader
            viewport scale-xf trans-xf (zoom 1d0) (tx 0d0) (ty 0d0)
+           (fit-base 1d0)               ; フィット基準スケール (実効 = fit-base*zoom; #15)
+           (content-w 0d0) (content-h 0d0)  ; 現在の見開きの content 寸法 (DIP; #15)
            (dragging nil) (lx 0d0) (ly 0d0)
            clip-pane clip-stack         ; 素材ペイン (#18 Phase 2)
            (reorder-from nil)           ; ドラッグ並べ替え中の元 index (Phase 3)
@@ -849,15 +855,45 @@ UI スレッドで呼ぶこと。"
     (error (e) (log-err "open-path" e))))
 
 (defun apply-transform (vw)
-  (dotnet:invoke (viewer-scale-xf vw) "set_ScaleX" (viewer-zoom vw))
-  (dotnet:invoke (viewer-scale-xf vw) "set_ScaleY" (viewer-zoom vw))
+  ;; 実効スケール = フィット基準 × user zoom。translate は親 (viewport) 座標系の絶対オフセット。
+  (let ((s (* (viewer-fit-base vw) (viewer-zoom vw))))
+    (dotnet:invoke (viewer-scale-xf vw) "set_ScaleX" s)
+    (dotnet:invoke (viewer-scale-xf vw) "set_ScaleY" s))
   (dotnet:invoke (viewer-trans-xf vw) "set_X" (viewer-tx vw))
   (dotnet:invoke (viewer-trans-xf vw) "set_Y" (viewer-ty vw)))
 
+(defun %viewport-size (vw)
+  "viewport の現在サイズ (DIP)。レイアウト前は 0。"
+  (let ((b (dotnet:invoke (viewer-viewport vw) "get_Bounds")))
+    (values (dotnet:invoke b "get_Width") (dotnet:invoke b "get_Height"))))
+
+(defun %fit-base (cw ch vpw vph)
+  "content (cw×ch) を viewport (vpw×vph) に合わせる基準スケール (モード別)。"
+  (if (or (<= cw 0) (<= ch 0) (<= vpw 0) (<= vph 0))
+      1d0
+      (ecase *fit-mode*
+        (:whole  (min (/ vpw cw) (/ vph ch)))
+        (:width  (/ vpw cw))
+        (:height (/ vph ch)))))
+
+(defun %apply-fit (vw)
+  "現在の content 寸法と viewport から基準スケールとアンカー (tx/ty) を決めて適用。
+whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でスクロール)。user zoom は保持。"
+  (multiple-value-bind (vpw vph) (%viewport-size vw)
+    (let* ((cw (viewer-content-w vw)) (ch (viewer-content-h vw))
+           (base (%fit-base cw ch vpw vph))
+           (s (* base (viewer-zoom vw))))
+      (setf (viewer-fit-base vw) base)
+      (if (eq *fit-mode* :whole)
+          (setf (viewer-tx vw) (/ (- vpw (* cw s)) 2d0)
+                (viewer-ty vw) (/ (- vph (* ch s)) 2d0))
+          (setf (viewer-tx vw) 0d0 (viewer-ty vw) 0d0))
+      (apply-transform vw))))
+
 (defun reset-view (vw)
-  "ズーム/パンをフィット (等倍・原点) に戻す。"
-  (setf (viewer-zoom vw) 1d0 (viewer-tx vw) 0d0 (viewer-ty vw) 0d0)
-  (apply-transform vw))
+  "ズームを等倍に戻し、現モードでフィットし直す。"
+  (setf (viewer-zoom vw) 1d0)
+  (%apply-fit vw))
 
 (defun compute-spreads (n)
   "n ページを *spread* / *first-page-single* に従って見開き単位へ分割。"
@@ -879,32 +915,42 @@ UI スレッドで呼ぶこと。"
   "page を含む見開きの index (見つからなければ 0)。"
   (or (position-if (lambda (pages) (member page pages)) spreads) 0))
 
-(defun %halign (name) (dotnet:static "Avalonia.Layout.HorizontalAlignment" name))
+(defun %bmp-size (bmp)
+  "Bitmap の DIP サイズ (values w h)。"
+  (let ((s (dotnet:invoke bmp "get_Size")))
+    (values (dotnet:invoke s "get_Width") (dotnet:invoke s "get_Height"))))
 
-(defun %place-image (img source col span halign)
-  (dotnet:invoke img "set_Source" source)
-  (dotnet:invoke img "set_IsVisible" (and source t))
-  (dotnet:static "Avalonia.Controls.Grid" "SetColumn" img col)
-  (dotnet:static "Avalonia.Controls.Grid" "SetColumnSpan" img span)
-  (dotnet:invoke img "set_HorizontalAlignment" (%halign halign)))
+(defun %canvas-place (img bmp x y)
+  "img に bmp を設定し、Canvas 上の (x,y) にネイティブ寸法で配置 (bmp=nil は非表示)。"
+  (dotnet:invoke img "set_Source" bmp)
+  (dotnet:invoke img "set_IsVisible" (and bmp t))
+  (when bmp
+    (dotnet:static "Avalonia.Controls.Canvas" "SetLeft" img (coerce x 'double-float))
+    (dotnet:static "Avalonia.Controls.Canvas" "SetTop"  img (coerce y 'double-float))))
+
+(defun %fit-label ()
+  (case *fit-mode* (:width " [幅]") (:height " [高]") (t "")))
 
 (defun %spread-title (vw pages)
   (let* ((book (viewer-book vw)) (n (book-page-count book))
          (path (viewer-source vw))
          (star (if (some (lambda (p) (bookmarked-p path p)) pages) "★ " ""))
-         (clip (if *clip* (format nil " [素材~d]" (length *clip*)) "")))
+         (clip (if *clip* (format nil " [素材~d]" (length *clip*)) ""))
+         (fit  (%fit-label)))
     (if (= (length pages) 1)
-        (format nil "~apaalam — ~a (~d/~d)~a"
-                star (book-page-name book (first pages)) (1+ (first pages)) n clip)
+        (format nil "~apaalam — ~a (~d/~d)~a~a"
+                star (book-page-name book (first pages)) (1+ (first pages)) n clip fit)
         (destructuring-bind (lo hi) pages
-          (format nil "~apaalam — ~a｜~a (~d-~d/~d)~a"
+          (format nil "~apaalam — ~a｜~a (~d-~d/~d)~a~a"
                   star (book-page-name book lo) (book-page-name book hi)
-                  (1+ lo) (1+ hi) n clip)))))
+                  (1+ lo) (1+ hi) n clip fit)))))
 
 (defun %page-bitmap (vw index) (and index (loader-get (viewer-loader vw) index)))
 
 (defun %render-spread (vw)
-  "現在の見開きを cache から描画 (未ロードは空欄。後で %on-page-loaded が埋める)。"
+  "現在の見開きを cache から Canvas に配置し content 寸法を更新 → フィット適用。
+未ロードは空欄 (後で %on-page-loaded が埋める)。見開きは綴じ方向で左右を突き合わせ、
+縦は背の高い方に中央寄せ。content 幅 = 左右幅の和、高さ = 高い方 (#15)。"
   (let* ((spreads (viewer-spreads vw)) (m (length spreads)))
     (when (plusp m)
       (let* ((si (viewer-sindex vw))
@@ -912,15 +958,25 @@ UI スレッドで呼ぶこと。"
              (li (viewer-left-img vw))
              (ri (viewer-right-img vw)))
         (if (= (length pages) 1)
-            (progn
-              (%place-image li (%page-bitmap vw (first pages)) 0 2 "Center")
-              (%place-image ri nil 1 1 "Left"))
+            (let ((bmp (%page-bitmap vw (first pages))))
+              (multiple-value-bind (w h) (if bmp (%bmp-size bmp) (values 0d0 0d0))
+                (%canvas-place li bmp 0d0 0d0)
+                (dotnet:invoke ri "set_IsVisible" nil)
+                (setf (viewer-content-w vw) w (viewer-content-h vw) h)))
             (destructuring-bind (lo hi) pages
               ;; rtl(右開き): 下位 index=lo を右に、hi を左に。ltr は逆。
-              (let ((left-page  (if (eq *page-direction* :rtl) hi lo))
-                    (right-page (if (eq *page-direction* :rtl) lo hi)))
-                (%place-image li (%page-bitmap vw left-page)  0 1 "Right")
-                (%place-image ri (%page-bitmap vw right-page) 1 1 "Left"))))))))
+              (let* ((left-page  (if (eq *page-direction* :rtl) hi lo))
+                     (right-page (if (eq *page-direction* :rtl) lo hi))
+                     (lb (%page-bitmap vw left-page))
+                     (rb (%page-bitmap vw right-page)))
+                (multiple-value-bind (lw lh) (if lb (%bmp-size lb) (values 0d0 0d0))
+                  (multiple-value-bind (rw rh) (if rb (%bmp-size rb) (values 0d0 0d0))
+                    (let ((ch (max lh rh)))
+                      (%canvas-place li lb 0d0 (/ (- ch lh) 2d0))
+                      (%canvas-place ri rb lw  (/ (- ch rh) 2d0))
+                      (setf (viewer-content-w vw) (+ lw rw)
+                            (viewer-content-h vw) ch)))))))
+        (%apply-fit vw)))))
 
 (defun %update-title (vw)
   (let ((spreads (viewer-spreads vw)))
@@ -1094,6 +1150,7 @@ UI スレッドで呼ぶこと。"
    (make-command :direction     "綴じ方向"         '("D")     '%toggle-direction)
    (make-command :recursive     "再帰収集"         '("R")     '%toggle-recursive)
    (make-command :fit           "フィット"         '("D0" "NumPad0") 'reset-view)
+   (make-command :fit-mode      "フィット切替"     '("W")     '%cycle-fit-mode)
    (make-command :clip-pane     "素材ペイン"       '("P")     '%toggle-clip-pane)
    (make-command :clip-add      "素材に追加"       '("A")     '%clip-add-current)
    (make-command :export        "掃き出し…"        '("E")     '%pane-export)
@@ -1170,6 +1227,12 @@ UI スレッドで呼ぶこと。"
   (show-spread vw) (save-settings))
 (defun %toggle-recursive (vw)
   (setf *recursive* (not *recursive*)) (save-settings) (%reopen vw))
+(defun %cycle-fit-mode (vw)
+  "フィットモードを 全体→幅→高→全体 と巡回し、フィットし直す (#15)。"
+  (setf *fit-mode* (ecase *fit-mode* (:whole :width) (:width :height) (:height :whole)))
+  (save-settings)
+  (reset-view vw)
+  (%update-title vw))
 
 (defun %open-file-dialog (vw win)
   (dotnet:static "Paalam.DialogHelper" "PickOpenBook" win
@@ -1435,7 +1498,7 @@ UI スレッドで呼ぶこと。"
         (m-view (%menu-item vw "表示"))
         (m-clip (%menu-item vw "素材")))
     (dolist (id '(:open-file :open-folder :settings :quit)) (%menu-cmd vw m-file id))
-    (dolist (id '(:fullscreen :spread :direction :recursive :fit :clip-pane)) (%menu-cmd vw m-view id))
+    (dolist (id '(:fullscreen :spread :direction :recursive :fit :fit-mode :clip-pane)) (%menu-cmd vw m-view id))
     (dolist (id '(:export)) (%menu-cmd vw m-clip id))
     (let ((items (dotnet:invoke menu "get_Items")))
       (dotnet:invoke items "Add" m-file)
@@ -1449,7 +1512,7 @@ UI スレッドで呼ぶこと。"
   (multiple-value-bind (book start) (open-book (%resolve-path *target-path*))
     (let* ((win   (dotnet:new "Avalonia.Controls.Window"))
            (vport (dotnet:new "Avalonia.Controls.Border"))   ; クリップ用ビューポート
-           (grid  (dotnet:new "Avalonia.Controls.Grid"))     ; 見開き stage
+           (stage (dotnet:new "Avalonia.Controls.Canvas"))   ; 見開き stage (座標は自前計算; #15)
            (li    (dotnet:new "Avalonia.Controls.Image"))
            (ri    (dotnet:new "Avalonia.Controls.Image"))
            (scale (dotnet:new "Avalonia.Media.ScaleTransform"))
@@ -1465,30 +1528,29 @@ UI スレッドで呼ぶこと。"
                               :source path
                               :window win :left-img li :right-img ri
                               :viewport vport :scale-xf scale :trans-xf trans)))
-      ;; 2 つの star 列 (既定 ColumnDefinition = 1*)
-      (let ((cols (dotnet:invoke grid "get_ColumnDefinitions")))
-        (dotnet:invoke cols "Add" (dotnet:new "Avalonia.Controls.ColumnDefinition"))
-        (dotnet:invoke cols "Add" (dotnet:new "Avalonia.Controls.ColumnDefinition")))
+      ;; Canvas 上にネイティブ寸法で配置 (座標は %render-spread が計算)。Stretch=None。
       (dolist (im (list li ri))
-        (dotnet:invoke im "set_Stretch" (dotnet:static "Avalonia.Media.Stretch" "Uniform"))
-        (dotnet:invoke im "set_VerticalAlignment"
-                       (dotnet:static "Avalonia.Layout.VerticalAlignment" "Center")))
-      (let ((children (dotnet:invoke grid "get_Children")))
+        (dotnet:invoke im "set_Stretch" (dotnet:static "Avalonia.Media.Stretch" "None")))
+      (let ((children (dotnet:invoke stage "get_Children")))
         (dotnet:invoke children "Add" li)
         (dotnet:invoke children "Add" ri))
-      ;; stage に RenderTransform (ズーム/パン)。原点は左上で translate を親座標系に。
+      ;; stage に RenderTransform (実効スケール = フィット基準×zoom + パン)。原点 = 左上、
+      ;; これで screen = scale*canvas座標 + translate と単純合成できる。
       (let ((gc (dotnet:invoke grp "get_Children")))
         (dotnet:invoke gc "Add" scale)
         (dotnet:invoke gc "Add" trans))
-      (dotnet:invoke grid "set_RenderTransform" grp)
-      (dotnet:invoke grid "set_RenderTransformOrigin"
+      (dotnet:invoke stage "set_RenderTransform" grp)
+      (dotnet:invoke stage "set_RenderTransformOrigin"
                      (dotnet:static "Avalonia.RelativePoint" "TopLeft"))
       ;; viewport (clip) > stage
       ;; Focusable にしておき、起動時/メニュー操作後にここへフォーカスを置くことで
       ;; 矢印等のキーが必ず Window の KeyDown まで届く (メニューに吸われない)。
       (dotnet:invoke vport "set_Focusable" t)
       (dotnet:invoke vport "set_ClipToBounds" t)
-      (dotnet:invoke vport "set_Child" grid)
+      (dotnet:invoke vport "set_Child" stage)
+      ;; リサイズで基準スケール/アンカーを再計算 (#15)。
+      (dotnet:add-event vport "SizeChanged"
+                        (lambda (s e) (declare (ignore s e)) (%apply-fit vw)))
       ;; root: [viewport* | 素材ペイン(Auto, 既定非表示)] (#18 Phase 2)
       (let* ((root  (dotnet:new "Avalonia.Controls.Grid"))
              (pane  (dotnet:new "Avalonia.Controls.DockPanel"))
