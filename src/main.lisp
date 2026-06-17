@@ -492,6 +492,7 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
 (defstruct loader
   book
   (cache (make-hash-table))           ; index -> Avalonia Bitmap
+  (inflight (make-hash-table))        ; 現在ロード中の index (二度読み防止)
   (lock (make-lock "paalam-loader"))
   (cv (make-condition-variable))
   (queue '())                         ; ロード待ち index (優先順)
@@ -524,7 +525,10 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
   "indices を優先順でロード要求 (既キャッシュはスキップ)。current は LRU 中心。"
   (with-lock-held ((loader-lock ld))
     (setf (loader-current ld) current
-          (loader-queue ld) (remove-if (lambda (i) (gethash i (loader-cache ld))) indices))
+          ;; 既にキャッシュ済み or ロード中のものは要求しない (二度読み防止)。
+          (loader-queue ld) (remove-if (lambda (i) (or (gethash i (loader-cache ld))
+                                                       (gethash i (loader-inflight ld))))
+                                       indices))
     (%dbg "req cur=~a want=~a queued=~a cache=~a" current (length indices)
           (length (loader-queue ld)) (hash-table-count (loader-cache ld)))
     (condition-notify (loader-cv ld))))
@@ -538,21 +542,23 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
         ;; done なら待ち行列 (prefetch) を捨てて即終了。stop 時に古い queue を
         ;; 全部ロードし終えるまで join がブロックするのを防ぐ (DnD/再オープンの固まり)。
         (when (loader-done ld) (return))
-        (setf index (pop (loader-queue ld))))
+        (setf index (pop (loader-queue ld)))
+        (when index (setf (gethash index (loader-inflight ld)) t)))   ; ロード中マーク
       (when index
-        ;; ワーカーは決して死なせない (どんな条件も握り潰してログ)。NAS の
-        ;; ロード失敗が静かに繰り返されると cache が空のままになるのを debug.log で見る。
-        (handler-case
-            (let ((bmp (book-load-image (loader-book ld) index)))
-              (if bmp
-                  (progn
-                    (with-lock-held ((loader-lock ld))
-                      (setf (gethash index (loader-cache ld)) bmp)
-                      (%loader-evict ld))
-                    (%dbg "cached ~a (cache=~a)" index (hash-table-count (loader-cache ld)))
-                    (ignore-errors (funcall (loader-on-loaded ld) index)))
-                  (%dbg "LOAD-NIL ~a" index)))
-          (error (e) (%dbg "LOAD-ERR ~a : ~a" index e)))))))
+        ;; ワーカーは決して死なせない (どんな条件も握り潰してログ)。in-flight は必ず解除。
+        (unwind-protect
+            (handler-case
+                (let ((bmp (book-load-image (loader-book ld) index)))
+                  (if bmp
+                      (progn
+                        (with-lock-held ((loader-lock ld))
+                          (setf (gethash index (loader-cache ld)) bmp)
+                          (%loader-evict ld))
+                        (%dbg "cached ~a (cache=~a)" index (hash-table-count (loader-cache ld)))
+                        (ignore-errors (funcall (loader-on-loaded ld) index)))
+                      (%dbg "LOAD-NIL ~a" index)))
+              (error (e) (%dbg "LOAD-ERR ~a : ~a" index e)))
+          (with-lock-held ((loader-lock ld)) (remhash index (loader-inflight ld))))))))
 
 (defun open-loader (book on-loaded)
   (let ((ld (make-loader :book book :on-loaded on-loaded)))
