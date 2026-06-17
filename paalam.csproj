@@ -25,25 +25,14 @@
     <PackageReference Include="SharpCompress" Version="1.0.0" />
     <!-- PDF (PDFium 経由)。bblanchon.PDFium が win-arm64 ネイティブを含む。 -->
     <PackageReference Include="PDFtoImage" Version="5.2.1" />
-    <PackageReference Include="DotCL.Runtime" Version="0.1.10" GeneratePathProperty="true" />
+    <!-- 0.1.11: DotCL.Runtime.targets が dotcl.core と contrib を自動で出力にコピーする
+         (旧 #290/#293 の手動コピー/vendor は不要に)。 -->
+    <PackageReference Include="DotCL.Runtime" Version="0.1.11" />
   </ItemGroup>
 
-  <!-- dotcl.core は DotCL.Runtime の contentFiles に copyToOutput=true が無いので
-       明示コピー (dotcl-internal #290 の回避策)。 -->
-  <ItemGroup>
-    <None Include="$(PkgDotCL_Runtime)\contentFiles\any\net10.0\dotcl.core"
-          Link="dotcl.core" CopyToOutputDirectory="PreserveNewest" Visible="false" />
-  </ItemGroup>
-
-  <!-- Lisp 本体と、define-class 用 contrib (NuGet に無いので vendor; #293) を出力直下へ。 -->
+  <!-- Lisp 本体を出力直下へ (contrib は require が NuGet 同梱から解決)。 -->
   <ItemGroup>
     <Content Include="src\main.lisp" Link="main.lisp">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <Content Include="src\vendor-dotnet-class.lisp" Link="vendor-dotnet-class.lisp">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <Content Include="src\vendor-dotcl-thread.lisp" Link="vendor-dotcl-thread.lisp">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>

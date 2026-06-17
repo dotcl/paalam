@@ -13,16 +13,12 @@
            :book-page-count :book-page-name :book-load-image :book-close))
 (in-package :paalam)
 
-;;; define-class は DotCL.Runtime NuGet に同梱されないので vendor して load。
-;;; *package* = :paalam で読むことで、マクロが束縛する `self' が
+;;; define-class (UI クラス emit) とスレッド/ロック/条件変数 (先読みローダー) の contrib。
+;;; DotCL.Runtime 0.1.11 は contrib を出力に同梱するので require で解決できる。
+;;; *package* = :paalam で require することで、define-class マクロが束縛する `self' が
 ;;; この下の define-class 本体 (:paalam) と同一シンボルになる。
-(load (concatenate 'string
-                   (dotnet:static "System.AppContext" "BaseDirectory")
-                   "vendor-dotnet-class.lisp"))
-;; 先読みローダー用のスレッド/ロック/条件変数 (bordeaux-threads 相当の contrib)。
-(load (concatenate 'string
-                   (dotnet:static "System.AppContext" "BaseDirectory")
-                   "vendor-dotcl-thread.lisp"))
+(require :dotnet-class)
+(require :dotcl-thread)
 (use-package :dotcl-thread)
 
 (defvar *debug* nil "PAALAM_DEBUG で有効化。先読みの詳細を debug.log に出す。")
@@ -1060,10 +1056,10 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
 (dotnet:define-class "Paalam.App" ("Avalonia.Application")
   (:ctor ()
     ;; Fluent テーマ (将来のメニュー/ツールバー等テンプレートコントロール用)。
-    ;; Avalonia 12 の FluentTheme は引数なし ctor が無いので省略可引数 nil を渡す (#292)。
+    ;; 0.1.11 で dotnet:new が全 optional 引数 ctor を補えるので引数なしで OK (#292 解決)。
     (handler-case
         (let ((styles (dotnet:invoke self "get_Styles"))
-              (theme (dotnet:new "Avalonia.Themes.Fluent.FluentTheme" nil)))
+              (theme (dotnet:new "Avalonia.Themes.Fluent.FluentTheme")))
           (dotnet:invoke styles "Add" theme))
       (error (e) (log-err "ctor" e))))
   (:methods
