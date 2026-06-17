@@ -31,6 +31,7 @@ internal static class Program
             _ = typeof(Avalonia.Controls.Window).Assembly;
             _ = typeof(Avalonia.AppBuilderDesktopExtensions).Assembly; // Avalonia.Desktop
             _ = typeof(Avalonia.Themes.Fluent.FluentTheme).Assembly;
+            _ = typeof(SharpCompress.Archives.ArchiveFactory).Assembly;
 
             DotclHost.Initialize();
             DotclHost.LoadCore(DotclHost.FindCore()

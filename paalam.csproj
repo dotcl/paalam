@@ -19,6 +19,8 @@
     <PackageReference Include="Avalonia" Version="12.0.4" />
     <PackageReference Include="Avalonia.Desktop" Version="12.0.4" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.0.4" />
+    <!-- RAR/7z/tar 等の書庫読み込み (ピュア C#, ネイティブ依存なし)。 -->
+    <PackageReference Include="SharpCompress" Version="1.0.0" />
     <PackageReference Include="DotCL.Runtime" Version="0.1.10" GeneratePathProperty="true" />
   </ItemGroup>
 

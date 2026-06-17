@@ -148,6 +148,59 @@
   (ignore-errors (dotnet:invoke (zb-archive b) "Dispose"))
   (ignore-errors (dotnet:invoke (zb-stream b) "Dispose")))
 
+;;; sharp-book (SharpCompress: rar/7z/tar 等) -----------------------
+;;; zip 以外の書庫を SharpCompress の IArchive 経由で読む。rar/7z/tar など
+;;; フォーマット検出は ArchiveFactory.Open が行うので backend は 1 つで済む。
+
+(defun %enum->list (enumerable)
+  "IEnumerable を Lisp リストへ (GetEnumerator/MoveNext/Current)。"
+  (let ((en (dotnet:invoke enumerable "GetEnumerator")) (acc '()))
+    (loop while (dotnet:invoke en "MoveNext")
+          do (push (dotnet:invoke en "get_Current") acc))
+    (nreverse acc)))
+
+(defun %basename (key)
+  "書庫エントリ名 (/ or \\ 区切り) の最終成分。"
+  (let ((p (max (or (position #\/ key :from-end t) -1)
+                (or (position #\\ key :from-end t) -1))))
+    (if (>= p 0) (subseq key (1+ p)) key)))
+
+(defclass sharp-book ()
+  ((archive :initarg :archive :reader sb2-archive)
+   (names   :initarg :names   :reader sb2-names)
+   (entries :initarg :entries :reader sb2-entries)))
+
+(defun %sharp-image-entries (archive)
+  (let ((acc '()))
+    (dolist (e (%enum->list (dotnet:invoke archive "get_Entries")))
+      (unless (dotnet:invoke e "get_IsDirectory")
+        (let ((key (dotnet:invoke e "get_Key")))
+          (when (and key (image-name-p key)) (push (cons key e) acc)))))
+    (sort (nreverse acc) #'natural< :key #'car)))
+
+(defun make-sharp-book (path)
+  ;; Open(string, ReaderOptions=null): 省略可引数を明示 nil で渡す (#292 回避)。
+  (let* ((archive (dotnet:static "SharpCompress.Archives.ArchiveFactory" "Open" path nil))
+         (pairs (%sharp-image-entries archive)))
+    (make-instance 'sharp-book
+                   :archive archive
+                   :names   (coerce (mapcar #'car pairs) 'vector)
+                   :entries (coerce (mapcar #'cdr pairs) 'vector))))
+
+(defmethod book-page-count ((b sharp-book)) (length (sb2-entries b)))
+(defmethod book-page-name  ((b sharp-book) i) (%basename (aref (sb2-names b) i)))
+(defmethod book-load-image ((b sharp-book) i)
+  (let ((es (dotnet:invoke (aref (sb2-entries b) i) "OpenEntryStream"))
+        (ms (dotnet:new "System.IO.MemoryStream")))
+    (unwind-protect
+         (progn (dotnet:invoke es "CopyTo" ms)
+                (dotnet:invoke ms "set_Position" 0)
+                (dotnet:static "Paalam.Imaging" "BitmapFromStream" ms))
+      (dotnet:invoke es "Dispose")
+      (dotnet:invoke ms "Dispose"))))
+(defmethod book-close ((b sharp-book))
+  (ignore-errors (dotnet:invoke (sb2-archive b) "Dispose")))
+
 ;;; open-book --------------------------------------------------------
 
 (defun open-book (path)
@@ -161,6 +214,9 @@
        (cond
          ((and ext (member (string-downcase ext) '("zip" "cbz") :test #'string=))
           (values (make-zip-book path) 0))
+         ((and ext (member (string-downcase ext)
+                           '("rar" "cbr" "7z" "cb7" "tar" "cbt") :test #'string=))
+          (values (make-sharp-book path) 0))
          ((image-ext-p ext)
           (let* ((dir  (directory-namestring path))
                  (book (make-directory-book dir))
