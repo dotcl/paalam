@@ -422,6 +422,12 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
 
 ;;; 素材クリップ (#18 Phase 1): ((source . page) ...) 追加順。zip 掃き出し用。
 (defparameter *clip* nil)
+;; サムネのメモリキャッシュ (source.page -> Bitmap)。ペインを開くたびに source から
+;; 再取得しないため (NAS で効く)。loader の cache とは別物 (loader は evict で Dispose
+;; するので共有しない)。
+(defparameter *thumb-cache* (make-hash-table :test 'equal))
+(defun %thumb-get (src page) (gethash (cons src page) *thumb-cache*))
+(defun %thumb-put (src page bmp) (setf (gethash (cons src page) *thumb-cache*) bmp))
 (defun load-clip () (setf *clip* (%read-state "clip.lisp")))
 (defun save-clip () (%write-state "clip.lisp" *clip*))
 (defun clip-add (source page)
@@ -431,7 +437,7 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
                              *clip*)))
     (setf *clip* (append *clip* (list (cons source page))))
     (save-clip)))
-(defun clip-clear () (setf *clip* nil) (save-clip))
+(defun clip-clear () (setf *clip* nil) (clrhash *thumb-cache*) (save-clip))
 
 (defun %sanitize (s)
   (map 'string (lambda (c) (if (or (alphanumericp c) (member c '(#\- #\_ #\.))) c #\_))
@@ -485,34 +491,40 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
   (%rebuild-clip-pane vw))
 
 (defun %rebuild-clip-pane (vw)
-  "clip-stack を作り直す。空 Image を即配置し、背景でサムネをロードして差し込む。"
+  "clip-stack を作り直す。キャッシュ済みサムネは即表示、未キャッシュのみ背景で
+ロードして %thumb-cache に貯めつつ差し込む (二度目以降は source 再取得なし)。"
   (let* ((stack (viewer-clip-stack vw))
          (children (dotnet:invoke stack "get_Children"))
          (snapshot (copy-list *clip*))
-         (imgs '()))
+         (pending '()))                  ; (img . (source . page)) 未キャッシュ分
     (dotnet:invoke children "Clear")
     (loop for item in snapshot for i from 0 do
-      (let ((img (dotnet:new "Avalonia.Controls.Image")) (idx i))
+      (let ((img (dotnet:new "Avalonia.Controls.Image")) (idx i)
+            (cached (%thumb-get (car item) (cdr item))))
         (dotnet:invoke img "set_Width" 200d0)
         (dotnet:invoke img "set_Stretch" (dotnet:static "Avalonia.Media.Stretch" "Uniform"))
         (dotnet:invoke img "set_Margin" (dotnet:new "Avalonia.Thickness" 4d0))
         (dotnet:add-event img "PointerPressed"
                           (lambda (s e) (declare (ignore s e)) (%clip-remove-at vw idx)))
-        (dotnet:invoke children "Add" img)
-        (push img imgs)))
-    (setf imgs (nreverse imgs))
-    (when snapshot
+        (if cached
+            (dotnet:invoke img "set_Source" cached)
+            (push (cons img item) pending))
+        (dotnet:invoke children "Add" img)))
+    (when pending
+      (setf pending (nreverse pending))
       (make-thread
        (lambda ()
          (let ((books (make-hash-table :test 'equal)))
            (unwind-protect
-                (loop for item in snapshot for img in imgs do
+                (dolist (pair pending)
                   (ignore-errors
-                    (let* ((src (car item)) (page (cdr item))
+                    (let* ((img (car pair)) (item (cdr pair))
+                           (src (car item)) (page (cdr item))
                            (book (or (gethash src books)
                                      (setf (gethash src books) (open-book src))))
                            (bmp (book-load-image book page)))
                       (when bmp
+                        (%thumb-put src page bmp)
                         (%ui-post (lambda () (dotnet:invoke img "set_Source" bmp)))))))
              (maphash (lambda (k v) (declare (ignore k)) (ignore-errors (book-close v))) books))))
        :name "paalam-thumbs"))))
