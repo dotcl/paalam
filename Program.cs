@@ -99,6 +99,34 @@ public static class DragDropHelper
     }
 }
 
+// 保存ダイアログ (素材掃き出し先の選択)。async は UI スレッドで進み、確定後に
+// onPicked(path) を呼ぶ (UI を固めない)。
+public static class DialogHelper
+{
+    public static async void PickSaveZip(Avalonia.Controls.Window win, string suggestedName,
+                                         Action<string> onPicked)
+    {
+        try
+        {
+            var file = await win.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+            {
+                SuggestedFileName = suggestedName,
+                DefaultExtension = "zip",
+                FileTypeChoices = new[]
+                {
+                    new FilePickerFileType("Zip archive") { Patterns = new[] { "*.zip" } }
+                }
+            });
+            if (file != null)
+            {
+                var p = file.TryGetLocalPath();
+                if (!string.IsNullOrEmpty(p)) onPicked(p!);
+            }
+        }
+        catch { /* キャンセル等は無視 */ }
+    }
+}
+
 internal static class Program
 {
     [STAThread]

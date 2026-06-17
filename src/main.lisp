@@ -443,16 +443,12 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
   (map 'string (lambda (c) (if (or (alphanumericp c) (member c '(#\- #\_ #\.))) c #\_))
        (or s "x")))
 
-(defun %export-clip ()
-  "*clip* の各ページを連番リネームして新しい zip (Desktop) に書き出す。出力パスを返す。
-各 source は開き直して読む (live loader とは非干渉)。"
-  (when *clip*
+(defun %write-clip-zip (out clip)
+  "CLIP の各ページを連番リネームして zip OUT に書き出す (各 source は開き直して読む)。
+背景スレッドから呼んで UI を固めない。OUT を返す。"
+  (when clip
     (ignore-errors (dotnet:load-assembly "System.IO.Compression"))
-    (let* ((desktop (dotnet:static "System.Environment" "GetFolderPath"
-                                   (dotnet:static "System.Environment+SpecialFolder" "Desktop")))
-           (stamp (dotnet:invoke (dotnet:static "System.DateTime" "Now") "ToString" "yyyyMMdd-HHmmss"))
-           (out (concatenate 'string desktop "/paalam-clip-" stamp ".zip"))
-           (fs (dotnet:static "System.IO.File" "Create" out))
+    (let* ((fs (dotnet:static "System.IO.File" "Create" out))
            (zip nil)
            (books (make-hash-table :test 'equal))
            (seq 0))
@@ -460,7 +456,7 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
            (progn
              (setf zip (dotnet:new "System.IO.Compression.ZipArchive" fs
                                    (dotnet:static "System.IO.Compression.ZipArchiveMode" "Create")))
-             (dolist (item *clip*)
+             (dolist (item clip)
                (incf seq)
                (handler-case
                    (let* ((src (car item)) (page (cdr item))
@@ -586,12 +582,28 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
              (maphash (lambda (k v) (declare (ignore k)) (ignore-errors (book-close v))) books))))
        :name "paalam-thumbs"))))
 
+(defun %do-export (vw out)
+  "out へ素材を背景スレッドで書き出し、完了後に UI を更新 (clip クリア)。"
+  (let ((snapshot (copy-list *clip*)))
+    (make-thread
+     (lambda ()
+       (ignore-errors (%write-clip-zip out snapshot))
+       (%ui-post (lambda ()
+                   (clip-clear) (%update-title vw) (%rebuild-clip-pane vw)
+                   (dotnet:invoke (viewer-window vw) "set_Title"
+                                  (format nil "掃き出し完了 → ~a" out)))))
+     :name "paalam-export")))
+
 (defun %pane-export (vw)
-  "素材を zip に掃き出してクリア + ペイン更新。"
-  (let ((out (%export-clip)))
-    (when out
-      (clip-clear) (%update-title vw) (%rebuild-clip-pane vw)
-      (dotnet:invoke (viewer-window vw) "set_Title" (format nil "掃き出し完了 → ~a" out)))))
+  "保存ダイアログで出力先を選び、背景で zip に掃き出す。"
+  (when *clip*
+    (let ((suggested (concatenate 'string "paalam-clip-"
+                                  (dotnet:invoke (dotnet:static "System.DateTime" "Now")
+                                                 "ToString" "yyyyMMdd-HHmmss")
+                                  ".zip")))
+      (dotnet:static "Paalam.DialogHelper" "PickSaveZip" (viewer-window vw) suggested
+                     (dotnet:make-delegate "System.Action`1[System.String]"
+                                           (lambda (out) (%do-export vw out)))))))
 
 (defun %toggle-clip-pane (vw)
   (let* ((pane (viewer-clip-pane vw))
