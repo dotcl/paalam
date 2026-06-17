@@ -530,12 +530,14 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
         ;; 左ドラッグで並べ替え (#18 Phase 3)。press で掴み、release 位置へ挿入。
         (dotnet:add-event img "PointerPressed"
           (lambda (s e) (declare (ignore s))
+            (dotnet:invoke e "set_Handled" t)   ; ウィンドウのパンを起こさない
             (when (dotnet:invoke (dotnet:invoke (dotnet:invoke e "GetCurrentPoint" img)
                                                 "get_Properties") "get_IsLeftButtonPressed")
               (setf (viewer-reorder-from vw) idx)
               (ignore-errors (dotnet:invoke (dotnet:invoke e "get_Pointer") "Capture" img)))))
         (dotnet:add-event img "PointerReleased"
           (lambda (s e) (declare (ignore s))
+            (dotnet:invoke e "set_Handled" t)
             (let ((from (viewer-reorder-from vw)))
               (when from
                 (setf (viewer-reorder-from vw) nil)
