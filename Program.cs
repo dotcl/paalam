@@ -37,6 +37,16 @@ public sealed class PdfDoc
         using var ms = new System.IO.MemoryStream(data.ToArray());
         return new Avalonia.Media.Imaging.Bitmap(ms);
     }
+
+    // 素材掃き出し用: ページを PNG バイト列で返す。
+    public byte[] RenderPagePng(int index)
+    {
+        var opts = new PDFtoImage.RenderOptions(Dpi: 150,
+                       BackgroundColor: SkiaSharp.SKColors.White);
+        using var sk = PDFtoImage.Conversion.ToImage(_bytes, index, null, opts);
+        using var data = sk.Encode(SkiaSharp.SKEncodedImageFormat.Png, 90);
+        return data.ToArray();
+    }
 }
 
 // ドラッグ&ドロップ配線を C# 側に封じ込める (Avalonia DnD はルーテッドイベントで

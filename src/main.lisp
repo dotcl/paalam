@@ -233,6 +233,35 @@
 (defmethod book-load-image ((b pdf-book) i) (dotnet:invoke (pdfb-doc b) "RenderPage" i))
 (defmethod book-close      ((b pdf-book)) nil)
 
+;;; book-page-bytes: 素材掃き出し (#18) 用にページの生バイトと拡張子を返す。
+;;; (values byte[] extension)。dir/zip/sharp は格納形式そのまま、pdf は PNG 化。
+(defgeneric book-page-bytes (book index))
+
+(defun %name-ext (name) (string-downcase (or (pathname-type name) "dat")))
+
+(defmethod book-page-bytes ((b directory-book) i)
+  (let ((path (aref (db-paths b) i)))
+    (values (dotnet:static "System.IO.File" "ReadAllBytes" path) (%name-ext path))))
+
+(defmethod book-page-bytes ((b zip-book) i)
+  (let ((es (dotnet:invoke (aref (zb-entries b) i) "Open"))
+        (ms (dotnet:new "System.IO.MemoryStream")))
+    (unwind-protect
+         (progn (dotnet:invoke es "CopyTo" ms)
+                (values (dotnet:invoke ms "ToArray") (%name-ext (aref (zb-names b) i))))
+      (dotnet:invoke es "Dispose") (dotnet:invoke ms "Dispose"))))
+
+(defmethod book-page-bytes ((b sharp-book) i)
+  (let ((es (dotnet:invoke (aref (sb2-entries b) i) "OpenEntryStream"))
+        (ms (dotnet:new "System.IO.MemoryStream")))
+    (unwind-protect
+         (progn (dotnet:invoke es "CopyTo" ms)
+                (values (dotnet:invoke ms "ToArray") (%name-ext (aref (sb2-names b) i))))
+      (dotnet:invoke es "Dispose") (dotnet:invoke ms "Dispose"))))
+
+(defmethod book-page-bytes ((b pdf-book) i)
+  (values (dotnet:invoke (pdfb-doc b) "RenderPagePng" i) "png"))
+
 ;;; open-book --------------------------------------------------------
 
 (defun open-book (path)
@@ -385,6 +414,57 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
     (save-bookmarks)))
 (defun book-bookmark-pages (path)
   (sort (loop for e in *bookmarks* when (string-equal (car e) path) collect (cdr e)) #'<))
+
+;;; 素材クリップ (#18 Phase 1): ((source . page) ...) 追加順。zip 掃き出し用。
+(defparameter *clip* nil)
+(defun load-clip () (setf *clip* (%read-state "clip.lisp")))
+(defun save-clip () (%write-state "clip.lisp" *clip*))
+(defun clip-add (source page)
+  (when source
+    (setf *clip* (append *clip* (list (cons source page))))
+    (save-clip)))
+(defun clip-clear () (setf *clip* nil) (save-clip))
+
+(defun %sanitize (s)
+  (map 'string (lambda (c) (if (or (alphanumericp c) (member c '(#\- #\_ #\.))) c #\_))
+       (or s "x")))
+
+(defun %export-clip ()
+  "*clip* の各ページを連番リネームして新しい zip (Desktop) に書き出す。出力パスを返す。
+各 source は開き直して読む (live loader とは非干渉)。"
+  (when *clip*
+    (ignore-errors (dotnet:load-assembly "System.IO.Compression"))
+    (let* ((desktop (dotnet:static "System.Environment" "GetFolderPath"
+                                   (dotnet:static "System.Environment+SpecialFolder" "Desktop")))
+           (stamp (dotnet:invoke (dotnet:static "System.DateTime" "Now") "ToString" "yyyyMMdd-HHmmss"))
+           (out (concatenate 'string desktop "/paalam-clip-" stamp ".zip"))
+           (fs (dotnet:static "System.IO.File" "Create" out))
+           (zip nil)
+           (books (make-hash-table :test 'equal))
+           (seq 0))
+      (unwind-protect
+           (progn
+             (setf zip (dotnet:new "System.IO.Compression.ZipArchive" fs
+                                   (dotnet:static "System.IO.Compression.ZipArchiveMode" "Create")))
+             (dolist (item *clip*)
+               (incf seq)
+               (handler-case
+                   (let* ((src (car item)) (page (cdr item))
+                          (book (or (gethash src books)
+                                    (setf (gethash src books) (open-book src)))))
+                     (multiple-value-bind (bytes ext) (book-page-bytes book page)
+                       (let* ((nm (format nil "~4,'0d_~a.~a" seq
+                                          (%sanitize (pathname-name (book-page-name book page))) ext))
+                              (entry (dotnet:invoke zip "CreateEntry" nm))
+                              (es (dotnet:invoke entry "Open")))
+                         (unwind-protect
+                              (dotnet:invoke es "Write" bytes 0 (dotnet:invoke bytes "get_Length"))
+                           (dotnet:invoke es "Dispose")))))
+                 (error (e) (log-err "export-clip-item" e)))))
+        (when zip (ignore-errors (dotnet:invoke zip "Dispose")))
+        (ignore-errors (dotnet:invoke fs "Dispose"))
+        (maphash (lambda (k v) (declare (ignore k)) (ignore-errors (book-close v))) books))
+      out)))
 
 ;;; ------------------------------------------------------------------
 ;;; 先読みローダー (#17): 単一ワーカースレッドが書庫アクセスを一手に担い、
@@ -565,13 +645,15 @@ UI スレッドで呼ぶこと。"
 (defun %spread-title (vw pages)
   (let* ((book (viewer-book vw)) (n (book-page-count book))
          (path (viewer-source vw))
-         (star (if (some (lambda (p) (bookmarked-p path p)) pages) "★ " "")))
+         (star (if (some (lambda (p) (bookmarked-p path p)) pages) "★ " ""))
+         (clip (if *clip* (format nil " [素材~d]" (length *clip*)) "")))
     (if (= (length pages) 1)
-        (format nil "~apaalam — ~a (~d/~d)"
-                star (book-page-name book (first pages)) (1+ (first pages)) n)
+        (format nil "~apaalam — ~a (~d/~d)~a"
+                star (book-page-name book (first pages)) (1+ (first pages)) n clip)
         (destructuring-bind (lo hi) pages
-          (format nil "~apaalam — ~a｜~a (~d-~d/~d)"
-                  star (book-page-name book lo) (book-page-name book hi) (1+ lo) (1+ hi) n)))))
+          (format nil "~apaalam — ~a｜~a (~d-~d/~d)~a"
+                  star (book-page-name book lo) (book-page-name book hi)
+                  (1+ lo) (1+ hi) n clip)))))
 
 (defun %page-bitmap (vw index) (and index (loader-get (viewer-loader vw) index)))
 
@@ -724,7 +806,14 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
         ((string= kn "Q") (%quit vw))
         ((string= kn "B") (toggle-bookmark (viewer-source vw) (%cur-page vw)) (%update-title vw))
         ((string= kn "OemOpenBrackets")  (%goto-bookmark vw -1))   ; [ 前のしおり
-        ((string= kn "OemCloseBrackets") (%goto-bookmark vw  1)))))) ; ] 次のしおり
+        ((string= kn "OemCloseBrackets") (%goto-bookmark vw  1))   ; ] 次のしおり
+        ((string= kn "A") (clip-add (viewer-source vw) (%cur-page vw)) (%update-title vw)) ; 素材に追加
+        ((string= kn "E")                                            ; 掃き出し (zip)
+         (let ((out (%export-clip)))
+           (when out
+             (clip-clear) (%update-title vw)
+             (dotnet:invoke (viewer-window vw) "set_Title"
+                            (format nil "掃き出し完了 → ~a" out)))))))))
 
 ;;; ------------------------------------------------------------------
 ;;; ウィンドウ / アプリ (Avalonia)
@@ -857,6 +946,7 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
   (load-settings)
   (load-history)
   (load-bookmarks)
+  (load-clip)
   (setf *target-path* target)
   (let* ((b    (dotnet:static-generic "Avalonia.AppBuilder" "Configure" (list "Paalam.App")))
          (b    (dotnet:static "Avalonia.AppBuilderDesktopExtensions" "UsePlatformDetect" b))
