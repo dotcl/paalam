@@ -331,6 +331,61 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
         (log-err "load-settings" e)
         (ignore-errors (save-settings))))))   ; 壊れていたら既定で作り直す
 
+;;; --- 履歴 + ブックマーク (#7) -------------------------------------
+;;; 履歴: 本ごとに最後に見たページを覚え、再度開くとそこから再開。
+;;; ブックマーク: ページにしおり (B 切替, ★ 表示, [ ] で前後のしおりへ)。
+;;; どちらも s式で app data に永続化。横断ブラウズ UI は #6/#9。
+
+(defun %state-file (name) (concatenate 'string (%config-dir) name))
+
+(defun %read-state (name)
+  (handler-case
+      (let ((file (%state-file name)))
+        (when (dotnet:static "System.IO.File" "Exists" file)
+          (with-open-file (s file :direction :input)
+            (let ((*read-eval* nil)) (read s nil nil)))))
+    (error (e) (log-err name e) nil)))
+
+(defun %write-state (name data)
+  (handler-case
+      (progn
+        (dotnet:static "System.IO.Directory" "CreateDirectory" (%config-dir))
+        (with-open-file (s (%state-file name) :direction :output
+                           :if-exists :supersede :if-does-not-exist :create)
+          (with-standard-io-syntax (prin1 data s) (terpri s))))
+    (error (e) (log-err name e))))
+
+;;; 履歴
+(defparameter *history* nil "((path . page) ...) 最近順。")
+(defparameter *history-limit* 200)
+(defun load-history () (setf *history* (%read-state "history.lisp")))
+(defun save-history () (%write-state "history.lisp" *history*))
+(defun history-page (path) (cdr (assoc path *history* :test #'string-equal)))
+(defun history-update (path page)
+  (when path
+    (setf *history* (cons (cons path page)
+                          (remove path *history* :key #'car :test #'string-equal)))
+    (when (> (length *history*) *history-limit*)
+      (setf *history* (subseq *history* 0 *history-limit*)))))
+
+;;; ブックマーク
+(defparameter *bookmarks* nil "((path . page) ...)。")
+(defun load-bookmarks () (setf *bookmarks* (%read-state "bookmarks.lisp")))
+(defun save-bookmarks () (%write-state "bookmarks.lisp" *bookmarks*))
+(defun bookmarked-p (path page)
+  (and path (member-if (lambda (e) (and (string-equal (car e) path) (eql (cdr e) page)))
+                       *bookmarks*)))
+(defun toggle-bookmark (path page)
+  (when path
+    (if (bookmarked-p path page)
+        (setf *bookmarks* (remove-if (lambda (e) (and (string-equal (car e) path)
+                                                      (eql (cdr e) page)))
+                                     *bookmarks*))
+        (push (cons path page) *bookmarks*))
+    (save-bookmarks)))
+(defun book-bookmark-pages (path)
+  (sort (loop for e in *bookmarks* when (string-equal (car e) path) collect (cdr e)) #'<))
+
 ;;; ------------------------------------------------------------------
 ;;; 先読みローダー (#17): 単一ワーカースレッドが書庫アクセスを一手に担い、
 ;;; デコード済み Bitmap を cache。UI は cache を読むだけ。ロード完了は
@@ -431,18 +486,21 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
            (dragging nil) (lx 0d0) (ly 0d0))
 
 (defun %reopen (vw)
-  "source を開き直して book/loader/spreads を差し替える (再帰トグル等で使用)。"
-  (multiple-value-bind (book start) (open-book (viewer-source vw))
-    (ignore-errors (loader-stop (viewer-loader vw)))
-    (ignore-errors (book-close (viewer-book vw)))
-    (setf (viewer-book vw) book
-          (viewer-loader vw) (open-loader
-                              book
-                              (lambda (index)
-                                (%ui-post (lambda () (%on-page-loaded vw index)))))
-          (viewer-spreads vw) (compute-spreads (book-page-count book))
-          (viewer-sindex vw) (spread-index-of (viewer-spreads vw) start))
-    (show-spread vw)))
+  "source を開き直して book/loader/spreads を差し替える (再帰トグル等)。現在ページは維持。"
+  (let ((keep (%cur-page vw)))
+    (multiple-value-bind (book start) (open-book (viewer-source vw))
+      (declare (ignore start))
+      (ignore-errors (loader-stop (viewer-loader vw)))
+      (ignore-errors (book-close (viewer-book vw)))
+      (setf (viewer-book vw) book
+            (viewer-loader vw) (open-loader
+                                book
+                                (lambda (index)
+                                  (%ui-post (lambda () (%on-page-loaded vw index)))))
+            (viewer-spreads vw) (compute-spreads (book-page-count book))
+            (viewer-sindex vw) (spread-index-of (viewer-spreads vw)
+                                                (min keep (max 0 (1- (book-page-count book))))))
+      (show-spread vw))))
 
 (defun apply-transform (vw)
   (dotnet:invoke (viewer-scale-xf vw) "set_ScaleX" (viewer-zoom vw))
@@ -485,13 +543,15 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
   (dotnet:invoke img "set_HorizontalAlignment" (%halign halign)))
 
 (defun %spread-title (vw pages)
-  (let* ((book (viewer-book vw)) (n (book-page-count book)))
+  (let* ((book (viewer-book vw)) (n (book-page-count book))
+         (path (viewer-source vw))
+         (star (if (some (lambda (p) (bookmarked-p path p)) pages) "★ " "")))
     (if (= (length pages) 1)
-        (format nil "paalam — ~a (~d/~d)"
-                (book-page-name book (first pages)) (1+ (first pages)) n)
+        (format nil "~apaalam — ~a (~d/~d)"
+                star (book-page-name book (first pages)) (1+ (first pages)) n)
         (destructuring-bind (lo hi) pages
-          (format nil "paalam — ~a｜~a (~d-~d/~d)"
-                  (book-page-name book lo) (book-page-name book hi) (1+ lo) (1+ hi) n)))))
+          (format nil "~apaalam — ~a｜~a (~d-~d/~d)"
+                  star (book-page-name book lo) (book-page-name book hi) (1+ lo) (1+ hi) n)))))
 
 (defun %page-bitmap (vw index) (and index (loader-get (viewer-loader vw) index)))
 
@@ -514,6 +574,23 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
                 (%place-image li (%page-bitmap vw left-page)  0 1 "Right")
                 (%place-image ri (%page-bitmap vw right-page) 1 1 "Left"))))))))
 
+(defun %update-title (vw)
+  (let ((spreads (viewer-spreads vw)))
+    (when (plusp (length spreads))
+      (dotnet:invoke (viewer-window vw) "set_Title"
+                     (%spread-title vw (aref spreads (viewer-sindex vw)))))))
+
+(defun %goto-bookmark (vw dir)
+  "現在の本のブックマークのうち、現在ページから dir 方向の最寄りページへ。"
+  (let* ((cur (%cur-page vw))
+         (pages (book-bookmark-pages (viewer-source vw)))
+         (target (if (> dir 0)
+                     (find-if (lambda (p) (> p cur)) pages)
+                     (find-if (lambda (p) (< p cur)) (reverse pages)))))
+    (when target
+      (setf (viewer-sindex vw) (spread-index-of (viewer-spreads vw) target))
+      (show-spread vw))))
+
 (defun %load-order (vw)
   "現在の見開き + prefetch 分の page index を優先順 (現在見開きが先) で。"
   (let* ((spreads (viewer-spreads vw)) (m (length spreads)) (acc '()))
@@ -534,8 +611,8 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
         ;; LRU 中心は *ページ* index (見開き index ではない — 追い出し距離が狂うため)。
         (loader-request (viewer-loader vw) (%load-order vw) (%cur-page vw))
         (%render-spread vw)
-        (dotnet:invoke (viewer-window vw) "set_Title"
-                       (%spread-title vw (aref spreads si)))
+        (%update-title vw)
+        (history-update (viewer-source vw) (%cur-page vw))   ; in-memory。保存は終了時。
         (reset-view vw)))))
 
 (defun %on-page-loaded (vw index)
@@ -624,7 +701,10 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
         ((member kn '("D0" "NumPad0") :test #'string=) (reset-view vw))
         ((member kn '("F11" "F") :test #'string=) (%set-fullscreen vw (not (%fullscreen-p vw))))
         ((string= kn "Escape") (if (%fullscreen-p vw) (%set-fullscreen vw nil) (%quit vw)))
-        ((string= kn "Q") (%quit vw))))))
+        ((string= kn "Q") (%quit vw))
+        ((string= kn "B") (toggle-bookmark (viewer-source vw) (%cur-page vw)) (%update-title vw))
+        ((string= kn "OemOpenBrackets")  (%goto-bookmark vw -1))   ; [ 前のしおり
+        ((string= kn "OemCloseBrackets") (%goto-bookmark vw  1)))))) ; ] 次のしおり
 
 ;;; ------------------------------------------------------------------
 ;;; ウィンドウ / アプリ (Avalonia)
@@ -655,9 +735,13 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
            (trans (dotnet:new "Avalonia.Media.TranslateTransform"))
            (grp   (dotnet:new "Avalonia.Media.TransformGroup"))
            (spreads (compute-spreads (book-page-count book)))
+           (path  (%resolve-path *target-path*))
+           ;; 履歴があればそのページから再開 (#7)。
+           (start2 (let ((r (history-page path)))
+                     (if r (max 0 (min r (1- (book-page-count book)))) start)))
            (vw   (make-viewer :book book :spreads spreads
-                              :sindex (spread-index-of spreads start)
-                              :source (%resolve-path *target-path*)
+                              :sindex (spread-index-of spreads start2)
+                              :source path
                               :window win :left-img li :right-img ri
                               :viewport vport :scale-xf scale :trans-xf trans)))
       ;; 2 つの star 列 (既定 ColumnDefinition = 1*)
@@ -697,6 +781,7 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
                         (lambda (s e) (declare (ignore s)) (%on-release vw e)))
       (dotnet:add-event win "Closed"
                         (lambda (s e) (declare (ignore s e))
+                          (ignore-errors (save-history))   ; 最終ページを永続化 (#7)
                           (ignore-errors (loader-stop (viewer-loader vw)))
                           (book-close book)))
       ;; 先読みローダーを起動 (vw を closure で参照するので vw 作成後)。
@@ -746,6 +831,8 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
   "host 入口。AppBuilder.Configure<Paalam.App>().UsePlatformDetect()
    .StartWithClassicDesktopLifetime(args) を駆動する (窓が閉じるまで blocking)。"
   (load-settings)
+  (load-history)
+  (load-bookmarks)
   (setf *target-path* target)
   (let* ((b    (dotnet:static-generic "Avalonia.AppBuilder" "Configure" (list "Paalam.App")))
          (b    (dotnet:static "Avalonia.AppBuilderDesktopExtensions" "UsePlatformDetect" b))
