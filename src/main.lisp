@@ -1237,8 +1237,14 @@ UI スレッドで呼ぶこと。"
          (tb-cache  (%s-textbox *cache-size*))
          (tb-pf     (%s-textbox *prefetch-ahead*))
          (tb-th     (%s-textbox *loader-threads*))
-         ;; キー割当の作業用コピー ((id . (key ...)) ...)。OK まで *keybinds* は触らない。
-         (work (mapcar (lambda (c) (cons (command-id c) (copy-list (%effective-keys c)))) *commands*))
+         ;; キー割当の作業用コピー: キー指向で (key . command-id) の集合。1 キー 1 機能、
+         ;; 同じ機能に複数キーは複数行で表す。OK まで *keybinds* は触らない。
+         ;; 保持用コンス。(car kbox) が作業リスト。クロージャからは (setf (car kbox) ..) で
+         ;; 「place」を書き換える (let* 変数自体の再束縛は dotcl が不正 IL を吐くため避ける)。
+         (kbox (list (let ((acc '()))
+                       (dolist (c *commands*)
+                         (dolist (k (%effective-keys c)) (push (cons k (command-id c)) acc)))
+                       (nreverse acc))))
          (kb-stack (dotnet:new "Avalonia.Controls.StackPanel")))
     (let ((items (dotnet:invoke combo "get_Items")))
       (dotnet:invoke items "Add" "右開き (RTL)")
@@ -1246,45 +1252,49 @@ UI スレッドで呼ぶこと。"
     (dotnet:invoke combo "set_SelectedIndex" (if (eq *page-direction* :rtl) 0 1))
     (dotnet:invoke panel "set_Margin" (dotnet:new "Avalonia.Thickness" 16d0))
     (labels
-        ((keys-str (ks)
-           (if ks (format nil "~{~a~^ / ~}" (mapcar #'%key-label ks)) "(なし)"))
-         (assign (id k)
-           ;; 後勝ち: 同じキーを持つ他コマンドから外し、このコマンドの唯一の割当にする。
-           (dolist (e work)
-             (unless (eq (car e) id) (setf (cdr e) (remove k (cdr e) :test #'string=))))
-           (setf (cdr (assoc id work)) (list k))
+        ((add-binding (k)
+           ;; 1 キー 1 機能。既にある行なら何もしない (その行の機能を選び直せばよい)。
+           (unless (assoc k (car kbox) :test #'string=)
+             (setf (car kbox) (cons (cons k (command-id (car *commands*))) (car kbox))))
            (refresh))
-         (clear (id) (setf (cdr (assoc id work)) nil) (refresh))
+         (remove-binding (pair) (setf (car kbox) (remove pair (car kbox))) (refresh))
+         (kb-row (pair)
+           (let ((row  (dotnet:new "Avalonia.Controls.DockPanel"))
+                 (klbl (dotnet:new "Avalonia.Controls.TextBlock"))
+                 (cbox (dotnet:new "Avalonia.Controls.ComboBox"))
+                 (bdel (dotnet:new "Avalonia.Controls.Button")))
+             (dotnet:invoke klbl "set_Text" (%key-label (car pair)))
+             (dotnet:invoke klbl "set_Width" 90d0)
+             (dotnet:invoke klbl "set_VerticalAlignment"
+                            (dotnet:static "Avalonia.Layout.VerticalAlignment" "Center"))
+             (let ((items (dotnet:invoke cbox "get_Items")))
+               (dolist (c *commands*) (dotnet:invoke items "Add" (command-label c))))
+             (dotnet:invoke cbox "set_SelectedIndex"
+                            (or (position (cdr pair) *commands* :key #'command-id) 0))
+             ;; 機能を選び直す → この行のキー pair の cdr (割当先) を更新 (place なので安全)。
+             (dotnet:add-event cbox "SelectionChanged"
+               (lambda (s e) (declare (ignore s e))
+                 (let ((i (dotnet:invoke cbox "get_SelectedIndex")))
+                   (when (>= i 0) (setf (cdr pair) (command-id (nth i *commands*)))))))
+             (dotnet:invoke bdel "set_Content" "×")
+             (dotnet:invoke bdel "set_Margin" (dotnet:new "Avalonia.Thickness" 6d0 0d0 0d0 0d0))
+             (dotnet:add-event bdel "Click"
+               (lambda (s e) (declare (ignore s e)) (remove-binding pair)))
+             (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" klbl
+                            (dotnet:static "Avalonia.Controls.Dock" "Left"))
+             (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" bdel
+                            (dotnet:static "Avalonia.Controls.Dock" "Right"))
+             (dotnet:invoke row "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 2d0))
+             (let ((rc (dotnet:invoke row "get_Children")))
+               (dotnet:invoke rc "Add" klbl)
+               (dotnet:invoke rc "Add" bdel)
+               (dotnet:invoke rc "Add" cbox))   ; 最後 = 中央 (機能 ComboBox) を埋める
+             row))
          (refresh ()
            (let ((ch (dotnet:invoke kb-stack "get_Children")))
              (dotnet:invoke ch "Clear")
-             (dolist (c *commands*)
-               (let* ((id   (command-id c))
-                      (row  (dotnet:new "Avalonia.Controls.DockPanel"))
-                      (lbl  (dotnet:new "Avalonia.Controls.TextBlock"))
-                      (kt   (dotnet:new "Avalonia.Controls.TextBlock"))
-                      (bchg (%s-button "変更" (lambda () (%capture-key swin (lambda (k) (assign id k))))))
-                      (bclr (%s-button "解除" (lambda () (clear id)))))
-                 (dotnet:invoke lbl "set_Text" (command-label c))
-                 (dotnet:invoke lbl "set_Width" 130d0)
-                 (dotnet:invoke lbl "set_VerticalAlignment"
-                                (dotnet:static "Avalonia.Layout.VerticalAlignment" "Center"))
-                 (dotnet:invoke kt "set_Text" (keys-str (cdr (assoc id work))))
-                 (dotnet:invoke kt "set_VerticalAlignment"
-                                (dotnet:static "Avalonia.Layout.VerticalAlignment" "Center"))
-                 (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" lbl
-                                (dotnet:static "Avalonia.Controls.Dock" "Left"))
-                 (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" bclr
-                                (dotnet:static "Avalonia.Controls.Dock" "Right"))
-                 (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" bchg
-                                (dotnet:static "Avalonia.Controls.Dock" "Right"))
-                 (dotnet:invoke row "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 2d0))
-                 (let ((rc (dotnet:invoke row "get_Children")))
-                   (dotnet:invoke rc "Add" lbl)
-                   (dotnet:invoke rc "Add" bclr)
-                   (dotnet:invoke rc "Add" bchg)
-                   (dotnet:invoke rc "Add" kt))
-                 (dotnet:invoke ch "Add" row))))))
+             (dolist (pair (sort (copy-list (car kbox)) #'string< :key #'car))
+               (dotnet:invoke ch "Add" (kb-row pair))))))
       (flet ((add (x) (dotnet:invoke (dotnet:invoke panel "get_Children") "Add" x)))
         (add (%s-header "表示"))
         (add (%s-row "綴じ方向" combo))
@@ -1295,12 +1305,14 @@ UI スレッドで呼ぶこと。"
         (add (%s-row "キャッシュ最大ページ数" tb-cache))
         (add (%s-row "先読み見開き数" tb-pf))
         (add (%s-row "ローダースレッド数" tb-th))
-        (add (%s-header "キー割当 (後勝ち: 既存割当は自動で外れる)"))
+        (add (%s-header "キー割当 (キー → 機能。1 キー 1 機能、同じ機能に複数キーも可)"))
         (refresh)
         (let ((scr (dotnet:new "Avalonia.Controls.ScrollViewer")))
           (dotnet:invoke scr "set_MaxHeight" 240d0)
           (dotnet:invoke scr "set_Content" kb-stack)
           (add scr))
+        (add (%s-button "＋ キーを追加"
+                        (lambda () (%capture-key swin (lambda (k) (add-binding k))))))
         (let ((btns (dotnet:new "Avalonia.Controls.StackPanel")))
           (dotnet:invoke btns "set_Orientation"
                          (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
@@ -1314,8 +1326,14 @@ UI スレッドで呼ぶこと。"
               (%s-button "OK"
                 (lambda ()
                   (%settings-apply vw cb-spread cb-fps cb-rec combo tb-cache tb-pf tb-th)
+                  ;; キー指向の作業リストを機能ごとにまとめ直して確定 (削除は空リストで反映)。
                   (setf *keybinds*
-                        (mapcar (lambda (e) (cons (car e) (copy-list (cdr e)))) work))
+                        (mapcar (lambda (c)
+                                  (let ((ks '()))
+                                    (dolist (pair (car kbox))
+                                      (when (eq (cdr pair) (command-id c)) (push (car pair) ks)))
+                                    (cons (command-id c) (nreverse ks))))
+                                *commands*))
                   (rebuild-keymap)
                   (save-keybinds)
                   (dotnet:invoke swin "Close")))))
