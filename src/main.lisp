@@ -228,16 +228,25 @@ EndInit で復号完了するので、戻り後に stream を閉じてよい。"
                        (format nil "paalam — ~a (~d/~d)"
                                (book-page-name book i) (1+ i) n))))))
 
+(defparameter *page-direction* :rtl
+  "綴じ方向。:rtl = NeeView 既定 (右開き/漫画) で ← が次・→ が前。:ltr は逆。
+矢印キーのみ反転する。PageDown/Space=次, PageUp=前, Home/End=絶対 は不変。")
+
 (defun %on-key (vw e)
-  "Window KeyDown ハンドラ。←/→/PageUp/PageDown/Space/Home/End でページ送り。"
+  "Window KeyDown ハンドラ。←/→/PageUp/PageDown/Space/Home/End でページ送り。
+左右矢印は *page-direction* で綴じ方向に合わせて反転する。"
   (let ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString")))
-    (cond
-      ((member kn '("Right" "PageDown" "Next" "Space") :test #'string=)
-       (show-page vw (1+ (viewer-index vw))))
-      ((member kn '("Left" "PageUp" "Prior" "Back") :test #'string=)
-       (show-page vw (1- (viewer-index vw))))
-      ((string= kn "Home") (show-page vw 0))
-      ((string= kn "End")  (show-page vw (1- (book-page-count (viewer-book vw))))))))
+    (flet ((next () (show-page vw (1+ (viewer-index vw))))
+           (prev () (show-page vw (1- (viewer-index vw)))))
+      (cond
+        ;; 綴じ方向に依存しないページ送り
+        ((member kn '("PageDown" "Next" "Space") :test #'string=) (next))
+        ((member kn '("PageUp" "Prior" "Back") :test #'string=) (prev))
+        ;; 左右矢印は綴じ方向で反転 (rtl=漫画: ←が次)
+        ((string= kn "Left")  (if (eq *page-direction* :rtl) (next) (prev)))
+        ((string= kn "Right") (if (eq *page-direction* :rtl) (prev) (next)))
+        ((string= kn "Home") (show-page vw 0))
+        ((string= kn "End")  (show-page vw (1- (book-page-count (viewer-book vw)))))))))
 
 ;;; ------------------------------------------------------------------
 ;;; ウィンドウ / アプリ構築
