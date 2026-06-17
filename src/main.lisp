@@ -884,10 +884,11 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
            (base (%fit-base cw ch vpw vph))
            (s (* base (viewer-zoom vw))))
       (setf (viewer-fit-base vw) base)
-      (if (eq *fit-mode* :whole)
-          (setf (viewer-tx vw) (/ (- vpw (* cw s)) 2d0)
-                (viewer-ty vw) (/ (- vph (* ch s)) 2d0))
-          (setf (viewer-tx vw) 0d0 (viewer-ty vw) 0d0))
+      ;; 各軸: 収まるなら中央寄せ、はみ出すなら先頭(上/左)アンカー (はみ出し分は pan で
+      ;; スクロール)。これで whole=中央、width=縦・height=横の自由軸が「余れば中央/
+      ;; あふれれば先頭」になる。
+      (setf (viewer-tx vw) (max 0d0 (/ (- vpw (* cw s)) 2d0))
+            (viewer-ty vw) (max 0d0 (/ (- vph (* ch s)) 2d0)))
       (apply-transform vw))))
 
 (defun reset-view (vw)
