@@ -3,7 +3,9 @@
   <!-- クロスプラット: net10.0 (-windows 不要)。GUI は Avalonia。
        dotcl/Avalonia とも NuGet 経由のみ。dotcl repo への参照は持たない (#281)。 -->
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <!-- WinExe: GUI アプリなので Windows でコンソールを出さない
+         (他 OS では実質 Exe 扱い)。boot/例外はログファイルに出す。 -->
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
