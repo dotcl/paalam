@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "isRoot": true,
+  "tools": {
+    "dotcl": {
+      "version": "0.1.10",
+      "commands": [
+        "dotcl"
+      ],
+      "rollForward": false
+    }
+  }
+}

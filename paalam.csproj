@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Paalam</RootNamespace>
+    <AssemblyName>paalam</AssemblyName>
+  </PropertyGroup>
+
+  <!-- dotcl は NuGet 経由のみ。dotcl repo への相対参照は持たない (#281)。 -->
+  <ItemGroup>
+    <PackageReference Include="DotCL.Runtime" Version="0.1.10" GeneratePathProperty="true" />
+  </ItemGroup>
+
+  <!-- DotCL.Runtime 0.1.10 の contentFiles は buildAction=Content のみで
+       copyToOutput=true が無く、dotcl.core が出力にコピーされない
+       → FindCore() が見つけられない。復元先 ($(PkgDotCL_Runtime)) から明示コピーする。
+       (dotcl-internal #281 のドッグフード: パッケージ側を直すまでの回避策) -->
+  <ItemGroup>
+    <None Include="$(PkgDotCL_Runtime)\contentFiles\any\net10.0\dotcl.core"
+          Link="dotcl.core" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+
+  <!-- Lisp 本体を出力直下に main.lisp として配置 (実行時 LoadLispFile)。 -->
+  <ItemGroup>
+    <Content Include="src\main.lisp" Link="main.lisp">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>

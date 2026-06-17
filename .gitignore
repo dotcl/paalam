@@ -1,0 +1,11 @@
+# .NET build output
+bin/
+obj/
+dist/
+
+# boot trace (実行時生成)
+paalam-boot.log
+
+# editor / misc
+*.user
+.vs/
