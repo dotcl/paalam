@@ -1347,16 +1347,44 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
     (unwind-protect (dotnet:invoke k "SetValue" name value)
       (ignore-errors (dotnet:invoke k "Close")))))
 
-(defun %register-file-associations ()
-  "ProgID 登録 + 各拡張子の OpenWithProgids に追加 (per-user)。exe は自分自身。"
-  (ignore-errors (dotnet:load-assembly "Microsoft.Win32.Registry"))
+(defun %assoc-key (ext) (format nil "Software\\Classes\\.~a\\OpenWithProgids" ext))
+
+(defun %ensure-progid ()
+  "ProgID 本体 (開くコマンド + アイコン) を登録 (冪等)。exe は自分自身。"
   (let ((exe (dotnet:static "System.Environment" "ProcessPath")))
     (%reg-set (format nil "Software\\Classes\\~a" *progid*) "" "paalam 画像 / 書庫 / PDF")
     (%reg-set (format nil "Software\\Classes\\~a\\DefaultIcon" *progid*) "" (format nil "~a,0" exe))
     (%reg-set (format nil "Software\\Classes\\~a\\shell\\open\\command" *progid*) ""
-              (format nil "\"~a\" \"%1\"" exe))
-    (dolist (ext *assoc-extensions*)
-      (%reg-set (format nil "Software\\Classes\\.~a\\OpenWithProgids" ext) *progid* ""))))
+              (format nil "\"~a\" \"%1\"" exe))))
+
+(defun %assoc-registered-p (ext)
+  "EXT の OpenWithProgids に *progid* が載っているか。"
+  (handler-case
+      (let* ((cu (dotnet:static "Microsoft.Win32.Registry" "CurrentUser"))
+             (k  (dotnet:invoke cu "OpenSubKey" (%assoc-key ext))))
+        (if k
+            (unwind-protect (and (dotnet:invoke k "GetValue" *progid*) t)
+              (ignore-errors (dotnet:invoke k "Close")))
+            nil))
+    (error () nil)))
+
+(defun %assoc-register (exts)
+  "EXTS を *progid* の OpenWithProgids 候補に追加 (per-user)。ProgID 本体も用意。"
+  (ignore-errors (dotnet:load-assembly "Microsoft.Win32.Registry"))
+  (%ensure-progid)
+  (dolist (ext exts) (%reg-set (%assoc-key ext) *progid* "")))
+
+(defun %assoc-unregister (exts)
+  "EXTS の OpenWithProgids から *progid* を外す。"
+  (ignore-errors (dotnet:load-assembly "Microsoft.Win32.Registry"))
+  (dolist (ext exts)
+    (ignore-errors
+      (let* ((cu (dotnet:static "Microsoft.Win32.Registry" "CurrentUser"))
+             (k  (dotnet:invoke cu "OpenSubKey" (%assoc-key ext) t)))   ; writable
+        (when k
+          (unwind-protect
+               (ignore-errors (dotnet:invoke k "DeleteValue" *progid* nil)) ; throwOnMissing=false
+            (ignore-errors (dotnet:invoke k "Close"))))))))
 
 (defun %open-default-apps ()
   "Windows の「既定のアプリ」設定を開く (既定化はユーザ操作が要るため誘導)。"
@@ -1503,7 +1531,56 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
                (dotnet:invoke it "set_IsExpanded" t)
                (let ((items (dotnet:invoke it "get_Items")))
                  (dolist (c children) (dotnet:invoke items "Add" c))))
-             it)))
+             it))
+         (assoc-page ()
+           "関連付けページ (#11): 拡張子ごとチェックボックス + 登録/登録解除 (Windows)。"
+           (let ((wrap  (dotnet:new "Avalonia.Controls.WrapPanel"))
+                 (boxes (mapcar (lambda (ext)
+                                  (let ((cb (dotnet:new "Avalonia.Controls.CheckBox")))
+                                    (dotnet:invoke cb "set_Content" (format nil ".~a" ext))
+                                    (dotnet:invoke cb "set_Width" 92d0)
+                                    (dotnet:invoke cb "set_IsChecked" (and win-p (%assoc-registered-p ext)))
+                                    (cons ext cb)))
+                                *assoc-extensions*)))
+             (dotnet:invoke wrap "set_Width" 380d0)
+             (dolist (b boxes) (dotnet:invoke (dotnet:invoke wrap "get_Children") "Add" (cdr b)))
+             (labels ((checked-exts ()
+                        (let ((acc '()))
+                          (dolist (b boxes) (when (dotnet:invoke (cdr b) "get_IsChecked") (push (car b) acc)))
+                          (nreverse acc)))
+                      (set-all (v) (dolist (b boxes) (dotnet:invoke (cdr b) "set_IsChecked" v)))
+                      (sync ()  ; レジストリの実状態をチェックに反映
+                        (dolist (b boxes)
+                          (dotnet:invoke (cdr b) "set_IsChecked" (%assoc-registered-p (car b))))))
+               (let ((row (dotnet:new "Avalonia.Controls.StackPanel")))
+                 (dotnet:invoke row "set_Orientation" (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
+                 (let ((rc (dotnet:invoke row "get_Children")))
+                   (dotnet:invoke rc "Add" (%s-button "全選択" (lambda () (set-all t))))
+                   (dotnet:invoke rc "Add" (%s-button "全解除" (lambda () (set-all nil))))
+                   (dotnet:invoke rc "Add"
+                     (%s-button "登録"
+                       (lambda ()
+                         (let ((es (checked-exts)))
+                           (handler-case
+                               (progn (%assoc-register es) (sync)
+                                      (dotnet:invoke assoc-status "set_Text"
+                                        "選択分を「プログラムから開く」候補に登録。既定にするには『既定のアプリ』で paalam を選択。")
+                                      (%open-default-apps))
+                             (error (e) (dotnet:invoke assoc-status "set_Text" (format nil "失敗: ~a" e))))))))
+                   (dotnet:invoke rc "Add"
+                     (%s-button "登録解除"
+                       (lambda ()
+                         (handler-case
+                             (progn (%assoc-unregister (checked-exts)) (sync)
+                                    (dotnet:invoke assoc-status "set_Text" "選択分の関連付けを解除。"))
+                           (error (e) (dotnet:invoke assoc-status "set_Text" (format nil "失敗: ~a" e))))))))
+                 (let ((desc (dotnet:new "Avalonia.Controls.TextBlock")))
+                   (dotnet:invoke desc "set_Text"
+                     "関連付ける拡張子を選び「登録」(per-user・管理者権限不要)。候補に載るだけで既定は変わらないので、既定にしたい型は『既定のアプリ』で paalam を選ぶ。")
+                   (dotnet:invoke desc "set_TextWrapping" (dotnet:static "Avalonia.Media.TextWrapping" "Wrap"))
+                   (dotnet:invoke desc "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 0d0 0d0 8d0))
+                   (page (list (%s-header "関連付け (Windows / 管理者権限不要)")
+                               desc wrap row assoc-status))))))))
       (refresh)
       (let* ((scr (dotnet:new "Avalonia.Controls.ScrollViewer"))
              (addbtn (%s-button "＋ キーを追加"
@@ -1530,26 +1607,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
                  (dotnet:invoke scr "set_Content" kb-stack)
                  (page (list (%s-header "キー割当 (キー → 機能。1 キー 1 機能、複数可)")
                              scr addbtn))))
-             (panel-assoc
-               (page (list (%s-header "関連付け (Windows / 管理者権限不要)")
-                           (let ((d (dotnet:new "Avalonia.Controls.TextBlock")))
-                             (dotnet:invoke d "set_Text"
-                               "画像 / 書庫 / PDF を paalam に関連付けます (現在のユーザのみ)。登録後、Windows の『既定のアプリ』で paalam を選ぶと既定で開けます。")
-                             (dotnet:invoke d "set_TextWrapping"
-                                            (dotnet:static "Avalonia.Media.TextWrapping" "Wrap"))
-                             (dotnet:invoke d "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 0d0 0d0 8d0))
-                             d)
-                           (%s-button "この PC で関連付ける"
-                             (lambda ()
-                               (handler-case
-                                   (progn
-                                     (%register-file-associations)
-                                     (dotnet:invoke assoc-status "set_Text"
-                                       "登録しました。続いて『既定のアプリ』で paalam を選べます。")
-                                     (%open-default-apps))
-                                 (error (e)
-                                   (dotnet:invoke assoc-status "set_Text" (format nil "失敗: ~a" e))))))
-                           assoc-status)))
+             (panel-assoc (assoc-page))
              (pages (append (list (cons "レイアウト" panel-layout)
                                   (cons "画質"      panel-quality)
                                   (cons "先読み"    panel-perf)
