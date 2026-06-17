@@ -1383,9 +1383,10 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
     (dotnet:invoke w "ShowDialog" owner)))
 
 (defun %open-settings (vw)
+  ;; 左に折りたたみツリー (カテゴリ)、右に該当ページ。選択で右を差し替える master/detail。
+  ;; OK/キャンセルは全ページ共通 (コントロールは非表示でも値を保持するので OK で読める)。
   (let* ((owner (viewer-window vw))
          (swin  (dotnet:new "Avalonia.Controls.Window"))
-         (panel (dotnet:new "Avalonia.Controls.StackPanel"))
          (combo (dotnet:new "Avalonia.Controls.ComboBox"))
          (cb-spread (%s-checkbox *spread*))
          (cb-fps    (%s-checkbox *first-page-single*))
@@ -1396,23 +1397,20 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
          (fit-combo    (%s-choice-combo *fit-choices* *fit-mode*))
          (bg-combo     (%s-choice-combo *bg-choices* *background-color* #'string=))
          (interp-combo (%s-choice-combo *interp-choices* *interpolation*))
-         ;; キー割当の作業用コピー: キー指向で (key . command-id) の集合。1 キー 1 機能、
-         ;; 同じ機能に複数キーは複数行で表す。OK まで *keybinds* は触らない。
-         ;; 保持用コンス。(car kbox) が作業リスト。クロージャからは (setf (car kbox) ..) で
-         ;; 「place」を書き換える (let* 変数自体の再束縛は dotcl が不正 IL を吐くため避ける)。
+         ;; キー割当の作業用コピー。(car kbox) が作業リスト。クロージャからは
+         ;; (setf (car kbox) ..) で place を書き換える (let* 変数の再束縛は dotcl が不正 IL)。
          (kbox (list (let ((acc '()))
                        (dolist (c *commands*)
                          (dolist (k (%effective-keys c)) (push (cons k (command-id c)) acc)))
                        (nreverse acc))))
-         (kb-stack (dotnet:new "Avalonia.Controls.StackPanel")))
+         (kb-stack (dotnet:new "Avalonia.Controls.StackPanel"))
+         (content  (dotnet:new "Avalonia.Controls.ContentControl")))
     (let ((items (dotnet:invoke combo "get_Items")))
       (dotnet:invoke items "Add" "右開き (RTL)")
       (dotnet:invoke items "Add" "左開き (LTR)"))
     (dotnet:invoke combo "set_SelectedIndex" (if (eq *page-direction* :rtl) 0 1))
-    (dotnet:invoke panel "set_Margin" (dotnet:new "Avalonia.Thickness" 16d0))
     (labels
         ((add-binding (k)
-           ;; 1 キー 1 機能。既にある行なら何もしない (その行の機能を選び直せばよい)。
            (unless (assoc k (car kbox) :test #'string=)
              (setf (car kbox) (cons (cons k (command-id (car *commands*))) (car kbox))))
            (refresh))
@@ -1430,7 +1428,6 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
                (dolist (c *commands*) (dotnet:invoke items "Add" (command-label c))))
              (dotnet:invoke cbox "set_SelectedIndex"
                             (or (position (cdr pair) *commands* :key #'command-id) 0))
-             ;; 機能を選び直す → この行のキー pair の cdr (割当先) を更新 (place なので安全)。
              (dotnet:add-event cbox "SelectionChanged"
                (lambda (s e) (declare (ignore s e))
                  (let ((i (dotnet:invoke cbox "get_SelectedIndex")))
@@ -1447,68 +1444,131 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
              (let ((rc (dotnet:invoke row "get_Children")))
                (dotnet:invoke rc "Add" klbl)
                (dotnet:invoke rc "Add" bdel)
-               (dotnet:invoke rc "Add" cbox))   ; 最後 = 中央 (機能 ComboBox) を埋める
+               (dotnet:invoke rc "Add" cbox))
              row))
          (refresh ()
            (let ((ch (dotnet:invoke kb-stack "get_Children")))
              (dotnet:invoke ch "Clear")
              (dolist (pair (sort (copy-list (car kbox)) #'string< :key #'car))
-               (dotnet:invoke ch "Add" (kb-row pair))))))
-      (flet ((add (x) (dotnet:invoke (dotnet:invoke panel "get_Children") "Add" x)))
-        (add (%s-header "表示"))
-        (add (%s-row "綴じ方向" combo))
-        (add (%s-row "見開き" cb-spread))
-        (add (%s-row "表紙を単独表示" cb-fps))
-        (add (%s-row "サブフォルダも再帰収集" cb-rec))
-        (add (%s-row "フィット" fit-combo))
-        (add (%s-row "背景色" bg-combo))
-        (add (%s-row "拡大補間" interp-combo))
-        (add (%s-header "性能 (先読み)"))
-        (add (%s-row "キャッシュ最大ページ数" tb-cache))
-        (add (%s-row "先読み見開き数" tb-pf))
-        (add (%s-row "ローダースレッド数" tb-th))
-        (add (%s-header "キー割当 (キー → 機能。1 キー 1 機能、同じ機能に複数キーも可)"))
-        (refresh)
-        (let ((scr (dotnet:new "Avalonia.Controls.ScrollViewer")))
-          (dotnet:invoke scr "set_MaxHeight" 240d0)
-          (dotnet:invoke scr "set_Content" kb-stack)
-          (add scr))
-        (add (%s-button "＋ キーを追加"
-                        (lambda () (%capture-key swin (lambda (k) (add-binding k))))))
-        (let ((btns (dotnet:new "Avalonia.Controls.StackPanel")))
-          (dotnet:invoke btns "set_Orientation"
-                         (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
-          (dotnet:invoke btns "set_HorizontalAlignment"
-                         (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Right"))
-          (dotnet:invoke btns "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 16d0 0d0 0d0))
-          (let ((bc (dotnet:invoke btns "get_Children")))
-            (dotnet:invoke bc "Add"
-              (%s-button "キャンセル" (lambda () (dotnet:invoke swin "Close"))))
-            (dotnet:invoke bc "Add"
-              (%s-button "OK"
-                (lambda ()
-                  (%settings-apply vw cb-spread cb-fps cb-rec combo tb-cache tb-pf tb-th
-                                   fit-combo bg-combo interp-combo)
-                  ;; キー指向の作業リストを機能ごとにまとめ直して確定 (削除は空リストで反映)。
-                  (setf *keybinds*
-                        (mapcar (lambda (c)
-                                  (let ((ks '()))
-                                    (dolist (pair (car kbox))
-                                      (when (eq (cdr pair) (command-id c)) (push (car pair) ks)))
-                                    (cons (command-id c) (nreverse ks))))
-                                *commands*))
-                  (rebuild-keymap)
-                  (save-keybinds)
-                  (dotnet:invoke swin "Close")))))
-          (add btns))))
-    (dotnet:invoke swin "set_Title" "設定")
-    (dotnet:invoke swin "set_Width" 460d0)
-    (dotnet:invoke swin "set_SizeToContent"
-                   (dotnet:static "Avalonia.Controls.SizeToContent" "Height"))
-    (dotnet:invoke swin "set_WindowStartupLocation"
-                   (dotnet:static "Avalonia.Controls.WindowStartupLocation" "CenterOwner"))
-    (dotnet:invoke swin "set_Content" panel)
-    (dotnet:invoke swin "ShowDialog" owner)))
+               (dotnet:invoke ch "Add" (kb-row pair)))))
+         (page (rows)
+           "rows を縦に並べた設定ページ (StackPanel)。"
+           (let ((p (dotnet:new "Avalonia.Controls.StackPanel")))
+             (dotnet:invoke p "set_Margin" (dotnet:new "Avalonia.Thickness" 16d0))
+             (let ((ch (dotnet:invoke p "get_Children")))
+               (dolist (r rows) (dotnet:invoke ch "Add" r)))
+             p))
+         (tvi (header &optional children)
+           "TreeViewItem を作る (children があれば展開済みの親ノード)。"
+           (let ((it (dotnet:new "Avalonia.Controls.TreeViewItem")))
+             (dotnet:invoke it "set_Header" header)
+             (when children
+               (dotnet:invoke it "set_IsExpanded" t)
+               (let ((items (dotnet:invoke it "get_Items")))
+                 (dolist (c children) (dotnet:invoke items "Add" c))))
+             it)))
+      (refresh)
+      (let* ((scr (dotnet:new "Avalonia.Controls.ScrollViewer"))
+             (addbtn (%s-button "＋ キーを追加"
+                                (lambda () (%capture-key swin (lambda (k) (add-binding k))))))
+             (panel-layout
+               (page (list (%s-header "レイアウト")
+                           (%s-row "綴じ方向" combo)
+                           (%s-row "見開き" cb-spread)
+                           (%s-row "表紙を単独表示" cb-fps)
+                           (%s-row "サブフォルダも再帰収集" cb-rec)
+                           (%s-row "フィット" fit-combo))))
+             (panel-quality
+               (page (list (%s-header "画質")
+                           (%s-row "背景色" bg-combo)
+                           (%s-row "拡大補間" interp-combo))))
+             (panel-perf
+               (page (list (%s-header "先読み")
+                           (%s-row "キャッシュ最大ページ数" tb-cache)
+                           (%s-row "先読み見開き数" tb-pf)
+                           (%s-row "ローダースレッド数" tb-th))))
+             (panel-keys
+               (progn
+                 (dotnet:invoke scr "set_MaxHeight" 360d0)
+                 (dotnet:invoke scr "set_Content" kb-stack)
+                 (page (list (%s-header "キー割当 (キー → 機能。1 キー 1 機能、複数可)")
+                             scr addbtn))))
+             (pages (list (cons "レイアウト" panel-layout)
+                          (cons "画質"      panel-quality)
+                          (cons "先読み"    panel-perf)
+                          (cons "キー割当"  panel-keys)))
+             (tree (dotnet:new "Avalonia.Controls.TreeView"))
+             (leaf-layout  (tvi "レイアウト"))
+             (leaf-quality (tvi "画質"))
+             (leaf-perf    (tvi "先読み"))
+             (leaf-keys    (tvi "キー割当"))
+             (g-view (tvi "表示" (list leaf-layout leaf-quality)))
+             (g-perf (tvi "性能" (list leaf-perf)))
+             (g-op   (tvi "操作" (list leaf-keys)))
+             (root (dotnet:new "Avalonia.Controls.DockPanel"))
+             (grid (dotnet:new "Avalonia.Controls.Grid"))
+             (btns (dotnet:new "Avalonia.Controls.StackPanel")))
+        ;; 左ツリー (折りたたみ可能なカテゴリ)。選択された葉の header からページを引いて右へ。
+        (let ((items (dotnet:invoke tree "get_Items")))
+          (dotnet:invoke items "Add" g-view)
+          (dotnet:invoke items "Add" g-perf)
+          (dotnet:invoke items "Add" g-op))
+        (dotnet:add-event tree "SelectionChanged"
+          (lambda (s e) (declare (ignore s e))
+            (let ((item (dotnet:invoke tree "get_SelectedItem")))
+              (when item
+                (let ((p (cdr (assoc (dotnet:invoke item "get_Header") pages :test #'equal))))
+                  (when p (dotnet:invoke content "set_Content" p)))))))
+        (dotnet:invoke content "set_Content" panel-layout)   ; 初期ページ
+        (dotnet:invoke leaf-layout "set_IsSelected" t)
+        ;; 2 列 grid: [tree(180) | content(*)]
+        (let ((cols (dotnet:invoke grid "get_ColumnDefinitions"))
+              (c0 (dotnet:new "Avalonia.Controls.ColumnDefinition")))
+          (dotnet:invoke c0 "set_Width" (dotnet:new "Avalonia.Controls.GridLength" 180d0))
+          (dotnet:invoke cols "Add" c0)
+          (dotnet:invoke cols "Add" (dotnet:new "Avalonia.Controls.ColumnDefinition")))
+        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" tree 0)
+        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" content 1)
+        (let ((gc (dotnet:invoke grid "get_Children")))
+          (dotnet:invoke gc "Add" tree)
+          (dotnet:invoke gc "Add" content))
+        ;; OK/キャンセル (下部共通)
+        (dotnet:invoke btns "set_Orientation"
+                       (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
+        (dotnet:invoke btns "set_HorizontalAlignment"
+                       (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Right"))
+        (dotnet:invoke btns "set_Margin" (dotnet:new "Avalonia.Thickness" 12d0))
+        (let ((bc (dotnet:invoke btns "get_Children")))
+          (dotnet:invoke bc "Add" (%s-button "キャンセル" (lambda () (dotnet:invoke swin "Close"))))
+          (dotnet:invoke bc "Add"
+            (%s-button "OK"
+              (lambda ()
+                (%settings-apply vw cb-spread cb-fps cb-rec combo tb-cache tb-pf tb-th
+                                 fit-combo bg-combo interp-combo)
+                ;; キー指向の作業リストを機能ごとにまとめ直して確定 (削除は空リストで反映)。
+                (setf *keybinds*
+                      (mapcar (lambda (c)
+                                (let ((ks '()))
+                                  (dolist (pair (car kbox))
+                                    (when (eq (cdr pair) (command-id c)) (push (car pair) ks)))
+                                  (cons (command-id c) (nreverse ks))))
+                              *commands*))
+                (rebuild-keymap)
+                (save-keybinds)
+                (dotnet:invoke swin "Close")))))
+        ;; root: [btns(下) | grid(残り)]
+        (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" btns
+                       (dotnet:static "Avalonia.Controls.Dock" "Bottom"))
+        (let ((rc (dotnet:invoke root "get_Children")))
+          (dotnet:invoke rc "Add" btns)
+          (dotnet:invoke rc "Add" grid))
+        (dotnet:invoke swin "set_Title" "設定")
+        (dotnet:invoke swin "set_Width" 640d0)
+        (dotnet:invoke swin "set_Height" 520d0)
+        (dotnet:invoke swin "set_WindowStartupLocation"
+                       (dotnet:static "Avalonia.Controls.WindowStartupLocation" "CenterOwner"))
+        (dotnet:invoke swin "set_Content" root)
+        (dotnet:invoke swin "ShowDialog" owner)))))
 
 ;;; メニューバー (#21)
 ;;; Menu/MenuItem はキーボードフォーカスを保持する。クリック後フォーカスが
