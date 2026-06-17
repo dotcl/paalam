@@ -319,7 +319,8 @@
     (:first-page-single . *first-page-single*)
     (:recursive         . *recursive*)
     (:cache-size        . *cache-size*)
-    (:prefetch-ahead    . *prefetch-ahead*))
+    (:prefetch-ahead    . *prefetch-ahead*)
+    (:loader-threads    . *loader-threads*))
   "保存対象の (設定キー . 特殊変数シンボル)。ここに足すだけで永続化対象になる。")
 
 (defun %config-dir ()
@@ -488,9 +489,12 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
   "デコード済みページの最大保持数 (設定ファイルで調整可)。")
 (defparameter *prefetch-ahead* 8
   "現在の見開きから何見開き先まで先読みするか (設定ファイルで調整可)。")
+(defparameter *loader-threads* 4
+  "並列ローダースレッド数。各スレッドが自前の書庫ハンドルで同時に読むので、
+NAS の帯域/レイテンシを隠せる (設定ファイルで調整可)。")
 
 (defstruct loader
-  book
+  books                               ; 書庫ハンドルの vector (ワーカーが分担)
   (cache (make-hash-table))           ; index -> Avalonia Bitmap
   (inflight (make-hash-table))        ; 現在ロード中の index (二度読み防止)
   (lock (make-lock "paalam-loader"))
@@ -498,7 +502,7 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
   (queue '())                         ; ロード待ち index (優先順)
   (current 0)                         ; LRU の中心 (現在ページ index)
   (done nil)
-  worker
+  workers                             ; ワーカースレッドのリスト
   on-loaded)                          ; (lambda (index)) — UI へ通知
 
 (defun loader-get (ld index)
@@ -531,24 +535,30 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
                                        indices))
     (%dbg "req cur=~a want=~a queued=~a cache=~a" current (length indices)
           (length (loader-queue ld)) (hash-table-count (loader-cache ld)))
-    (condition-notify (loader-cv ld))))
+    (condition-broadcast (loader-cv ld))))   ; 複数ワーカーを起こす
 
-(defun %loader-loop (ld)
+;;; book が並行ロード安全か。directory はファイル read が独立で安全 (1 ハンドル共有可)。
+;;; zip/sharp/pdf は書庫/native ハンドルが非並行なので各ワーカーに別ハンドルを持たせる。
+(defgeneric book-parallel-safe-p (book))
+(defmethod book-parallel-safe-p ((b t)) nil)
+(defmethod book-parallel-safe-p ((b directory-book)) t)
+
+(defun %loader-loop (ld book)
+  "ワーカー本体。BOOK はこのワーカー専用の書庫ハンドル (並列読み用)。"
   (loop
     (let ((index nil))
       (with-lock-held ((loader-lock ld))
         (loop while (and (null (loader-queue ld)) (not (loader-done ld)))
               do (condition-wait (loader-cv ld) (loader-lock ld)))
-        ;; done なら待ち行列 (prefetch) を捨てて即終了。stop 時に古い queue を
-        ;; 全部ロードし終えるまで join がブロックするのを防ぐ (DnD/再オープンの固まり)。
+        ;; done なら待ち行列 (prefetch) を捨てて即終了。
         (when (loader-done ld) (return))
         (setf index (pop (loader-queue ld)))
         (when index (setf (gethash index (loader-inflight ld)) t)))   ; ロード中マーク
       (when index
-        ;; ワーカーは決して死なせない (どんな条件も握り潰してログ)。in-flight は必ず解除。
+        ;; ワーカーは決して死なせない。in-flight は必ず解除。
         (unwind-protect
             (handler-case
-                (let ((bmp (book-load-image (loader-book ld) index)))
+                (let ((bmp (book-load-image book index)))   ; 自前ハンドルで読む (並列)
                   (if bmp
                       (progn
                         (with-lock-held ((loader-lock ld))
@@ -560,22 +570,31 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
               (error (e) (%dbg "LOAD-ERR ~a : ~a" index e)))
           (with-lock-held ((loader-lock ld)) (remhash index (loader-inflight ld))))))))
 
-(defun open-loader (book on-loaded)
-  (let ((ld (make-loader :book book :on-loaded on-loaded)))
-    (setf (loader-worker ld)
-          (make-thread (lambda () (%loader-loop ld)) :name "paalam-loader"))
+(defun open-loader (path on-loaded)
+  "PATH を *loader-threads* スレッドで並列ロードするローダーを起動。
+並列安全な book は 1 ハンドル共有、そうでなければスレッド毎に別ハンドルを開く。"
+  (let* ((n (max 1 *loader-threads*))
+         (first (open-book path))
+         (nh (if (book-parallel-safe-p first) 1 n))   ; ハンドル数
+         (books (coerce (cons first (loop repeat (1- nh) collect (open-book path))) 'vector))
+         (ld (make-loader :books books :on-loaded on-loaded)))
+    (setf (loader-workers ld)
+          (loop for i from 0 below n
+                collect (let ((bk (aref books (mod i nh))))
+                          (make-thread (lambda () (%loader-loop ld bk)) :name "paalam-loader"))))
     ld))
 
 (defun loader-stop (ld)
-  "ワーカーを止め、cache の Bitmap を全解放する (再オープン/終了時のリーク防止)。"
+  "全ワーカーを止め、cache の Bitmap と書庫ハンドルを解放する。"
   (with-lock-held ((loader-lock ld))
     (setf (loader-done ld) t)
-    (condition-notify (loader-cv ld)))
-  (ignore-errors (thread-join (loader-worker ld)))   ; 新規 cache が無くなるのを待つ
+    (condition-broadcast (loader-cv ld)))
+  (dolist (w (loader-workers ld)) (ignore-errors (thread-join w)))   ; 全ワーカー終了待ち
   (with-lock-held ((loader-lock ld))
     (maphash (lambda (k v) (declare (ignore k)) (ignore-errors (dotnet:invoke v "Dispose")))
              (loader-cache ld))
-    (clrhash (loader-cache ld))))
+    (clrhash (loader-cache ld)))
+  (loop for b across (loader-books ld) do (ignore-errors (book-close b))))   ; ハンドル解放
 
 (defun %ui-post (thunk)
   "thunk を UI スレッドで実行 (ワーカー→UI マーシャリング)。"
@@ -602,7 +621,7 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
       (ignore-errors (book-close (viewer-book vw)))
       (setf (viewer-book vw) book
             (viewer-loader vw) (open-loader
-                                book
+                                (viewer-source vw)
                                 (lambda (index)
                                   (%ui-post (lambda () (%on-page-loaded vw index)))))
             (viewer-spreads vw) (compute-spreads (book-page-count book))
@@ -623,7 +642,7 @@ UI スレッドで呼ぶこと。"
           (setf (viewer-source vw) path
                 (viewer-book vw) book
                 (viewer-loader vw) (open-loader
-                                    book
+                                    path
                                     (lambda (i) (%ui-post (lambda () (%on-page-loaded vw i)))))
                 (viewer-spreads vw) spreads
                 (viewer-sindex vw) (spread-index-of spreads page))
@@ -933,7 +952,7 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
                                            (lambda (p) (open-path vw p))))
       ;; 先読みローダーを起動 (vw を closure で参照するので vw 作成後)。
       (setf (viewer-loader vw)
-            (open-loader book
+            (open-loader path
                          (lambda (index)
                            (%ui-post (lambda () (%on-page-loaded vw index))))))
       (show-spread vw)
