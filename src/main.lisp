@@ -98,12 +98,22 @@
       dir
       (concatenate 'string dir "/")))
 
+(defun %dedup-strings (list)
+  (let ((seen (make-hash-table :test 'equal)) (acc '()))
+    (dolist (x list (nreverse acc))
+      (unless (gethash x seen) (setf (gethash x seen) t) (push x acc)))))
+
 (defun %dir-image-files (dir)
-  (let ((dir (%ensure-trailing-slash dir)))
-    (sort (loop for ext in *image-extensions*
-                append (mapcar #'namestring
-                               (directory (concatenate 'string dir "*." ext))))
-          #'natural<)))
+  "dir 直下 (+ *recursive* ならサブフォルダも) の画像ファイル full path を自然順で。
+** は直下を含まないので *.ext と **/*.ext の和集合を取る。"
+  (let ((dir (%ensure-trailing-slash dir))
+        (globs (if *recursive* '("*." "**/*.") '("*.")))
+        (out '()))
+    (dolist (ext *image-extensions*)
+      (dolist (g globs)
+        (dolist (p (directory (concatenate 'string dir g ext)))
+          (push (namestring p) out))))
+    (sort (%dedup-strings out) #'natural<)))
 
 (defun make-directory-book (dir)
   (make-instance 'directory-book :paths (coerce (%dir-image-files dir) 'vector)))
@@ -257,12 +267,15 @@
   "見開き表示。t = 2 ページ並べ、nil = 単ページ。")
 (defparameter *first-page-single* t
   "見開き時、先頭ページ (表紙) を単独表示する (漫画の慣習)。")
+(defparameter *recursive* t
+  "フォルダを本として開くとき、サブフォルダの画像も再帰的に集める。")
 
 ;;; --- 設定の永続化 (s式 plist / OS の app data) ---------------------
 (defparameter *settings*
   '((:page-direction    . *page-direction*)
     (:spread            . *spread*)
-    (:first-page-single . *first-page-single*))
+    (:first-page-single . *first-page-single*)
+    (:recursive         . *recursive*))
   "保存対象の (設定キー . 特殊変数シンボル)。ここに足すだけで永続化対象になる。")
 
 (defun %config-dir ()
@@ -315,9 +328,18 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
 ;;; spreads = 各見開きの page-index リスト (1 or 2 個) の vector。
 ;;; 単ページ/見開きを同じ仕組みで扱う (単ページ時は全要素 1 個)。
 ;;; zoom/tx/ty + scale-xf/trans-xf は stage の RenderTransform (ズーム/パン)。
-(defstruct viewer book spreads (sindex 0) window left-img right-img
+(defstruct viewer book spreads (sindex 0) window left-img right-img source
            viewport scale-xf trans-xf (zoom 1d0) (tx 0d0) (ty 0d0)
            (dragging nil) (lx 0d0) (ly 0d0))
+
+(defun %reopen (vw)
+  "source を開き直して book/spreads を差し替える (再帰トグル等で使用)。"
+  (multiple-value-bind (book start) (open-book (viewer-source vw))
+    (ignore-errors (book-close (viewer-book vw)))
+    (setf (viewer-book vw) book
+          (viewer-spreads vw) (compute-spreads (book-page-count book))
+          (viewer-sindex vw) (spread-index-of (viewer-spreads vw) start))
+    (show-spread vw)))
 
 (defun apply-transform (vw)
   (dotnet:invoke (viewer-scale-xf vw) "set_ScaleX" (viewer-zoom vw))
@@ -454,6 +476,7 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
                           (save-settings))
         ((string= kn "D") (setf *page-direction* (if (eq *page-direction* :rtl) :ltr :rtl))
                           (show-spread vw) (save-settings))
+        ((string= kn "R") (setf *recursive* (not *recursive*)) (save-settings) (%reopen vw))
         ((member kn '("D0" "NumPad0") :test #'string=) (reset-view vw))))))
 
 ;;; ------------------------------------------------------------------
@@ -487,6 +510,7 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
            (spreads (compute-spreads (book-page-count book)))
            (vw   (make-viewer :book book :spreads spreads
                               :sindex (spread-index-of spreads start)
+                              :source (%resolve-path *target-path*)
                               :window win :left-img li :right-img ri
                               :viewport vport :scale-xf scale :trans-xf trans)))
       ;; 2 つの star 列 (既定 ColumnDefinition = 1*)
