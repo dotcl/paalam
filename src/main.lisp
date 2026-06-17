@@ -967,17 +967,29 @@ UI スレッドで呼ぶこと。"
               (viewer-zoom vw) s2)))
     (apply-transform vw)))
 
+(defun %left-pressed-p (vw e)
+  "今この瞬間、左ボタンが押されているか (PointerPoint.Properties)。"
+  (dotnet:invoke (dotnet:invoke (dotnet:invoke e "GetCurrentPoint" (viewer-viewport vw))
+                                "get_Properties")
+                 "get_IsLeftButtonPressed"))
+
 (defun %on-press (vw e)
-  (multiple-value-bind (x y) (%pos-xy e (viewer-viewport vw))
-    (setf (viewer-dragging vw) t (viewer-lx vw) x (viewer-ly vw) y)))
+  ;; パン開始は左ボタンのみ。メニュー等の押下で誤ってドラッグ状態にしない。
+  (when (%left-pressed-p vw e)
+    (multiple-value-bind (x y) (%pos-xy e (viewer-viewport vw))
+      (setf (viewer-dragging vw) t (viewer-lx vw) x (viewer-ly vw) y))))
 
 (defun %on-move (vw e)
   (when (viewer-dragging vw)
-    (multiple-value-bind (x y) (%pos-xy e (viewer-viewport vw))
-      (incf (viewer-tx vw) (- x (viewer-lx vw)))
-      (incf (viewer-ty vw) (- y (viewer-ly vw)))
-      (setf (viewer-lx vw) x (viewer-ly vw) y)
-      (apply-transform vw))))
+    ;; release を取りこぼして dragging が居残っても、ボタンが離れていれば自己修復で停止
+    ;; (メニュー/別ウィンドウのダイアログで PointerReleased が main に返らない場合の対策)。
+    (if (%left-pressed-p vw e)
+        (multiple-value-bind (x y) (%pos-xy e (viewer-viewport vw))
+          (incf (viewer-tx vw) (- x (viewer-lx vw)))
+          (incf (viewer-ty vw) (- y (viewer-ly vw)))
+          (setf (viewer-lx vw) x (viewer-ly vw) y)
+          (apply-transform vw))
+        (setf (viewer-dragging vw) nil))))
 
 (defun %on-release (vw e) (declare (ignore e)) (setf (viewer-dragging vw) nil))
 
