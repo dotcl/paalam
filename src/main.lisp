@@ -25,6 +25,14 @@
                    "vendor-dotcl-thread.lisp"))
 (use-package :dotcl-thread)
 
+(defvar *debug* nil "PAALAM_DEBUG で有効化。先読みの詳細を debug.log に出す。")
+(defun %dbg (fmt &rest args)
+  (when *debug*
+    (ignore-errors
+      (with-open-file (s (concatenate 'string (%config-dir) "debug.log")
+                         :direction :output :if-exists :append :if-does-not-exist :create)
+        (format s "~a~%" (apply #'format nil fmt args))))))
+
 (defun log-err (where e)
   (ignore-errors
     (with-open-file (s (concatenate 'string
@@ -517,6 +525,8 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
   (with-lock-held ((loader-lock ld))
     (setf (loader-current ld) current
           (loader-queue ld) (remove-if (lambda (i) (gethash i (loader-cache ld))) indices))
+    (%dbg "req cur=~a want=~a queued=~a cache=~a" current (length indices)
+          (length (loader-queue ld)) (hash-table-count (loader-cache ld)))
     (condition-notify (loader-cv ld))))
 
 (defun %loader-loop (ld)
@@ -530,12 +540,19 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
         (when (loader-done ld) (return))
         (setf index (pop (loader-queue ld))))
       (when index
-        (let ((bmp (ignore-errors (book-load-image (loader-book ld) index))))
-          (when bmp
-            (with-lock-held ((loader-lock ld))
-              (setf (gethash index (loader-cache ld)) bmp)
-              (%loader-evict ld))
-            (ignore-errors (funcall (loader-on-loaded ld) index))))))))
+        ;; ワーカーは決して死なせない (どんな条件も握り潰してログ)。NAS の
+        ;; ロード失敗が静かに繰り返されると cache が空のままになるのを debug.log で見る。
+        (handler-case
+            (let ((bmp (book-load-image (loader-book ld) index)))
+              (if bmp
+                  (progn
+                    (with-lock-held ((loader-lock ld))
+                      (setf (gethash index (loader-cache ld)) bmp)
+                      (%loader-evict ld))
+                    (%dbg "cached ~a (cache=~a)" index (hash-table-count (loader-cache ld)))
+                    (ignore-errors (funcall (loader-on-loaded ld) index)))
+                  (%dbg "LOAD-NIL ~a" index)))
+          (error (e) (%dbg "LOAD-ERR ~a : ~a" index e)))))))
 
 (defun open-loader (book on-loaded)
   (let ((ld (make-loader :book book :on-loaded on-loaded)))
@@ -717,6 +734,8 @@ UI スレッドで呼ぶこと。"
         (setf (viewer-sindex vw) si)
         ;; LRU 中心は *ページ* index (見開き index ではない — 追い出し距離が狂うため)。
         (loader-request (viewer-loader vw) (%load-order vw) (%cur-page vw))
+        (%dbg "show si=~a pages=~a hit=~a" si (aref spreads si)
+              (mapcar (lambda (p) (if (%page-bitmap vw p) 1 0)) (aref spreads si)))
         (%render-spread vw)
         (%update-title vw)
         (history-update (viewer-source vw) (%cur-page vw))   ; in-memory。保存は終了時。
@@ -952,6 +971,8 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
 (defun run-paalam (&optional target)
   "host 入口。AppBuilder.Configure<Paalam.App>().UsePlatformDetect()
    .StartWithClassicDesktopLifetime(args) を駆動する (窓が閉じるまで blocking)。"
+  (setf *debug* (let ((e (dotnet:static "System.Environment" "GetEnvironmentVariable" "PAALAM_DEBUG")))
+                  (and e (plusp (length e)) t)))
   (load-settings)
   (load-history)
   (load-bookmarks)
