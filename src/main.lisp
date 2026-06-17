@@ -542,6 +542,31 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
     (dotnet:invoke pane "set_IsVisible" (not vis))
     (unless vis (%rebuild-clip-pane vw))))
 
+(defun %clip-drop (vw path)
+  "ペインにドロップされた path を素材に追加 (画像=親フォルダ+そのページ、
+フォルダ/書庫=全ページ)。"
+  (handler-case
+      (if (and (dotnet:static "System.IO.File" "Exists" path)
+               (image-ext-p (pathname-type path)))
+          ;; 画像: 親フォルダ (drive 込み) を source、その中での index を page。
+          ;; directory-namestring は drive を落とすので Path.GetDirectoryName を使う。
+          (let* ((dir (substitute #\/ #\\
+                                  (dotnet:static "System.IO.Path" "GetDirectoryName" path)))
+                 (files (%dir-image-files dir))
+                 (idx (or (position (file-namestring path) files
+                                    :key #'file-namestring :test #'string-equal)
+                          0)))
+            (clip-add dir idx))
+          ;; フォルダ/書庫: 全ページ。
+          (multiple-value-bind (book start) (open-book path)
+            (declare (ignore start))
+            (unwind-protect
+                 (dotimes (p (book-page-count book)) (clip-add path p))
+              (ignore-errors (book-close book)))))
+    (error (e) (log-err "clip-drop" e)))
+  (%update-title vw)
+  (when (dotnet:invoke (viewer-clip-pane vw) "get_IsVisible") (%rebuild-clip-pane vw)))
+
 ;;; ------------------------------------------------------------------
 ;;; 先読みローダー (#17): 単一ワーカースレッドが書庫アクセスを一手に担い、
 ;;; デコード済み Bitmap を cache。UI は cache を読むだけ。ロード完了は
@@ -1017,6 +1042,10 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
           (dotnet:invoke rc "Add" vport)
           (dotnet:invoke rc "Add" pane))
         (setf (viewer-clip-pane vw) pane (viewer-clip-stack vw) stack)
+        ;; ペインへの DnD で素材追加 (#18 Phase 2b)。
+        (dotnet:static "Paalam.DragDropHelper" "EnableClipDrop" pane
+                       (dotnet:make-delegate "System.Action`1[System.String]"
+                                             (lambda (p) (%clip-drop vw p))))
         (dotnet:invoke win "set_Content" root))
       (dotnet:invoke win "set_Background" (dotnet:static "Avalonia.Media.Brushes" "Black"))
       (dotnet:invoke win "set_Width"  1200d0)

@@ -73,6 +73,30 @@ public static class DragDropHelper
             }
         });
     }
+
+    // 素材ペイン用: ドロップされた全パスを onDrop に渡す。e.Handled=true で
+    // ウィンドウ側の「本を開く」DnD と区別 (ペインに落としたら素材に追加)。
+    public static void EnableClipDrop(Avalonia.Controls.Control pane, Action<string> onDrop)
+    {
+        DragDrop.SetAllowDrop(pane, true);
+        pane.AddHandler(DragDrop.DragOverEvent, (s, e) =>
+        {
+            e.DragEffects = e.DataTransfer.Contains(DataFormat.File)
+                ? DragDropEffects.Copy : DragDropEffects.None;
+            e.Handled = true;
+        });
+        pane.AddHandler(DragDrop.DropEvent, (s, e) =>
+        {
+            var files = e.DataTransfer.TryGetFiles();
+            if (files != null)
+                foreach (var f in files)
+                {
+                    var p = f.TryGetLocalPath();
+                    if (!string.IsNullOrEmpty(p)) onDrop(p!);
+                }
+            e.Handled = true;
+        });
+    }
 }
 
 internal static class Program
