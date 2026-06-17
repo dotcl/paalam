@@ -201,6 +201,23 @@
 (defmethod book-close ((b sharp-book))
   (ignore-errors (dotnet:invoke (sb2-archive b) "Dispose")))
 
+;;; pdf-book (PDFtoImage/PDFium 経由) -------------------------------
+;;; 各ページを C# シム Paalam.PdfDoc でラスタライズして Avalonia Bitmap に。
+
+(defclass pdf-book ()
+  ((doc   :initarg :doc   :reader pdfb-doc)
+   (count :initarg :count :reader pdfb-count)))
+
+(defun make-pdf-book (path)
+  (let* ((doc (dotnet:new "Paalam.PdfDoc" path))
+         (n   (dotnet:invoke doc "get_PageCount")))
+    (make-instance 'pdf-book :doc doc :count n)))
+
+(defmethod book-page-count ((b pdf-book)) (pdfb-count b))
+(defmethod book-page-name  ((b pdf-book) i) (format nil "p~d" (1+ i)))
+(defmethod book-load-image ((b pdf-book) i) (dotnet:invoke (pdfb-doc b) "RenderPage" i))
+(defmethod book-close      ((b pdf-book)) nil)
+
 ;;; open-book --------------------------------------------------------
 
 (defun open-book (path)
@@ -217,6 +234,8 @@
          ((and ext (member (string-downcase ext)
                            '("rar" "cbr" "7z" "cb7" "tar" "cbt") :test #'string=))
           (values (make-sharp-book path) 0))
+         ((and ext (string= (string-downcase ext) "pdf"))
+          (values (make-pdf-book path) 0))
          ((image-ext-p ext)
           (let* ((dir  (directory-namestring path))
                  (book (make-directory-book dir))

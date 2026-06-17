@@ -19,6 +19,24 @@ public static class Imaging
         => new Avalonia.Media.Imaging.Bitmap(s);
 }
 
+// PDF を PDFium (PDFtoImage) でページ毎にラスタライズして Avalonia Bitmap にする。
+// PDFium/SkiaSharp interop は C# 側に閉じ込める (Lisp からは PageCount/RenderPage だけ叩く)。
+public sealed class PdfDoc
+{
+    private readonly byte[] _bytes;
+    public PdfDoc(string path) => _bytes = System.IO.File.ReadAllBytes(path);
+    public int PageCount => PDFtoImage.Conversion.GetPageCount(_bytes);
+    public Avalonia.Media.Imaging.Bitmap RenderPage(int index)
+    {
+        var opts = new PDFtoImage.RenderOptions(Dpi: 150,
+                       BackgroundColor: SkiaSharp.SKColors.White);
+        using var sk = PDFtoImage.Conversion.ToImage(_bytes, index, null, opts);
+        using var data = sk.Encode(SkiaSharp.SKEncodedImageFormat.Png, 90);
+        using var ms = new System.IO.MemoryStream(data.ToArray());
+        return new Avalonia.Media.Imaging.Bitmap(ms);
+    }
+}
+
 internal static class Program
 {
     [STAThread]
@@ -32,6 +50,7 @@ internal static class Program
             _ = typeof(Avalonia.AppBuilderDesktopExtensions).Assembly; // Avalonia.Desktop
             _ = typeof(Avalonia.Themes.Fluent.FluentTheme).Assembly;
             _ = typeof(SharpCompress.Archives.ArchiveFactory).Assembly;
+            _ = typeof(PDFtoImage.Conversion).Assembly;
 
             DotclHost.Initialize();
             DotclHost.LoadCore(DotclHost.FindCore()

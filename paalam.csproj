@@ -11,6 +11,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Paalam</RootNamespace>
     <AssemblyName>paalam</AssemblyName>
+    <!-- PDFtoImage の platform 注釈 (CA1416) ノイズを抑制 (対応 OS 上でのみ実行)。 -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
     <!-- experiments/ 配下 (spike の .cs / obj 等) を本体ビルドから除外。 -->
     <DefaultItemExcludes>$(DefaultItemExcludes);experiments\**</DefaultItemExcludes>
   </PropertyGroup>
@@ -21,6 +23,8 @@
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.0.4" />
     <!-- RAR/7z/tar 等の書庫読み込み (ピュア C#, ネイティブ依存なし)。 -->
     <PackageReference Include="SharpCompress" Version="1.0.0" />
+    <!-- PDF (PDFium 経由)。bblanchon.PDFium が win-arm64 ネイティブを含む。 -->
+    <PackageReference Include="PDFtoImage" Version="5.2.1" />
     <PackageReference Include="DotCL.Runtime" Version="0.1.10" GeneratePathProperty="true" />
   </ItemGroup>
 
