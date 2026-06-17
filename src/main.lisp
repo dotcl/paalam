@@ -507,6 +507,33 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
       (save-clip)
       (%rebuild-clip-pane vw))))
 
+;;; 並べ替えの視覚フィードバック (#20): 掴んだサムネを半透明化 + 挿入位置に青い線。
+(defun %ensure-reorder-line (vw)
+  "挿入位置インジケータ Border を用意 (使い回し)。"
+  (or (viewer-reorder-line vw)
+      (setf (viewer-reorder-line vw)
+            (let ((b (dotnet:new "Avalonia.Controls.Border")))
+              (dotnet:invoke b "set_Height" 3d0)
+              (dotnet:invoke b "set_Margin" (dotnet:new "Avalonia.Thickness" 4d0 0d0 4d0 0d0))
+              (dotnet:invoke b "set_Background" (dotnet:static "Avalonia.Media.Brushes" "DeepSkyBlue"))
+              b))))
+
+(defun %show-reorder-line (vw y)
+  "clip-stack の Y にドラッグ中、挿入予定位置へインジケータを移動。"
+  (let ((children (dotnet:invoke (viewer-clip-stack vw) "get_Children"))
+        (line (%ensure-reorder-line vw)))
+    ;; いったん外してから対象位置を計算 (line 自身が index をずらさないように)。
+    (ignore-errors (dotnet:invoke children "Remove" line))
+    (dotnet:invoke children "Insert" (%reorder-target vw y) line)))
+
+(defun %clear-reorder-visual (vw)
+  "挿入線を外し、掴んだサムネの不透明度を戻す (並べ替え終了/中断時)。"
+  (let ((line (viewer-reorder-line vw)) (img (viewer-reorder-img vw)))
+    (when line
+      (ignore-errors
+        (dotnet:invoke (dotnet:invoke (viewer-clip-stack vw) "get_Children") "Remove" line)))
+    (when img (ignore-errors (dotnet:invoke img "set_Opacity" 1d0)))))
+
 (defun %rebuild-clip-pane (vw)
   "clip-stack を作り直す。キャッシュ済みサムネは即表示、未キャッシュのみ背景で
 ロードして %thumb-cache に貯めつつ差し込む (二度目以降は source 再取得なし)。"
@@ -524,24 +551,32 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
         (dotnet:invoke img "set_Width" 200d0)
         (dotnet:invoke img "set_Stretch" (dotnet:static "Avalonia.Media.Stretch" "Uniform"))
         ;; 左ドラッグで並べ替え (#18 Phase 3)。press で掴み、release 位置へ挿入。
+        ;; ドラッグ中はサムネを半透明化 + 挿入位置に青線を出す (#20)。
         (dotnet:add-event img "PointerPressed"
           (lambda (s e) (declare (ignore s))
             (dotnet:invoke e "set_Handled" t)   ; ウィンドウのパンを起こさない
             (when (dotnet:invoke (dotnet:invoke (dotnet:invoke e "GetCurrentPoint" img)
                                                 "get_Properties") "get_IsLeftButtonPressed")
-              (setf (viewer-reorder-from vw) idx)
+              (setf (viewer-reorder-from vw) idx (viewer-reorder-img vw) img)
+              (dotnet:invoke img "set_Opacity" 0.4d0)   ; 掴んでる感
+              (%ensure-reorder-line vw)
               (ignore-errors (dotnet:invoke (dotnet:invoke e "get_Pointer") "Capture" img)))))
+        (dotnet:add-event img "PointerMoved"
+          (lambda (s e) (declare (ignore s))
+            (when (viewer-reorder-from vw)
+              (%show-reorder-line vw
+                (dotnet:invoke (dotnet:invoke e "GetPosition" (viewer-clip-stack vw)) "get_Y")))))
         (dotnet:add-event img "PointerReleased"
           (lambda (s e) (declare (ignore s))
             (dotnet:invoke e "set_Handled" t)
             (let ((from (viewer-reorder-from vw)))
               (when from
-                (setf (viewer-reorder-from vw) nil)
-                (ignore-errors (dotnet:invoke (dotnet:invoke e "get_Pointer") "Capture" nil))
-                (%clip-reorder vw from
-                               (%reorder-target vw
-                                 (dotnet:invoke (dotnet:invoke e "GetPosition" (viewer-clip-stack vw))
-                                                "get_Y")))))))
+                (let ((y (dotnet:invoke (dotnet:invoke e "GetPosition" (viewer-clip-stack vw)) "get_Y")))
+                  (%clear-reorder-visual vw)   ; target 計算前に線を外す (index ずれ防止)
+                  (let ((target (%reorder-target vw y)))
+                    (setf (viewer-reorder-from vw) nil (viewer-reorder-img vw) nil)
+                    (ignore-errors (dotnet:invoke (dotnet:invoke e "get_Pointer") "Capture" nil))
+                    (%clip-reorder vw from target)))))))
         ;; × ボタン (右上)。赤背景+白太字で削除と分かるよう目立たせる。
         (dotnet:invoke xbtn "set_Content" "×")
         (dotnet:invoke xbtn "set_Foreground" (dotnet:static "Avalonia.Media.Brushes" "White"))
@@ -771,6 +806,8 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
            (dragging nil) (lx 0d0) (ly 0d0)
            clip-pane clip-stack         ; 素材ペイン (#18 Phase 2)
            (reorder-from nil)           ; ドラッグ並べ替え中の元 index (Phase 3)
+           (reorder-img nil)            ; ドラッグ中のサムネ (不透明度を戻す用; #20)
+           (reorder-line nil)           ; 挿入位置インジケータ Border (#20)
            menu)                        ; メニューバー (#21; 全画面時に隠す)
 
 (defun %reopen (vw)
