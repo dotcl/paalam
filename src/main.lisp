@@ -19,6 +19,11 @@
 (load (concatenate 'string
                    (dotnet:static "System.AppContext" "BaseDirectory")
                    "vendor-dotnet-class.lisp"))
+;; 先読みローダー用のスレッド/ロック/条件変数 (bordeaux-threads 相当の contrib)。
+(load (concatenate 'string
+                   (dotnet:static "System.AppContext" "BaseDirectory")
+                   "vendor-dotcl-thread.lisp"))
+(use-package :dotcl-thread)
 
 (defun log-err (where e)
   (ignore-errors
@@ -324,19 +329,99 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
         (log-err "load-settings" e)
         (ignore-errors (save-settings))))))   ; 壊れていたら既定で作り直す
 
+;;; ------------------------------------------------------------------
+;;; 先読みローダー (#17): 単一ワーカースレッドが書庫アクセスを一手に担い、
+;;; デコード済み Bitmap を cache。UI は cache を読むだけ。ロード完了は
+;;; Dispatcher.UIThread.Post で UI へ通知して差し替え。NAS 上の書庫でも
+;;; めくる前に裏で先読みするので快適。
+;;; ------------------------------------------------------------------
+
+(defparameter *cache-size* 16 "デコード済みページの最大保持数。")
+(defparameter *prefetch-ahead* 2 "現在の見開きから何見開き先まで先読みするか。")
+
+(defstruct loader
+  book
+  (cache (make-hash-table))           ; index -> Avalonia Bitmap
+  (lock (make-lock "paalam-loader"))
+  (cv (make-condition-variable))
+  (queue '())                         ; ロード待ち index (優先順)
+  (current 0)                         ; LRU の中心 (現在 index)
+  (done nil)
+  worker
+  on-loaded)                          ; (lambda (index)) — UI へ通知
+
+(defun loader-get (ld index)
+  (with-lock-held ((loader-lock ld)) (gethash index (loader-cache ld))))
+
+(defun %loader-evict (ld)
+  (let ((cache (loader-cache ld)) (cur (loader-current ld)))
+    (loop while (> (hash-table-count cache) *cache-size*) do
+      (let ((far nil) (fard -1))
+        (maphash (lambda (k v) (declare (ignore v))
+                   (let ((d (abs (- k cur)))) (when (> d fard) (setf fard d far k))))
+                 cache)
+        (if far (remhash far cache) (return))))))
+
+(defun loader-request (ld indices current)
+  "indices を優先順でロード要求 (既キャッシュはスキップ)。current は LRU 中心。"
+  (with-lock-held ((loader-lock ld))
+    (setf (loader-current ld) current
+          (loader-queue ld) (remove-if (lambda (i) (gethash i (loader-cache ld))) indices))
+    (condition-notify (loader-cv ld))))
+
+(defun %loader-loop (ld)
+  (loop
+    (let ((index nil))
+      (with-lock-held ((loader-lock ld))
+        (loop while (and (null (loader-queue ld)) (not (loader-done ld)))
+              do (condition-wait (loader-cv ld) (loader-lock ld)))
+        (when (and (loader-done ld) (null (loader-queue ld))) (return))
+        (setf index (pop (loader-queue ld))))
+      (when index
+        (let ((bmp (ignore-errors (book-load-image (loader-book ld) index))))
+          (when bmp
+            (with-lock-held ((loader-lock ld))
+              (setf (gethash index (loader-cache ld)) bmp)
+              (%loader-evict ld))
+            (ignore-errors (funcall (loader-on-loaded ld) index))))))))
+
+(defun open-loader (book on-loaded)
+  (let ((ld (make-loader :book book :on-loaded on-loaded)))
+    (setf (loader-worker ld)
+          (make-thread (lambda () (%loader-loop ld)) :name "paalam-loader"))
+    ld))
+
+(defun loader-stop (ld)
+  (with-lock-held ((loader-lock ld))
+    (setf (loader-done ld) t)
+    (condition-notify (loader-cv ld))))
+
+(defun %ui-post (thunk)
+  "thunk を UI スレッドで実行 (ワーカー→UI マーシャリング)。"
+  (let ((act (dotnet:make-delegate "System.Action" thunk)))
+    (dotnet:invoke (dotnet:static "Avalonia.Threading.Dispatcher" "UIThread")
+                   "Post" act
+                   (dotnet:static "Avalonia.Threading.DispatcherPriority" "Background"))))
+
 ;;; viewer: book + 見開き単位 (spreads) + 現在位置 + 2 枚の Image
 ;;; spreads = 各見開きの page-index リスト (1 or 2 個) の vector。
 ;;; 単ページ/見開きを同じ仕組みで扱う (単ページ時は全要素 1 個)。
 ;;; zoom/tx/ty + scale-xf/trans-xf は stage の RenderTransform (ズーム/パン)。
-(defstruct viewer book spreads (sindex 0) window left-img right-img source
+;;; loader = 先読みローダー。
+(defstruct viewer book spreads (sindex 0) window left-img right-img source loader
            viewport scale-xf trans-xf (zoom 1d0) (tx 0d0) (ty 0d0)
            (dragging nil) (lx 0d0) (ly 0d0))
 
 (defun %reopen (vw)
-  "source を開き直して book/spreads を差し替える (再帰トグル等で使用)。"
+  "source を開き直して book/loader/spreads を差し替える (再帰トグル等で使用)。"
   (multiple-value-bind (book start) (open-book (viewer-source vw))
+    (ignore-errors (loader-stop (viewer-loader vw)))
     (ignore-errors (book-close (viewer-book vw)))
     (setf (viewer-book vw) book
+          (viewer-loader vw) (open-loader
+                              book
+                              (lambda (index)
+                                (%ui-post (lambda () (%on-page-loaded vw index)))))
           (viewer-spreads vw) (compute-spreads (book-page-count book))
           (viewer-sindex vw) (spread-index-of (viewer-spreads vw) start))
     (show-spread vw)))
@@ -390,28 +475,57 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
           (format nil "paalam — ~a｜~a (~d-~d/~d)"
                   (book-page-name book lo) (book-page-name book hi) (1+ lo) (1+ hi) n)))))
 
-(defun show-spread (vw)
-  "現在の見開きを描画 (sindex は範囲クランプ)。"
+(defun %page-bitmap (vw index) (and index (loader-get (viewer-loader vw) index)))
+
+(defun %render-spread (vw)
+  "現在の見開きを cache から描画 (未ロードは空欄。後で %on-page-loaded が埋める)。"
   (let* ((spreads (viewer-spreads vw)) (m (length spreads)))
     (when (plusp m)
-      (let* ((si (max 0 (min (viewer-sindex vw) (1- m))))
+      (let* ((si (viewer-sindex vw))
              (pages (aref spreads si))
-             (book (viewer-book vw))
              (li (viewer-left-img vw))
              (ri (viewer-right-img vw)))
-        (setf (viewer-sindex vw) si)
         (if (= (length pages) 1)
             (progn
-              (%place-image li (book-load-image book (first pages)) 0 2 "Center")
+              (%place-image li (%page-bitmap vw (first pages)) 0 2 "Center")
               (%place-image ri nil 1 1 "Left"))
             (destructuring-bind (lo hi) pages
               ;; rtl(右開き): 下位 index=lo を右に、hi を左に。ltr は逆。
               (let ((left-page  (if (eq *page-direction* :rtl) hi lo))
                     (right-page (if (eq *page-direction* :rtl) lo hi)))
-                (%place-image li (book-load-image book left-page)  0 1 "Right")
-                (%place-image ri (book-load-image book right-page) 1 1 "Left"))))
-        (dotnet:invoke (viewer-window vw) "set_Title" (%spread-title vw pages))
+                (%place-image li (%page-bitmap vw left-page)  0 1 "Right")
+                (%place-image ri (%page-bitmap vw right-page) 1 1 "Left"))))))))
+
+(defun %load-order (vw)
+  "現在の見開き + prefetch 分の page index を優先順 (現在見開きが先) で。"
+  (let* ((spreads (viewer-spreads vw)) (m (length spreads)) (acc '()))
+    (when (plusp m)
+      (loop for k from 0 to *prefetch-ahead*
+            for si = (+ (viewer-sindex vw) k)
+            when (< si m)
+            do (dolist (p (aref spreads si)) (push p acc))))
+    (nreverse acc)))
+
+(defun show-spread (vw)
+  "見開き表示 (sindex クランプ)。必要ページをローダーに要求し cache から描画、
+読み方向の次見開きも prefetch 要求する。"
+  (let* ((spreads (viewer-spreads vw)) (m (length spreads)))
+    (when (plusp m)
+      (let ((si (max 0 (min (viewer-sindex vw) (1- m)))))
+        (setf (viewer-sindex vw) si)
+        (loader-request (viewer-loader vw) (%load-order vw) si)
+        (%render-spread vw)
+        (dotnet:invoke (viewer-window vw) "set_Title"
+                       (%spread-title vw (aref spreads si)))
         (reset-view vw)))))
+
+(defun %on-page-loaded (vw index)
+  "ワーカーが index をロード完了 → 現在の見開きに含まれるなら cache から再描画
+(zoom/pan は維持; reset-view しない)。"
+  (let* ((spreads (viewer-spreads vw)) (m (length spreads)))
+    (when (plusp m)
+      (let ((pages (aref spreads (viewer-sindex vw))))
+        (when (member index pages) (%render-spread vw))))))
 
 (defun %recompute (vw keep-page)
   "spreads を計算し直し、keep-page を含む見開きへ位置を合わせて再描画。"
@@ -549,7 +663,14 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
       (dotnet:add-event win "PointerReleased"
                         (lambda (s e) (declare (ignore s)) (%on-release vw e)))
       (dotnet:add-event win "Closed"
-                        (lambda (s e) (declare (ignore s e)) (book-close book)))
+                        (lambda (s e) (declare (ignore s e))
+                          (ignore-errors (loader-stop (viewer-loader vw)))
+                          (book-close book)))
+      ;; 先読みローダーを起動 (vw を closure で参照するので vw 作成後)。
+      (setf (viewer-loader vw)
+            (open-loader book
+                         (lambda (index)
+                           (%ui-post (lambda () (%on-page-loaded vw index))))))
       (show-spread vw)
       win)))
 

@@ -43,6 +43,9 @@
     <Content Include="src\vendor-dotnet-class.lisp" Link="vendor-dotnet-class.lisp">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="src\vendor-dotcl-thread.lisp" Link="vendor-dotcl-thread.lisp">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
 </Project>
