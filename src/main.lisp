@@ -280,7 +280,9 @@
   '((:page-direction    . *page-direction*)
     (:spread            . *spread*)
     (:first-page-single . *first-page-single*)
-    (:recursive         . *recursive*))
+    (:recursive         . *recursive*)
+    (:cache-size        . *cache-size*)
+    (:prefetch-ahead    . *prefetch-ahead*))
   "保存対象の (設定キー . 特殊変数シンボル)。ここに足すだけで永続化対象になる。")
 
 (defun %config-dir ()
@@ -336,8 +338,10 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
 ;;; めくる前に裏で先読みするので快適。
 ;;; ------------------------------------------------------------------
 
-(defparameter *cache-size* 16 "デコード済みページの最大保持数。")
-(defparameter *prefetch-ahead* 2 "現在の見開きから何見開き先まで先読みするか。")
+(defparameter *cache-size* 48
+  "デコード済みページの最大保持数 (設定ファイルで調整可)。")
+(defparameter *prefetch-ahead* 8
+  "現在の見開きから何見開き先まで先読みするか (設定ファイルで調整可)。")
 
 (defstruct loader
   book
@@ -401,7 +405,7 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
   (let ((act (dotnet:make-delegate "System.Action" thunk)))
     (dotnet:invoke (dotnet:static "Avalonia.Threading.Dispatcher" "UIThread")
                    "Post" act
-                   (dotnet:static "Avalonia.Threading.DispatcherPriority" "Background"))))
+                   (dotnet:static "Avalonia.Threading.DispatcherPriority" "Normal"))))
 
 ;;; viewer: book + 見開き単位 (spreads) + 現在位置 + 2 枚の Image
 ;;; spreads = 各見開きの page-index リスト (1 or 2 個) の vector。
@@ -513,7 +517,8 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
     (when (plusp m)
       (let ((si (max 0 (min (viewer-sindex vw) (1- m)))))
         (setf (viewer-sindex vw) si)
-        (loader-request (viewer-loader vw) (%load-order vw) si)
+        ;; LRU 中心は *ページ* index (見開き index ではない — 追い出し距離が狂うため)。
+        (loader-request (viewer-loader vw) (%load-order vw) (%cur-page vw))
         (%render-spread vw)
         (dotnet:invoke (viewer-window vw) "set_Title"
                        (%spread-title vw (aref spreads si)))
