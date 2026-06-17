@@ -490,6 +490,27 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
   (%update-title vw)
   (%rebuild-clip-pane vw))
 
+(defun %reorder-target (vw y)
+  "clip-stack 内の Y 座標から挿入位置 (0..n) を求める (各 cell の中点で判定)。"
+  (let* ((children (dotnet:invoke (viewer-clip-stack vw) "get_Children"))
+         (n (dotnet:invoke children "get_Count")))
+    (dotimes (i n n)
+      (let* ((cell (dotnet:invoke children "get_Item" i))
+             (b   (dotnet:invoke cell "get_Bounds"))
+             (top (dotnet:invoke b "get_Y"))
+             (h   (dotnet:invoke b "get_Height")))
+        (when (< y (+ top (/ h 2.0d0))) (return-from %reorder-target i))))))
+
+(defun %clip-reorder (vw from to)
+  "from の素材を、元リスト基準の挿入位置 to (0..n) へ移してペイン更新。"
+  (when (and from (/= from to) (>= from 0) (< from (length *clip*)))
+    (let* ((item (nth from *clip*))
+           (rest (loop for e in *clip* for i from 0 unless (= i from) collect e))
+           (pos  (max 0 (min (if (> to from) (1- to) to) (length rest)))))
+      (setf *clip* (append (subseq rest 0 pos) (list item) (subseq rest pos)))
+      (save-clip)
+      (%rebuild-clip-pane vw))))
+
 (defun %rebuild-clip-pane (vw)
   "clip-stack を作り直す。キャッシュ済みサムネは即表示、未キャッシュのみ背景で
 ロードして %thumb-cache に貯めつつ差し込む (二度目以降は source 再取得なし)。"
@@ -506,6 +527,23 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
             (cached (%thumb-get (car item) (cdr item))))
         (dotnet:invoke img "set_Width" 200d0)
         (dotnet:invoke img "set_Stretch" (dotnet:static "Avalonia.Media.Stretch" "Uniform"))
+        ;; 左ドラッグで並べ替え (#18 Phase 3)。press で掴み、release 位置へ挿入。
+        (dotnet:add-event img "PointerPressed"
+          (lambda (s e) (declare (ignore s))
+            (when (dotnet:invoke (dotnet:invoke (dotnet:invoke e "GetCurrentPoint" img)
+                                                "get_Properties") "get_IsLeftButtonPressed")
+              (setf (viewer-reorder-from vw) idx)
+              (ignore-errors (dotnet:invoke (dotnet:invoke e "get_Pointer") "Capture" img)))))
+        (dotnet:add-event img "PointerReleased"
+          (lambda (s e) (declare (ignore s))
+            (let ((from (viewer-reorder-from vw)))
+              (when from
+                (setf (viewer-reorder-from vw) nil)
+                (ignore-errors (dotnet:invoke (dotnet:invoke e "get_Pointer") "Capture" nil))
+                (%clip-reorder vw from
+                               (%reorder-target vw
+                                 (dotnet:invoke (dotnet:invoke e "GetPosition" (viewer-clip-stack vw))
+                                                "get_Y")))))))
         ;; × ボタン (右上)。赤背景+白太字で削除と分かるよう目立たせる。
         (dotnet:invoke xbtn "set_Content" "×")
         (dotnet:invoke xbtn "set_Foreground" (dotnet:static "Avalonia.Media.Brushes" "White"))
@@ -717,7 +755,8 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
 (defstruct viewer book spreads (sindex 0) window left-img right-img source loader
            viewport scale-xf trans-xf (zoom 1d0) (tx 0d0) (ty 0d0)
            (dragging nil) (lx 0d0) (ly 0d0)
-           clip-pane clip-stack)        ; 素材ペイン (#18 Phase 2)
+           clip-pane clip-stack         ; 素材ペイン (#18 Phase 2)
+           (reorder-from nil))          ; ドラッグ並べ替え中の元 index (Phase 3)
 
 (defun %reopen (vw)
   "source を開き直して book/loader/spreads を差し替える (再帰トグル等)。現在ページは維持。"
