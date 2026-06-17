@@ -349,7 +349,7 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
   (lock (make-lock "paalam-loader"))
   (cv (make-condition-variable))
   (queue '())                         ; ロード待ち index (優先順)
-  (current 0)                         ; LRU の中心 (現在 index)
+  (current 0)                         ; LRU の中心 (現在ページ index)
   (done nil)
   worker
   on-loaded)                          ; (lambda (index)) — UI へ通知
@@ -358,13 +358,21 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
   (with-lock-held ((loader-lock ld)) (gethash index (loader-cache ld))))
 
 (defun %loader-evict (ld)
+  "cache が *cache-size* を超えたら現在ページから最も遠いものを捨てる。
+Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず Dispose する
+(しないと ~100 ページで非マネージドメモリが膨らみ息切れする)。
+追い出すのは常に最遠ページなので現在見開きの Bitmap は対象にならない。"
   (let ((cache (loader-cache ld)) (cur (loader-current ld)))
     (loop while (> (hash-table-count cache) *cache-size*) do
       (let ((far nil) (fard -1))
         (maphash (lambda (k v) (declare (ignore v))
                    (let ((d (abs (- k cur)))) (when (> d fard) (setf fard d far k))))
                  cache)
-        (if far (remhash far cache) (return))))))
+        (if far
+            (let ((bmp (gethash far cache)))
+              (remhash far cache)
+              (ignore-errors (dotnet:invoke bmp "Dispose")))
+            (return))))))
 
 (defun loader-request (ld indices current)
   "indices を優先順でロード要求 (既キャッシュはスキップ)。current は LRU 中心。"
@@ -396,9 +404,15 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
     ld))
 
 (defun loader-stop (ld)
+  "ワーカーを止め、cache の Bitmap を全解放する (再オープン/終了時のリーク防止)。"
   (with-lock-held ((loader-lock ld))
     (setf (loader-done ld) t)
-    (condition-notify (loader-cv ld))))
+    (condition-notify (loader-cv ld)))
+  (ignore-errors (thread-join (loader-worker ld)))   ; 新規 cache が無くなるのを待つ
+  (with-lock-held ((loader-lock ld))
+    (maphash (lambda (k v) (declare (ignore k)) (ignore-errors (dotnet:invoke v "Dispose")))
+             (loader-cache ld))
+    (clrhash (loader-cache ld))))
 
 (defun %ui-post (thunk)
   "thunk を UI スレッドで実行 (ワーカー→UI マーシャリング)。"
