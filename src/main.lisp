@@ -592,8 +592,19 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
 
 (defun %on-release (vw e) (declare (ignore e)) (setf (viewer-dragging vw) nil))
 
+(defun %fullscreen-p (vw)
+  (string= (dotnet:invoke (dotnet:invoke (viewer-window vw) "get_WindowState") "ToString")
+           "FullScreen"))
+
+(defun %set-fullscreen (vw on)
+  (dotnet:invoke (viewer-window vw) "set_WindowState"
+                 (dotnet:static "Avalonia.Controls.WindowState" (if on "FullScreen" "Normal"))))
+
+(defun %quit (vw) (dotnet:invoke (viewer-window vw) "Close"))
+
 (defun %on-key (vw e)
-  "Window KeyDown。←/→/PageUp/Down/Space/Home/End で送り、S=見開き切替, D=綴じ方向切替, 0=フィット。"
+  "Window KeyDown。←/→/PageUp/Down/Space/Home/End で送り、S=見開き, D=綴じ方向,
+R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了。"
   (let ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString")))
     (flet ((nexts () (incf (viewer-sindex vw)) (show-spread vw))
            (prevs () (decf (viewer-sindex vw)) (show-spread vw)))
@@ -610,7 +621,10 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
         ((string= kn "D") (setf *page-direction* (if (eq *page-direction* :rtl) :ltr :rtl))
                           (show-spread vw) (save-settings))
         ((string= kn "R") (setf *recursive* (not *recursive*)) (save-settings) (%reopen vw))
-        ((member kn '("D0" "NumPad0") :test #'string=) (reset-view vw))))))
+        ((member kn '("D0" "NumPad0") :test #'string=) (reset-view vw))
+        ((member kn '("F11" "F") :test #'string=) (%set-fullscreen vw (not (%fullscreen-p vw))))
+        ((string= kn "Escape") (if (%fullscreen-p vw) (%set-fullscreen vw nil) (%quit vw)))
+        ((string= kn "Q") (%quit vw))))))
 
 ;;; ------------------------------------------------------------------
 ;;; ウィンドウ / アプリ (Avalonia)
