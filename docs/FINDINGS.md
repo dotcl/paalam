@@ -122,6 +122,30 @@ host 経路では WPF が **単純名で解決**でき (Desktop ランタイム�
 - 自己完結 (前提不要・サイズ大): `dotnet publish -c Release -r win-arm64 --self-contained -o dist`。
 - NativeAOT は dotcl が実行時 Reflection.Emit するため**不可**。
 
+## クロスプラット退避路: Avalonia (スパイク実証済み 2026-06-17)
+
+WPF は Windows 専用だが、dotcl 自体は Win/Mac/Linux クロスプラット。GUI だけが
+Windows に縛っている。**Avalonia (OSS, MIT, 無償)** に薄い UI 層を載せ替えれば
+クロスプラット化できる。`experiments/avalonia-spike/` で核心を実証:
+
+- `dotnet:static-generic` で `AppBuilder.Configure<App>()` を駆動 → **ジェネリック起動 OK**
+- ネイティブ Skia (SkiaSharp/HarfBuzz) は csproj+RID で自動解決 (cross-platform native 同梱)
+- `dotnet:define-class` で `Avalonia.Application` 派生を emit
+- `Window` + `Image` + `Bitmap(path)` 表示、`StartWithClassicDesktopLifetime` 完走 → EXIT 0
+- **`net10.0` (`-windows` 不要)・STA 不要・Windows Desktop ランタイム非依存** → #281 に WPF より素直
+
+Avalonia 固有の罠:
+- **contrib (define-class) が DotCL.Runtime NuGet に無い** → vendor して `load`
+  (`*package*`=CL-USER で読むと `self` 等が利用側と一致)。dotcl-internal #293。
+- **Avalonia 12 `FluentTheme` は引数なし ctor 無し** (`Uri baseUri=null`)。`dotnet:new` 0 引数版
+  (Activator) では作れない → `(dotnet:new "...FluentTheme" nil)` と省略可引数を明示。
+  dotcl-internal #292。画像表示自体にテーマは不要。
+- Bitmap は `Avalonia.Media.Imaging.Bitmap` (WPF の `BitmapImage` と別型) → book-load-image は
+  backend 依存。WPF/Avalonia を同居させるなら画像ロードを backend ごとに分ける。
+
+判断: クロス化は **XPF (有償) ではなく素の Avalonia** で行う。`book-*` 抽象は GUI 非依存
+なので、載せ替えで触るのは build-main-window / %on-key / 画像ロードの薄い層のみ。
+
 ## 次の段階 (MVP ロードマップ)
 
 1. ✅ WPF 経路の実証 + ✅ WPF host 配布経路の実証 (本メモ)
