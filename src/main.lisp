@@ -994,38 +994,93 @@ UI スレッドで呼ぶこと。"
 
 (defun %quit (vw) (dotnet:invoke (viewer-window vw) "Close"))
 
+;;; ------------------------------------------------------------------
+;;; コマンドテーブル (#10): キー操作とメニューの単一の出どころ。
+;;; 各コマンドは id・ラベル (メニュー表示)・既定キー (Avalonia Key.ToString 名)・
+;;; ハンドラ (vw を取る関数 or シンボル) を持つ。キー dispatch もメニュー構築も
+;;; ここから派生させ、ショートカット表記の二重管理を無くす。将来のキーバインド
+;;; 編集 UI (段階2) はこのテーブルと *keymap* を編集する形にする。
+;;; ------------------------------------------------------------------
+(defstruct (command (:constructor make-command (id label keys handler)))
+  id label keys handler)
+
+;;; コマンド用のハンドラ (いずれも vw を 1 つ取る)。
+(defun %next-spread (vw) (incf (viewer-sindex vw)) (show-spread vw))
+(defun %prev-spread (vw) (decf (viewer-sindex vw)) (show-spread vw))
+(defun %first-spread (vw) (setf (viewer-sindex vw) 0) (show-spread vw))
+(defun %last-spread (vw)
+  (setf (viewer-sindex vw) (1- (length (viewer-spreads vw)))) (show-spread vw))
+(defun %reading-forward (vw)    ; ← : 綴じ方向に沿って読み進む
+  (if (eq *page-direction* :rtl) (%next-spread vw) (%prev-spread vw)))
+(defun %reading-backward (vw)   ; → : 読み戻る
+  (if (eq *page-direction* :rtl) (%prev-spread vw) (%next-spread vw)))
+(defun %toggle-fullscreen (vw) (%set-fullscreen vw (not (%fullscreen-p vw))))
+(defun %escape (vw) (if (%fullscreen-p vw) (%set-fullscreen vw nil) (%quit vw)))
+(defun %toggle-bookmark-current (vw)
+  (toggle-bookmark (viewer-source vw) (%cur-page vw)) (%update-title vw))
+(defun %clip-add-current (vw)
+  "現在の見開きの全ページを素材に追加 (見開きは両ページ)。"
+  (let ((sp (viewer-spreads vw)))
+    (when (plusp (length sp))
+      (dolist (p (aref sp (viewer-sindex vw))) (clip-add (viewer-source vw) p))))
+  (%update-title vw)
+  (when (dotnet:invoke (viewer-clip-pane vw) "get_IsVisible") (%rebuild-clip-pane vw)))
+
+(defparameter *commands*
+  ;; ラベルにキーは書かない (メニューが %keymap から付ける)。keys は既定割当。
+  (list
+   (make-command :open-file     "開く (ファイル)…" '()        (lambda (vw) (%open-file-dialog vw (viewer-window vw))))
+   (make-command :open-folder   "開く (フォルダ)…" '()        (lambda (vw) (%open-folder-dialog vw (viewer-window vw))))
+   (make-command :settings      "設定…"            '()        (lambda (vw) (%open-settings vw)))
+   (make-command :quit          "終了"             '("Q")     '%quit)
+   (make-command :next-spread   "次の見開き"       '("PageDown" "Next" "Space") '%next-spread)
+   (make-command :prev-spread   "前の見開き"       '("PageUp" "Prior" "Back")   '%prev-spread)
+   (make-command :reading-fwd   "読み進む"         '("Left")  '%reading-forward)
+   (make-command :reading-bwd   "読み戻る"         '("Right") '%reading-backward)
+   (make-command :first-spread  "先頭へ"           '("Home")  '%first-spread)
+   (make-command :last-spread   "末尾へ"           '("End")   '%last-spread)
+   (make-command :fullscreen    "全画面"           '("F11" "F") '%toggle-fullscreen)
+   (make-command :spread        "見開き"           '("S")     '%toggle-spread)
+   (make-command :direction     "綴じ方向"         '("D")     '%toggle-direction)
+   (make-command :recursive     "再帰収集"         '("R")     '%toggle-recursive)
+   (make-command :fit           "フィット"         '("D0" "NumPad0") 'reset-view)
+   (make-command :clip-pane     "素材ペイン"       '("P")     '%toggle-clip-pane)
+   (make-command :clip-add      "素材に追加"       '("A")     '%clip-add-current)
+   (make-command :export        "掃き出し…"        '("E")     '%pane-export)
+   (make-command :bookmark      "しおり切替"       '("B")     '%toggle-bookmark-current)
+   (make-command :prev-bookmark "前のしおり"       '("OemOpenBrackets")  (lambda (vw) (%goto-bookmark vw -1)))
+   (make-command :next-bookmark "次のしおり"       '("OemCloseBrackets") (lambda (vw) (%goto-bookmark vw  1)))
+   (make-command :escape        "戻る / 終了"      '("Escape") '%escape))
+  "全コマンド (定義順)。メニュー/キーバインド編集はこの順序を参照する。")
+
+(defun %command (id) (find id *commands* :key #'command-id))
+
+;;; *keymap*: キー名 (Avalonia Key.ToString) → コマンド id。既定は各コマンドの
+;;; keys から構築。段階2でユーザ設定の上書き/永続化を被せる。
+(defparameter *keymap* (make-hash-table :test 'equal))
+(defun reset-keymap ()
+  "*keymap* を各コマンドの既定キーで作り直す。"
+  (clrhash *keymap*)
+  (dolist (c *commands*)
+    (dolist (k (command-keys c)) (setf (gethash k *keymap*) (command-id c)))))
+(reset-keymap)
+
+(defun %command-primary-key (id)
+  "ID の代表キー (メニュー表示用; 既定キー順を優先、無ければ keymap から拾う)。"
+  (let ((c (%command id)))
+    (or (and c (find-if (lambda (k) (eq (gethash k *keymap*) id)) (command-keys c)))
+        (loop for k being the hash-keys of *keymap* using (hash-value v)
+              when (eq v id) return k))))
+
+(defun %run-command (vw id)
+  (let ((c (%command id)))
+    (when c (funcall (command-handler c) vw))))
+
 (defun %on-key (vw e)
-  "Window KeyDown。←/→/PageUp/Down/Space/Home/End で送り、S=見開き, D=綴じ方向,
-R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了。"
-  (let ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString")))
-    (flet ((nexts () (incf (viewer-sindex vw)) (show-spread vw))
-           (prevs () (decf (viewer-sindex vw)) (show-spread vw)))
-      (cond
-        ((member kn '("PageDown" "Next" "Space") :test #'string=) (nexts))
-        ((member kn '("PageUp" "Prior" "Back") :test #'string=) (prevs))
-        ((string= kn "Left")  (if (eq *page-direction* :rtl) (nexts) (prevs)))
-        ((string= kn "Right") (if (eq *page-direction* :rtl) (prevs) (nexts)))
-        ((string= kn "Home") (setf (viewer-sindex vw) 0) (show-spread vw))
-        ((string= kn "End")  (setf (viewer-sindex vw) (1- (length (viewer-spreads vw))))
-                             (show-spread vw))
-        ((string= kn "S") (%toggle-spread vw))
-        ((string= kn "D") (%toggle-direction vw))
-        ((string= kn "R") (%toggle-recursive vw))
-        ((member kn '("D0" "NumPad0") :test #'string=) (reset-view vw))
-        ((member kn '("F11" "F") :test #'string=) (%set-fullscreen vw (not (%fullscreen-p vw))))
-        ((string= kn "Escape") (if (%fullscreen-p vw) (%set-fullscreen vw nil) (%quit vw)))
-        ((string= kn "Q") (%quit vw))
-        ((string= kn "B") (toggle-bookmark (viewer-source vw) (%cur-page vw)) (%update-title vw))
-        ((string= kn "OemOpenBrackets")  (%goto-bookmark vw -1))   ; [ 前のしおり
-        ((string= kn "OemCloseBrackets") (%goto-bookmark vw  1))   ; ] 次のしおり
-        ((string= kn "A")                                          ; 素材に追加 (見開きは両ページ)
-         (let ((sp (viewer-spreads vw)))
-           (when (plusp (length sp))
-             (dolist (p (aref sp (viewer-sindex vw))) (clip-add (viewer-source vw) p))))
-         (%update-title vw)
-         (when (dotnet:invoke (viewer-clip-pane vw) "get_IsVisible") (%rebuild-clip-pane vw)))
-        ((string= kn "P") (%toggle-clip-pane vw))                     ; 素材ペイン開閉
-        ((string= kn "E") (%pane-export vw))))))                      ; 掃き出し (zip)
+  "Window KeyDown。キー名を *keymap* で引いて対応コマンドを実行 (#10)。"
+  (let* ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString"))
+         (id (gethash kn *keymap*)))
+    (when id (%run-command vw id))))
 
 ;;; ------------------------------------------------------------------
 ;;; ウィンドウ / アプリ (Avalonia)
@@ -1198,22 +1253,30 @@ R=再帰, 0=フィット, F11/F=全画面, Esc=全画面解除/終了, Q=終了�
     mi))
 (defun %menu-add (parent item) (dotnet:invoke (dotnet:invoke parent "get_Items") "Add" item))
 
+(defun %key-label (k)
+  "Avalonia Key 名をメニュー表示用に整える ([ ] 0 等)。"
+  (cond ((null k) nil)
+        ((or (string= k "D0") (string= k "NumPad0")) "0")
+        ((string= k "OemOpenBrackets") "[")
+        ((string= k "OemCloseBrackets") "]")
+        (t k)))
+
+(defun %menu-cmd (vw parent id)
+  "コマンド ID をメニュー項目として PARENT に追加 (ラベル + 代表キーを表示)。"
+  (let* ((c (%command id))
+         (k (%key-label (%command-primary-key id)))
+         (header (if k (format nil "~a (~a)" (command-label c) k) (command-label c))))
+    (%menu-add parent (%menu-item vw header (lambda () (%run-command vw id))))))
+
 (defun %build-menu (vw win)
+  (declare (ignore win))   ; 開く系コマンドは (viewer-window vw) を owner に使う
   (let ((menu   (dotnet:new "Avalonia.Controls.Menu"))
         (m-file (%menu-item vw "ファイル"))
         (m-view (%menu-item vw "表示"))
         (m-clip (%menu-item vw "素材")))
-    (%menu-add m-file (%menu-item vw "開く (ファイル)…" (lambda () (%open-file-dialog vw win))))
-    (%menu-add m-file (%menu-item vw "開く (フォルダ)…" (lambda () (%open-folder-dialog vw win))))
-    (%menu-add m-file (%menu-item vw "設定…" (lambda () (%open-settings vw))))
-    (%menu-add m-file (%menu-item vw "終了 (Q)" (lambda () (%quit vw))))
-    (%menu-add m-view (%menu-item vw "全画面 (F11)" (lambda () (%set-fullscreen vw (not (%fullscreen-p vw))))))
-    (%menu-add m-view (%menu-item vw "見開き (S)" (lambda () (%toggle-spread vw))))
-    (%menu-add m-view (%menu-item vw "綴じ方向 (D)" (lambda () (%toggle-direction vw))))
-    (%menu-add m-view (%menu-item vw "再帰収集 (R)" (lambda () (%toggle-recursive vw))))
-    (%menu-add m-view (%menu-item vw "フィット (0)" (lambda () (reset-view vw))))
-    (%menu-add m-view (%menu-item vw "素材ペイン (P)" (lambda () (%toggle-clip-pane vw))))
-    (%menu-add m-clip (%menu-item vw "掃き出し… (E)" (lambda () (%pane-export vw))))
+    (dolist (id '(:open-file :open-folder :settings :quit)) (%menu-cmd vw m-file id))
+    (dolist (id '(:fullscreen :spread :direction :recursive :fit :clip-pane)) (%menu-cmd vw m-view id))
+    (dolist (id '(:export)) (%menu-cmd vw m-clip id))
     (let ((items (dotnet:invoke menu "get_Items")))
       (dotnet:invoke items "Add" m-file)
       (dotnet:invoke items "Add" m-view)
