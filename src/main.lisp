@@ -763,11 +763,15 @@ MemoryStream(byte[]) ctor は overload バグ (#294) を踏むので無引数 + 
     (unless vis (%rebuild-thumb-pane vw))))
 
 (defun %thumb-pane-refresh (vw)
-  "本を変えたとき: サムネキャッシュを捨て、ペインが開いていれば作り直す。"
-  (%pthumb-clear)
-  (when (and (viewer-thumb-pane vw)
-             (dotnet:invoke (viewer-thumb-pane vw) "get_IsVisible"))
-    (%rebuild-thumb-pane vw)))
+  "本を変えたとき: サムネ表示を作り直し、旧サムネ Bitmap は描画後に破棄 (use-after-dispose 回避)。"
+  (let ((old '()))
+    (maphash (lambda (k v) (declare (ignore k)) (push v old)) *page-thumb-cache*)
+    (clrhash *page-thumb-cache*)   ; 新しい本は別キーなので参照だけ落とす
+    (when (and (viewer-thumb-pane vw)
+               (dotnet:invoke (viewer-thumb-pane vw) "get_IsVisible"))
+      (%rebuild-thumb-pane vw))    ; 旧 Image を tstack から外す (Clear)
+    (when old
+      (%defer (lambda () (dolist (b old) (ignore-errors (dotnet:invoke b "Dispose"))))))))
 
 ;;; ------------------------------------------------------------------
 ;;; フォルダツリー本棚 (#6 B): サイドにファイルシステムのツリー。ドライブをルートに
@@ -965,17 +969,44 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
                           (make-thread (lambda () (%loader-loop ld bk)) :name "paalam-loader"))))
     ld))
 
-(defun loader-stop (ld)
-  "全ワーカーを止め、cache の Bitmap と書庫ハンドルを解放する。"
+(defun loader-quiesce (ld)
+  "ワーカーを止めて join する (cache の Bitmap/書庫ハンドルは解放しない)。"
   (with-lock-held ((loader-lock ld))
     (setf (loader-done ld) t)
     (condition-broadcast (loader-cv ld)))
-  (dolist (w (loader-workers ld)) (ignore-errors (thread-join w)))   ; 全ワーカー終了待ち
+  (dolist (w (loader-workers ld)) (ignore-errors (thread-join w))))   ; 全ワーカー終了待ち
+
+(defun loader-free (ld)
+  "cache の Bitmap と書庫ハンドルを解放 (quiesce 済み前提)。表示中 Bitmap を破棄するので、
+本切替時は描画スレッド(コンポジタ)が触り終えた後 = 次の描画後 (%ui-post) に呼ぶこと。"
   (with-lock-held ((loader-lock ld))
     (maphash (lambda (k v) (declare (ignore k)) (ignore-errors (dotnet:invoke v "Dispose")))
              (loader-cache ld))
     (clrhash (loader-cache ld)))
   (loop for b across (loader-books ld) do (ignore-errors (book-close b))))   ; ハンドル解放
+
+(defun loader-stop (ld)
+  "全ワーカーを止め、cache の Bitmap と書庫ハンドルを解放する (即時; 終了時用)。"
+  (loader-quiesce ld)
+  (loader-free ld))
+
+(defun %defer (thunk &optional (ms 250))
+  "THUNK を MS 後に UI スレッドで一度だけ実行。表示中だった Bitmap をコンポジタ(別スレッドの
+描画)が触り終える猶予を取って破棄するため (%ui-post の次ティックでは描画完了を保証できない)。"
+  (let ((timer (dotnet:new "Avalonia.Threading.DispatcherTimer")))
+    (dotnet:invoke timer "set_Interval"
+                   (dotnet:static "System.TimeSpan" "FromMilliseconds" (coerce ms 'double-float)))
+    (dotnet:add-event timer "Tick"
+      (lambda (s e) (declare (ignore s e))
+        (dotnet:invoke timer "Stop")
+        (ignore-errors (funcall thunk))))
+    (dotnet:invoke timer "Start")))
+
+(defun %defer-free (loader book)
+  "旧 loader の Bitmap/ハンドルと旧 book の解放を描画後へ遅延し use-after-dispose を回避。"
+  (%defer (lambda ()
+            (ignore-errors (loader-free loader))
+            (ignore-errors (book-close book)))))
 
 (defun %ui-post (thunk)
   "thunk を UI スレッドで実行 (ワーカー→UI マーシャリング)。"
@@ -1005,11 +1036,11 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
 
 (defun %reopen (vw)
   "source を開き直して book/loader/spreads を差し替える (再帰トグル等)。現在ページは維持。"
-  (let ((keep (%cur-page vw)))
+  (let ((keep (%cur-page vw))
+        (old-loader (viewer-loader vw)) (old-book (viewer-book vw)))
     (multiple-value-bind (book start) (open-book (viewer-source vw))
       (declare (ignore start))
-      (ignore-errors (loader-stop (viewer-loader vw)))
-      (ignore-errors (book-close (viewer-book vw)))
+      (ignore-errors (loader-quiesce old-loader))   ; スレッドだけ止める (Bitmap は描画後に破棄)
       (setf (viewer-book vw) book
             (viewer-loader vw) (open-loader
                                 (viewer-source vw)
@@ -1019,27 +1050,29 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
             (viewer-sindex vw) (spread-index-of (viewer-spreads vw)
                                                 (min keep (max 0 (1- (book-page-count book))))))
       (show-spread vw)
-      (%thumb-pane-refresh vw))))
+      (%thumb-pane-refresh vw)
+      (%defer-free old-loader old-book))))
 
 (defun open-path (vw path)
   "別の本 (DnD 等) を開いて差し替える。履歴があればそのページ、無ければ先頭から。
 UI スレッドで呼ぶこと。"
   (handler-case
       (multiple-value-bind (book start) (open-book path)
-        (ignore-errors (loader-stop (viewer-loader vw)))
-        (ignore-errors (book-close (viewer-book vw)))
-        (let* ((spreads (compute-spreads (book-page-count book)))
-               (resume (history-page path))
-               (page (if resume (min resume (max 0 (1- (book-page-count book)))) start)))
-          (setf (viewer-source vw) path
-                (viewer-book vw) book
-                (viewer-loader vw) (open-loader
-                                    path
-                                    (lambda (i) (%ui-post (lambda () (%on-page-loaded vw i)))))
-                (viewer-spreads vw) spreads
-                (viewer-sindex vw) (spread-index-of spreads page))
-          (show-spread vw)
-          (%thumb-pane-refresh vw)))
+        (let ((old-loader (viewer-loader vw)) (old-book (viewer-book vw)))
+          (ignore-errors (loader-quiesce old-loader))   ; スレッドだけ止める (Bitmap は描画後に破棄)
+          (let* ((spreads (compute-spreads (book-page-count book)))
+                 (resume (history-page path))
+                 (page (if resume (min resume (max 0 (1- (book-page-count book)))) start)))
+            (setf (viewer-source vw) path
+                  (viewer-book vw) book
+                  (viewer-loader vw) (open-loader
+                                      path
+                                      (lambda (i) (%ui-post (lambda () (%on-page-loaded vw i)))))
+                  (viewer-spreads vw) spreads
+                  (viewer-sindex vw) (spread-index-of spreads page))
+            (show-spread vw)
+            (%thumb-pane-refresh vw)
+            (%defer-free old-loader old-book))))
     (error (e) (log-err "open-path" e))))
 
 (defun apply-transform (vw)
