@@ -1870,6 +1870,17 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
       (let* ((scr (dotnet:new "Avalonia.Controls.ScrollViewer"))
              (addbtn (%s-button "＋ キーを追加"
                                 (lambda () (%capture-key swin (lambda (k) (add-binding k))))))
+             ;; 既定に戻す (#23): 作業リストを command-keys (出荷時既定) で作り直す。
+             ;; OK で保存すると現行既定のスナップショットになる (= 新既定の取り込み手段)。
+             (reset-btn (%s-button "既定に戻す"
+                          (lambda ()
+                            (setf (car kbox)
+                                  (let ((acc '()))
+                                    (dolist (c *commands*)
+                                      (dolist (k (command-keys c))
+                                        (push (cons k (command-id c)) acc)))
+                                    (nreverse acc)))
+                            (refresh))))
              (panel-layout
                (page (list (%s-header "レイアウト")
                            (%s-row "綴じ方向" combo)
@@ -1891,7 +1902,7 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
                  (dotnet:invoke scr "set_MaxHeight" 360d0)
                  (dotnet:invoke scr "set_Content" kb-stack)
                  (page (list (%s-header "キー割当 (キー → 機能。1キー1機能・複数可。数字1-9はcount予約)")
-                             scr addbtn))))
+                             scr addbtn reset-btn))))
              (panel-assoc (assoc-page))
              (pages (append (list (cons "レイアウト" panel-layout)
                                   (cons "画質"      panel-quality)
