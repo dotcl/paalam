@@ -1032,6 +1032,7 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
            (reorder-img nil)            ; ドラッグ中のサムネ (不透明度を戻す用; #20)
            (reorder-line nil)           ; 挿入位置インジケータ Border (#20)
            (dnd-overlay nil)            ; DnD ドロップ可否ハイライト枠 (#20)
+           (pending-count nil)          ; vi 風 count プレフィックス (数字キー蓄積; #23)
            menu)                        ; メニューバー (#21; 全画面時に隠す)
 
 (defun %reopen (vw)
@@ -1390,6 +1391,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
    (make-command :recursive     "再帰収集"         '("R")     '%toggle-recursive)
    (make-command :fit           "フィット"         '("D0" "NumPad0") 'reset-view)
    (make-command :fit-mode      "フィット切替"     '("W")     '%cycle-fit-mode)
+   (make-command :goto          "ページ移動 ([count]G)" '("G") '%goto-page)
    (make-command :clip-pane     "素材ペイン"       '("P")     '%toggle-clip-pane)
    (make-command :thumb-pane    "本棚 (サムネ)"    '("T")     '%toggle-thumb-pane)
    (make-command :browse-pane   "フォルダ"         '("L")     '%toggle-browse-pane)
@@ -1438,11 +1440,23 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
   (let ((c (%command id)))
     (when c (funcall (command-handler c) vw))))
 
+(defun %digit-key (kn)
+  "キー名 (Avalonia Key.ToString) が数字なら 0-9、でなければ nil。D0-D9 / NumPad0-9。"
+  (cond ((and (= (length kn) 2) (char= (char kn 0) #\D)) (digit-char-p (char kn 1)))
+        ((and (= (length kn) 7) (string= (subseq kn 0 6) "NumPad")) (digit-char-p (char kn 6)))
+        (t nil)))
+
 (defun %on-key (vw e)
-  "Window KeyDown。キー名を *keymap* で引いて対応コマンドを実行 (#10)。"
+  "Window KeyDown。数字は count プレフィックスとして蓄積 (vi 風, #23)。それ以外は
+*keymap* を引いてコマンド実行 (count はコマンドが viewer-pending-count で読む)。
+0 単独は count を始めない (既存の 0=フィットを活かす; count 継続中の 0 のみ桁送り)。"
   (let* ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString"))
-         (id (gethash kn *keymap*)))
-    (when id (%run-command vw id))))
+         (d  (%digit-key kn)))
+    (if (and d (or (> d 0) (viewer-pending-count vw)))
+        (setf (viewer-pending-count vw) (+ (* 10 (or (viewer-pending-count vw) 0)) d))
+        (let ((id (gethash kn *keymap*)))
+          (when id (%run-command vw id))     ; count は実行中に pending-count で読まれる
+          (setf (viewer-pending-count vw) nil)))))
 
 ;;; ------------------------------------------------------------------
 ;;; ウィンドウ / アプリ (Avalonia)
@@ -1671,6 +1685,14 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
             (dotnet:invoke w "Close")
             (unless (string= kn "Escape") (funcall on-key kn))))))
     (dotnet:invoke w "ShowDialog" owner)))
+
+(defun %goto-page (vw)
+  "vi 風ページ移動 (#23): [count]G で count ページ目へ、count 無しの G は末尾へ。
+count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
+  (let* ((n (book-page-count (viewer-book vw)))
+         (cnt (viewer-pending-count vw))
+         (page (if cnt (1- (max 1 (min cnt n))) (1- n))))
+    (when (plusp n) (%jump-to-page vw page))))
 
 (defun %open-settings (vw)
   ;; 左に折りたたみツリー (カテゴリ)、右に該当ページ。選択で右を差し替える master/detail。
