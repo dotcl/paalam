@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>               <string>@APP_NAME@</string>
+  <key>CFBundleDisplayName</key>        <string>paalam</string>
+  <key>CFBundleIdentifier</key>         <string>@BUNDLE_ID@</string>
+  <key>CFBundleVersion</key>            <string>@VERSION@</string>
+  <key>CFBundleShortVersionString</key> <string>@VERSION@</string>
+  <key>CFBundleExecutable</key>         <string>@APP_NAME@</string>
+  <key>CFBundleIconFile</key>           <string>AppIcon</string>
+  <key>CFBundlePackageType</key>        <string>APPL</string>
+  <key>LSMinimumSystemVersion</key>     <string>11.0</string>
+  <key>NSHighResolutionCapable</key>    <true/>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>画像 / コミック / PDF</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.image</string>
+        <string>com.pkware.zip-archive</string>
+        <string>com.adobe.pdf</string>
+        <string>public.folder</string>
+      </array>
+    </dict>
+  </array>
+</dict>
+</plist>

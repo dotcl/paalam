@@ -31,11 +31,12 @@ UI もアプリケーションロジックも、ほぼすべて Common Lisp（`s
 必要なもの: **.NET 10 SDK**。
 
 ```sh
-dotnet build
-dotnet run                      # 引数なし → 空のウィンドウ
-dotnet run -- /path/to/manga.zip   # フォルダ / 書庫 / 画像 / PDF を渡す
+make build                      # または: dotnet build
+make run                        # または: dotnet run
+make run ARGS=/path/to/manga.zip   # フォルダ / 書庫 / 画像 / PDF を渡す
 ```
 
+`dotnet run -- /path/to/manga.zip` のように直接渡すこともできます。
 `PAALAM_PATH` 環境変数でも対象を指定できます。
 
 ## キーバインド（既定）
@@ -87,12 +88,20 @@ NuGet 参照のみ（dotcl repo へのソース依存なし）:
 - `Avalonia` / `Avalonia.Desktop` / `Avalonia.Themes.Fluent`
 - `SharpCompress`（書庫）/ `PDFtoImage`（PDF）
 
-## macOS について
+## macOS の .app バンドル
 
-framework-dependent ビルドなので、起動には .NET 10 ランタイムが必要です。
-`.app` バンドルや署名付き配布は現時点では用意していません（自分のマシンで使うなら
-`dotnet run` で十分動きます）。署名なしの `.app` を他者に渡す場合は、受け取った側で
-quarantine 属性の解除（`xattr -dr com.apple.quarantine paalam.app`）が必要になります。
+```sh
+make app        # dist/paalam.app を生成
+open dist/paalam.app
+```
+
+framework-dependent なので起動には .NET 10 ランタイムが必要です。`.app` は
+署名していません（自分のマシンで使うぶんには起動できます）。他者へ配布する場合は
+Developer ID 署名 + 公証が別途必要で、受け取った側では quarantine 属性の解除
+（`xattr -dr com.apple.quarantine paalam.app`）が要ることがあります。
+
+バンドル構築のロジックは `packaging/macos/`（`make-app.sh` + `Info.plist.in`）に
+あります。Linux 向けの配布物は未対応です。
 
 ## ライセンス
 
