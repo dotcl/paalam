@@ -223,6 +223,10 @@
 ;;; pdf-book (PDFtoImage/PDFium 経由) -------------------------------
 ;;; 各ページを C# シム Paalam.PdfDoc でラスタライズして Avalonia Bitmap に。
 
+(defparameter *pdf-dpi* 300
+  "PDF ページのラスタライズ解像度 (DPI)。150 固定だと 4K で拡大され粗いので可変に (#2)。
+高いほど精細だがメモリ/時間増。4K は 300〜400 程度が目安。変更時は本を開き直して再描画。")
+
 (defclass pdf-book ()
   ((doc   :initarg :doc   :reader pdfb-doc)
    (count :initarg :count :reader pdfb-count)))
@@ -234,7 +238,7 @@
 
 (defmethod book-page-count ((b pdf-book)) (pdfb-count b))
 (defmethod book-page-name  ((b pdf-book) i) (format nil "p~d" (1+ i)))
-(defmethod book-load-image ((b pdf-book) i) (dotnet:invoke (pdfb-doc b) "RenderPage" i))
+(defmethod book-load-image ((b pdf-book) i) (dotnet:invoke (pdfb-doc b) "RenderPage" i *pdf-dpi*))
 (defmethod book-close      ((b pdf-book)) nil)
 
 ;;; book-page-bytes: 素材掃き出し (#18) 用にページの生バイトと拡張子を返す。
@@ -264,7 +268,7 @@
       (dotnet:invoke es "Dispose") (dotnet:invoke ms "Dispose"))))
 
 (defmethod book-page-bytes ((b pdf-book) i)
-  (values (dotnet:invoke (pdfb-doc b) "RenderPagePng" i) "png"))
+  (values (dotnet:invoke (pdfb-doc b) "RenderPagePng" i *pdf-dpi*) "png"))
 
 ;;; open-book --------------------------------------------------------
 
@@ -324,6 +328,7 @@
     (:fit-mode          . *fit-mode*)
     (:background-color  . *background-color*)
     (:interpolation     . *interpolation*)
+    (:pdf-dpi           . *pdf-dpi*)
     (:cache-size        . *cache-size*)
     (:prefetch-ahead    . *prefetch-ahead*)
     (:loader-threads    . *loader-threads*))
@@ -1670,10 +1675,10 @@ g/G: [count]g=count ページ目 / gg=先頭 / G(Shift)=末尾 / g 単独=次の
       (dotnet:static "System.Diagnostics.Process" "Start" psi))))
 
 (defun %settings-apply (vw cb-spread cb-fps cb-rec combo tb-cache tb-pf tb-th
-                        fit-combo bg-combo interp-combo)
+                        fit-combo bg-combo interp-combo tb-dpi)
   "コントロールの現在値をグローバルへ反映し永続化、変更内容に応じて再描画する。"
   (let ((old-spread *spread*) (old-fps *first-page-single*)
-        (old-rec *recursive*) (old-threads *loader-threads*))
+        (old-rec *recursive*) (old-threads *loader-threads*) (old-dpi *pdf-dpi*))
     (setf *spread*            (and (dotnet:invoke cb-spread "get_IsChecked") t)
           *first-page-single* (and (dotnet:invoke cb-fps "get_IsChecked") t)
           *recursive*         (and (dotnet:invoke cb-rec "get_IsChecked") t)
@@ -1681,15 +1686,17 @@ g/G: [count]g=count ページ目 / gg=先頭 / G(Shift)=末尾 / g 単独=次の
           *fit-mode*          (%s-combo-value fit-combo *fit-choices*)
           *background-color*  (%s-combo-value bg-combo *bg-choices*)
           *interpolation*     (%s-combo-value interp-combo *interp-choices*)
+          *pdf-dpi*           (%parse-int (dotnet:invoke tb-dpi "get_Text") *pdf-dpi* 36)
           *cache-size*        (%parse-int (dotnet:invoke tb-cache "get_Text") *cache-size* 1)
           *prefetch-ahead*    (%parse-int (dotnet:invoke tb-pf "get_Text") *prefetch-ahead* 0)
           *loader-threads*    (%parse-int (dotnet:invoke tb-th "get_Text") *loader-threads* 1))
     (save-settings)
     (%apply-background vw)       ; 背景色 (#2)
     (%apply-interpolation vw)    ; 補間品質 (#2)
-    ;; 反映の重さ順: recursive/スレッド数は本を開き直す、見開き構成変化は再計算、
-    ;; それ以外 (綴じ方向/フィット/背景/補間/キャッシュ/先読み) は現見開きを再描画。
-    (cond ((or (not (eq old-rec *recursive*)) (/= old-threads *loader-threads*))
+    ;; 反映の重さ順: recursive/スレッド数/PDF DPI は本を開き直す (キャッシュを再生成)、
+    ;; 見開き構成変化は再計算、それ以外 (綴じ方向/フィット/背景/補間/キャッシュ/先読み) は再描画。
+    (cond ((or (not (eq old-rec *recursive*)) (/= old-threads *loader-threads*)
+               (/= old-dpi *pdf-dpi*))
            (%reopen vw))
           ((or (not (eq old-spread *spread*)) (not (eq old-fps *first-page-single*)))
            (%recompute vw (%cur-page vw)))
@@ -1876,6 +1883,7 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
          (fit-combo    (%s-choice-combo *fit-choices* *fit-mode*))
          (bg-combo     (%s-choice-combo *bg-choices* *background-color* #'string=))
          (interp-combo (%s-choice-combo *interp-choices* *interpolation*))
+         (tb-dpi    (%s-textbox *pdf-dpi*))
          ;; キー割当の作業用コピー。(car kbox) が作業リスト。クロージャからは
          ;; (setf (car kbox) ..) で place を書き換える (let* 変数の再束縛は dotcl が不正 IL)。
          (kbox (list (let ((acc '()))
@@ -2029,7 +2037,8 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
              (panel-quality
                (page (list (%s-header "画質")
                            (%s-row "背景色" bg-combo)
-                           (%s-row "拡大補間" interp-combo))))
+                           (%s-row "拡大補間" interp-combo)
+                           (%s-row "PDF 解像度 (DPI)" tb-dpi))))
              (panel-perf
                (page (list (%s-header "先読み")
                            (%s-row "キャッシュ最大ページ数" tb-cache)
@@ -2097,7 +2106,7 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
             (%s-button "OK"
               (lambda ()
                 (%settings-apply vw cb-spread cb-fps cb-rec combo tb-cache tb-pf tb-th
-                                 fit-combo bg-combo interp-combo)
+                                 fit-combo bg-combo interp-combo tb-dpi)
                 ;; キー指向の作業リストを機能ごとにまとめ直して確定 (削除は空リストで反映)。
                 (setf *keybinds*
                       (mapcar (lambda (c)

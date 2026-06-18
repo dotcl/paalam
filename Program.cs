@@ -28,9 +28,11 @@ public sealed class PdfDoc
     private readonly byte[] _bytes;
     public PdfDoc(string path) => _bytes = System.IO.File.ReadAllBytes(path);
     public int PageCount => PDFtoImage.Conversion.GetPageCount(_bytes);
-    public Avalonia.Media.Imaging.Bitmap RenderPage(int index)
+    // dpi はラスタライズ解像度 (Lisp の *pdf-dpi*)。4K では 150 だと拡大されて粗いので
+    // 既定 300、設定で可変。高いほど精細だがメモリ/時間が増える。
+    public Avalonia.Media.Imaging.Bitmap RenderPage(int index, int dpi)
     {
-        var opts = new PDFtoImage.RenderOptions(Dpi: 150,
+        var opts = new PDFtoImage.RenderOptions(Dpi: dpi,
                        BackgroundColor: SkiaSharp.SKColors.White);
         using var sk = PDFtoImage.Conversion.ToImage(_bytes, index, null, opts);
         using var data = sk.Encode(SkiaSharp.SKEncodedImageFormat.Png, 90);
@@ -39,9 +41,9 @@ public sealed class PdfDoc
     }
 
     // 素材掃き出し用: ページを PNG バイト列で返す。
-    public byte[] RenderPagePng(int index)
+    public byte[] RenderPagePng(int index, int dpi)
     {
-        var opts = new PDFtoImage.RenderOptions(Dpi: 150,
+        var opts = new PDFtoImage.RenderOptions(Dpi: dpi,
                        BackgroundColor: SkiaSharp.SKColors.White);
         using var sk = PDFtoImage.Conversion.ToImage(_bytes, index, null, opts);
         using var data = sk.Encode(SkiaSharp.SKEncodedImageFormat.Png, 90);
