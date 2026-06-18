@@ -38,6 +38,9 @@
          それだけ同梱 (起動が速い・ソース非平文)。精コンパイルは build 時にインストール済み
          dotcl で実行 (実行時ランタイムは NuGet)。 -->
   <PropertyGroup>
+    <!-- 既定: -p:Precompiled 明示があればそれ。無ければ Release=fasl / Debug=source。
+         検証は -c Debug -p:Precompiled=true で「Debug かつ fasl」も可。 -->
+    <Precompiled Condition="'$(Precompiled)' == '' and '$(Configuration)' == 'Release'">true</Precompiled>
     <Precompiled Condition="'$(Precompiled)' == ''">false</Precompiled>
     <DotclExe Condition="'$(DotclExe)' == ''">dotcl</DotclExe>
   </PropertyGroup>
