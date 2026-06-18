@@ -15,6 +15,8 @@
     <NoWarn>$(NoWarn);CA1416</NoWarn>
     <!-- experiments/ 配下 (spike の .cs / obj 等) を本体ビルドから除外。 -->
     <DefaultItemExcludes>$(DefaultItemExcludes);experiments\**</DefaultItemExcludes>
+    <!-- exe にアプリアイコンを埋め込み (関連付け DefaultIcon = exe,0 / タスクバー)。 -->
+    <ApplicationIcon>app.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
@@ -33,6 +35,10 @@
   <!-- Lisp 本体を出力直下へ (contrib は require が NuGet 同梱から解決)。 -->
   <ItemGroup>
     <Content Include="src\main.lisp" Link="main.lisp">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <!-- 実行時の Window.Icon 用に app.ico も出力へ。 -->
+    <Content Include="app.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>

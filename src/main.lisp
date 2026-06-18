@@ -1850,6 +1850,11 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
           (dotnet:invoke win "set_Content" dock)))
       (%apply-background vw)          ; 背景色 (= 余白/レターボックス, #2)
       (%apply-interpolation vw)       ; 拡大補間品質 (#2)
+      ;; ウィンドウ/タスクバーのアイコン (出力直下の app.ico)。
+      (ignore-errors
+        (let ((ico (concatenate 'string (dotnet:static "System.AppContext" "BaseDirectory") "app.ico")))
+          (when (dotnet:static "System.IO.File" "Exists" ico)
+            (dotnet:invoke win "set_Icon" (dotnet:new "Avalonia.Controls.WindowIcon" ico)))))
       (dotnet:invoke win "set_Width"  1200d0)
       (dotnet:invoke win "set_Height" 800d0)
       (dotnet:add-event win "KeyDown"
