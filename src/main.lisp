@@ -1393,6 +1393,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
    (make-command :fit           "フィット"         '("D0" "NumPad0") 'reset-view)
    (make-command :fit-mode      "フィット切替"     '("W")     '%cycle-fit-mode)
    (make-command :goto          "ページ移動 (gg=先頭 / G=末尾 / [count]g)" '("G") '%goto-page)
+   (make-command :palette       "コマンドパレット" '("OemSemicolon") '%command-palette)
    (make-command :clip-pane     "素材ペイン"       '("P")     '%toggle-clip-pane)
    (make-command :thumb-pane    "本棚 (サムネ)"    '("T")     '%toggle-thumb-pane)
    (make-command :browse-pane   "フォルダ"         '("L")     '%toggle-browse-pane)
@@ -1723,6 +1724,86 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
          (page (if cnt (1- (max 1 (min cnt n))) (1- n))))
     (when (plusp n) (%jump-to-page vw page))))
 
+;;; : コマンドパレット (#23)。*commands* を名前/ラベルで絞り込んで実行。
+(defun %palette-name (c)
+  "パレットでタイプする識別子 (id を小文字化; 例 :next-spread → \"next-spread\")。"
+  (string-downcase (symbol-name (command-id c))))
+
+(defun %palette-matches (query)
+  "QUERY にマッチするコマンドをランク順 (完全一致→前方一致→部分一致→ラベル一致) で返す。
+空なら *commands* 全部。同ランク内は *commands* の元順を保つ。"
+  (let ((q (string-downcase (string-trim " " query))))
+    (if (string= q "")
+        (copy-list *commands*)
+        (let ((scored '()))
+          (dolist (c *commands*)
+            (let* ((name (%palette-name c))
+                   (rank (cond ((string= name q) 0)
+                               ((eql 0 (search q name)) 1)
+                               ((search q name) 2)
+                               ((search q (command-label c)) 3)
+                               (t nil))))
+              (when rank (push (cons rank c) scored))))
+          (mapcar #'cdr (stable-sort (nreverse scored) #'< :key #'car))))))
+
+(defun %command-palette (vw)
+  "vi 風 : コマンドパレット (#23)。入力で絞り込み、↑↓/クリックで選択、Enter 実行、Esc 閉じる。"
+  (let* ((owner (viewer-window vw))
+         (w     (dotnet:new "Avalonia.Controls.Window"))
+         (tb    (dotnet:new "Avalonia.Controls.TextBox"))
+         (lb    (dotnet:new "Avalonia.Controls.ListBox"))
+         (panel (dotnet:new "Avalonia.Controls.StackPanel"))
+         (mbox  (list nil)))   ; 現在の候補リスト (holder; let 変数直接 setf は dotcl 不正 IL 回避)
+    (labels
+        ((row-text (c)
+           (let ((k (%key-label (%command-primary-key (command-id c)))))
+             (format nil "~a   ~a~@[   [~a]~]" (command-label c) (%palette-name c) k)))
+         (populate ()
+           (let ((ms (%palette-matches (or (dotnet:invoke tb "get_Text") ""))))
+             (setf (car mbox) ms)
+             (let ((items (dotnet:invoke lb "get_Items")))
+               (dotnet:invoke items "Clear")
+               (dolist (c ms) (dotnet:invoke items "Add" (row-text c))))
+             (when ms (dotnet:invoke lb "set_SelectedIndex" 0))))
+         (move (d)
+           (let ((n (length (car mbox)))
+                 (i (dotnet:invoke lb "get_SelectedIndex")))
+             (when (plusp n)
+               (dotnet:invoke lb "set_SelectedIndex" (mod (+ (max 0 i) d) n)))))
+         (run-selected ()
+           (let* ((i (dotnet:invoke lb "get_SelectedIndex"))
+                  (c (and (>= i 0) (nth i (car mbox)))))
+             (when c
+               (let ((id (command-id c)))
+                 (dotnet:invoke w "Close")
+                 (%run-command vw id))))))
+      (dotnet:invoke tb "set_Watermark" "コマンド名で絞り込み (Enter 実行 / Esc 閉じる)")
+      (dotnet:invoke tb "set_Margin" (dotnet:new "Avalonia.Thickness" 8d0))
+      (dotnet:invoke lb "set_MaxHeight" 320d0)
+      (dotnet:invoke lb "set_Margin" (dotnet:new "Avalonia.Thickness" 8d0 0d0 8d0 8d0))
+      (dotnet:add-event tb "TextChanged" (lambda (s e) (declare (ignore s e)) (populate)))
+      (dotnet:add-event lb "DoubleTapped" (lambda (s e) (declare (ignore s e)) (run-selected)))
+      (dotnet:add-event w "KeyDown"
+        (lambda (s e) (declare (ignore s))
+          (let ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString")))
+            (cond ((string= kn "Enter")  (dotnet:invoke e "set_Handled" t) (run-selected))
+                  ((string= kn "Escape") (dotnet:invoke e "set_Handled" t) (dotnet:invoke w "Close"))
+                  ((string= kn "Down")   (dotnet:invoke e "set_Handled" t) (move 1))
+                  ((string= kn "Up")     (dotnet:invoke e "set_Handled" t) (move -1))))))
+      (dotnet:add-event w "Opened" (lambda (s e) (declare (ignore s e)) (dotnet:invoke tb "Focus")))
+      (let ((ch (dotnet:invoke panel "get_Children")))
+        (dotnet:invoke ch "Add" tb)
+        (dotnet:invoke ch "Add" lb))
+      (populate)
+      (dotnet:invoke w "set_Title" "コマンドパレット")
+      (dotnet:invoke w "set_Width" 460d0)
+      (dotnet:invoke w "set_SizeToContent"
+                     (dotnet:static "Avalonia.Controls.SizeToContent" "Height"))
+      (dotnet:invoke w "set_WindowStartupLocation"
+                     (dotnet:static "Avalonia.Controls.WindowStartupLocation" "CenterOwner"))
+      (dotnet:invoke w "set_Content" panel)
+      (dotnet:invoke w "ShowDialog" owner))))
+
 (defun %open-settings (vw)
   ;; 左に折りたたみツリー (カテゴリ)、右に該当ページ。選択で右を差し替える master/detail。
   ;; OK/キャンセルは全ページ共通 (コントロールは非表示でも値を保持するので OK で読める)。
@@ -2007,6 +2088,7 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
         ((or (string= k "D0") (string= k "NumPad0")) "0")
         ((string= k "OemOpenBrackets") "[")
         ((string= k "OemCloseBrackets") "]")
+        ((string= k "OemSemicolon") ":")
         (t k)))
 
 (defun %menu-cmd (vw parent id)
