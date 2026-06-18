@@ -1812,12 +1812,20 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
          (lbl (dotnet:new "Avalonia.Controls.TextBlock"))
          (tb  (dotnet:new "Avalonia.Controls.TextBox")))
     (dotnet:invoke bar "set_IsVisible" nil)
+    ;; 全幅にせず中央下に寄せた小さめのボックス (content に合わせて伸縮)。
     (dotnet:invoke bar "set_VerticalAlignment"
                    (dotnet:static "Avalonia.Layout.VerticalAlignment" "Bottom"))
+    (dotnet:invoke bar "set_HorizontalAlignment"
+                   (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Center"))
+    (dotnet:invoke bar "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 0d0 0d0 24d0))
+    (dotnet:invoke bar "set_Padding" (dotnet:new "Avalonia.Thickness" 8d0 6d0 8d0 6d0))
+    (dotnet:invoke bar "set_CornerRadius" (dotnet:new "Avalonia.CornerRadius" 6d0))
     (dotnet:invoke bar "set_Background" (dotnet:static "Avalonia.Media.Brushes" "Black"))
     (dotnet:invoke bar "set_Opacity" 0.92d0)
     (dotnet:invoke lb "set_MaxHeight" 220d0)
     (dotnet:invoke lb "set_Background" (dotnet:static "Avalonia.Media.Brushes" "Transparent"))
+    ;; 候補と入力欄の間に余白 (最下段の候補が入力に被って見えるのを防ぐ)。
+    (dotnet:invoke lb "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 0d0 0d0 8d0))
     (dotnet:invoke row "set_Orientation" (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
     (dotnet:invoke lbl "set_Text" ":")
     (dotnet:invoke lbl "set_Foreground" (dotnet:static "Avalonia.Media.Brushes" "White"))
