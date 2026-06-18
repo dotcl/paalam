@@ -1571,8 +1571,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
                            (handler-case
                                (progn (%assoc-register es) (sync)
                                       (dotnet:invoke assoc-status "set_Text"
-                                        "選択分を「プログラムから開く」候補に登録。既定にするには『既定のアプリ』で paalam を選択。")
-                                      (%open-default-apps))
+                                        (format nil "~d 件を「プログラムから開く」候補に登録しました。" (length es))))
                              (error (e) (dotnet:invoke assoc-status "set_Text" (format nil "失敗: ~a" e))))))))
                    (dotnet:invoke rc "Add"
                      (%s-button "登録解除"
@@ -1586,8 +1585,13 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
                      "関連付ける拡張子を選び「登録」(per-user・管理者権限不要)。候補に載るだけで既定は変わらないので、既定にしたい型は『既定のアプリ』で paalam を選ぶ。")
                    (dotnet:invoke desc "set_TextWrapping" (dotnet:static "Avalonia.Media.TextWrapping" "Wrap"))
                    (dotnet:invoke desc "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 0d0 0d0 8d0))
-                   (page (list (%s-header "関連付け (Windows / 管理者権限不要)")
-                               desc wrap row assoc-status))))))))
+                   ;; 既定化は任意。登録時に自動で開かず、押したい人だけ Windows の設定へ。
+                   (let ((defbtn (%s-button "既定のアプリ設定を開く…" (lambda () (%open-default-apps)))))
+                     (dotnet:invoke defbtn "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 8d0 0d0 0d0))
+                     (dotnet:invoke defbtn "set_HorizontalAlignment"
+                                    (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Left"))
+                     (page (list (%s-header "関連付け (Windows / 管理者権限不要)")
+                                 desc wrap row defbtn assoc-status)))))))))
       (refresh)
       (let* ((scr (dotnet:new "Avalonia.Controls.ScrollViewer"))
              (addbtn (%s-button "＋ キーを追加"
