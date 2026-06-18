@@ -1084,9 +1084,11 @@ UI スレッドで呼ぶこと。"
   (dotnet:invoke (viewer-trans-xf vw) "set_Y" (viewer-ty vw)))
 
 (defun %apply-background (vw)
-  "ウィンドウ背景 (余白/レターボックス) を *background-color* に設定 (#2)。"
+  "画像表示エリア (= フィット時の余白/レターボックス) の背景を *background-color* に (#2)。
+ウィンドウ全体ではなくビューポートに塗る。こうするとメニュー等のクロムはテーマ既定のまま
+なので、背景を白にしてもメニュー文字が読める。"
   (ignore-errors
-    (dotnet:invoke (viewer-window vw) "set_Background"
+    (dotnet:invoke (viewer-viewport vw) "set_Background"
                    (dotnet:static "Avalonia.Media.Brushes" *background-color*))))
 
 (defun %apply-interpolation (vw)
