@@ -1572,8 +1572,9 @@ g/G: [count]g=count ページ目 / gg=先頭 / G(Shift)=末尾 / g 単独=次の
 (defun %set-check (cb on)
   "CheckBox.IsChecked (bool?) を確実に true/false に。Lisp nil をそのまま渡すと .NET null
 = 中間(indeterminate)状態になるので、false はボックス化した System.Boolean(既定=false) を渡す。
-注: #305 は CLOSED だが 0.1.12-pkgtest1 では未だ nil→null (青地に白四角=中間) になるためシム継続。
-tasks 同梱の修正版が出たら 0.1.12 本体で再検証する。"
+注: #305(Nullable marshalling, D1207) を入れた 0.1.13-pkgtest1 でも set_IsChecked に nil を
+渡すと依然 null=中間 (青地に白四角) になる。bool? プロパティ setter のこの経路には効いていない模様
+なのでシム継続。dotcl 側で #305 の再確認 (setter/プロパティ経路) が要る。"
   (dotnet:invoke cb "set_IsChecked" (if on t (dotnet:new "System.Boolean"))))
 
 (defun %s-checkbox (checked)
