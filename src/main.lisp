@@ -81,9 +81,9 @@
     (unwind-protect
          (progn (dotnet:invoke es "CopyTo" ms)
                 (dotnet:invoke ms "set_Position" 0)
-                ;; dotnet:new は Bitmap(string)/(Stream) を区別できないので
-                ;; C# シム経由で Stream ctor を確実に呼ぶ。
-                (dotnet:static "Paalam.Imaging" "BitmapFromStream" ms))
+                ;; #294 修正済 (DotCL.Runtime 0.1.12): dotnet:new が Bitmap(Stream) を
+                ;; 正しく選べるので C# シム不要 (直呼び)。
+                (dotnet:new "Avalonia.Media.Imaging.Bitmap" ms))
       (dotnet:invoke es "Dispose")
       (dotnet:invoke ms "Dispose"))))
 
@@ -214,7 +214,8 @@
     (unwind-protect
          (progn (dotnet:invoke es "CopyTo" ms)
                 (dotnet:invoke ms "set_Position" 0)
-                (dotnet:static "Paalam.Imaging" "BitmapFromStream" ms))
+                ;; #294 修正済 (0.1.12): 直呼びで Bitmap(Stream) を選べる。
+                (dotnet:new "Avalonia.Media.Imaging.Bitmap" ms))
       (dotnet:invoke es "Dispose")
       (dotnet:invoke ms "Dispose"))))
 (defmethod book-close ((b sharp-book))

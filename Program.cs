@@ -11,15 +11,9 @@ using DotCL;
 
 namespace Paalam;
 
-// dotcl の dotnet:new はコンストラクタ多重定義解決が弱く (プリミティブ型しか
-// スコアしない)、Bitmap(string) と Bitmap(Stream) を区別できず Stream を string に
-// 変換しようとして失敗する。1 メソッドだけの曖昧さ回避シムで Stream ctor を確実に呼ぶ。
-// (dotcl-internal の overload 解決改善が入れば不要)
-public static class Imaging
-{
-    public static Avalonia.Media.Imaging.Bitmap BitmapFromStream(System.IO.Stream s)
-        => new Avalonia.Media.Imaging.Bitmap(s);
-}
+// （旧 Paalam.Imaging.BitmapFromStream シムは撤去。dotcl-internal #294 が
+//  DotCL.Runtime 0.1.12 で修正され、Lisp から (dotnet:new Bitmap stream) が
+//  Bitmap(Stream) を正しく選べるようになったため。）
 
 // PDF を PDFium (PDFtoImage) でページ毎にラスタライズして Avalonia Bitmap にする。
 // PDFium/SkiaSharp interop は C# 側に閉じ込める (Lisp からは PageCount/RenderPage だけ叩く)。
