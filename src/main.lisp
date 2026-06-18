@@ -814,13 +814,50 @@ MemoryStream(byte[]) ctor は overload バグ (#294) を踏むので無引数 + 
       (dolist (d (%enum->list (dotnet:static "System.IO.Directory" "GetLogicalDrives")))
         (dotnet:invoke items "Add" (%browse-tvi d d))))))
 
+(defun %path-ancestors (path)
+  "PATH の祖先フルパス列を ルート(ドライブ)→PATH の順で。"
+  (let ((acc (list path)) (cur path))
+    (loop
+      (let ((parent (ignore-errors (dotnet:static "System.IO.Path" "GetDirectoryName" cur))))
+        (if (and parent (plusp (length parent)) (not (string-equal parent cur)))
+            (progn (push parent acc) (setf cur parent))
+            (return))))
+    acc))
+
+(defun %browse-find-child (items path)
+  "ITEMS (TreeViewItem の Items) から Tag=PATH のノードを探す (大小無視)。"
+  (let ((n (dotnet:invoke items "get_Count")))
+    (dotimes (i n)
+      (let ((it (dotnet:invoke items "get_Item" i)))
+        (when (string-equal (or (dotnet:invoke it "get_Tag") "") path)
+          (return-from %browse-find-child it))))))
+
+(defun %browse-reveal (vw target)
+  "ドライブから TARGET まで辿って各ノードを展開し、最深まで届いたノードを選択+可視化。
+TARGET がツリーに出ない種別 (素の画像等) なら、辿れた最後のフォルダを選ぶ。"
+  (when (and target (plusp (length target)))
+    (let ((items (dotnet:invoke (viewer-browse-tree vw) "get_Items")) (node nil))
+      (dolist (a (%path-ancestors target))
+        (let ((child (%browse-find-child items a)))
+          (unless child (return))
+          (setf node child)
+          (when (dotnet:static "System.IO.Directory" "Exists" a)
+            (%browse-populate node a)
+            (dotnet:invoke node "set_IsExpanded" t))
+          (setf items (dotnet:invoke node "get_Items"))))
+      (when node
+        (dotnet:invoke node "set_IsSelected" t)
+        (ignore-errors (dotnet:invoke node "BringIntoView"))))))
+
 (defun %toggle-browse-pane (vw)
   (let* ((pane (viewer-browse-pane vw))
          (vis (dotnet:invoke pane "get_IsVisible")))
     (dotnet:invoke pane "set_IsVisible" (not vis))
     (unless vis
       (when (zerop (dotnet:invoke (dotnet:invoke (viewer-browse-tree vw) "get_Items") "get_Count"))
-        (%rebuild-browse-pane vw)))))
+        (%rebuild-browse-pane vw))
+      ;; 開いている本のディレクトリまで展開・選択する。
+      (ignore-errors (%browse-reveal vw (viewer-source vw))))))
 
 ;;; ------------------------------------------------------------------
 ;;; 先読みローダー (#17): 単一ワーカースレッドが書庫アクセスを一手に担い、
