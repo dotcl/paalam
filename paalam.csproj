@@ -17,6 +17,14 @@
     <DefaultItemExcludes>$(DefaultItemExcludes);experiments\**</DefaultItemExcludes>
     <!-- exe にアプリアイコンを埋め込み (関連付け DefaultIcon = exe,0 / タスクバー)。 -->
     <ApplicationIcon>app.ico</ApplicationIcon>
+
+    <!-- 配布/起動 (#22, dotcl #307 project-core build):
+         build 時に DotCL.Runtime の targets が paalam.asd の ASDF system を
+         in-process で fasl に精コンパイルし、依存 fasl + dotcl.core + manifest
+         (dotcl-deps.txt) を出力 (bin/.../dotcl-fasl/) に置く。実行時は Program.cs が
+         LoadFromManifest 一発でロード → 起動時 compile-file 無し・ソース非同梱。
+         手書きの precompile.lisp / <Exec dotcl> は不要になった。 -->
+    <DotclProjectAsd>$(MSBuildProjectDirectory)/src/paalam.asd</DotclProjectAsd>
   </PropertyGroup>
 
   <ItemGroup>
@@ -27,51 +35,8 @@
     <PackageReference Include="SharpCompress" Version="1.0.0" />
     <!-- PDF (PDFium 経由)。bblanchon.PDFium が win-arm64 ネイティブを含む。 -->
     <PackageReference Include="PDFtoImage" Version="5.2.1" />
-    <!-- 0.1.11: DotCL.Runtime.targets が dotcl.core と contrib を自動で出力にコピーする
-         (旧 #290/#293 の手動コピー/vendor は不要に)。 -->
-    <PackageReference Include="DotCL.Runtime" Version="0.1.11" />
+    <PackageReference Include="DotCL.Runtime" Version="0.1.12" />
   </ItemGroup>
-
-  <!-- 配布形態 (#22):
-       既定 (dev) … ソース (main.lisp 等) を同梱、起動時に load (デバッグ行番号が出る)。
-       -p:Precompiled=true (dist) … src/main.lisp を 1 個の paalam.fasl に精コンパイルして
-         それだけ同梱 (起動が速い・ソース非平文)。精コンパイルは build 時にインストール済み
-         dotcl で実行 (実行時ランタイムは NuGet)。 -->
-  <PropertyGroup>
-    <!-- 既定: -p:Precompiled 明示があればそれ。無ければ Release=fasl / Debug=source。
-         検証は -c Debug -p:Precompiled=true で「Debug かつ fasl」も可。 -->
-    <Precompiled Condition="'$(Precompiled)' == '' and '$(Configuration)' == 'Release'">true</Precompiled>
-    <Precompiled Condition="'$(Precompiled)' == ''">false</Precompiled>
-    <DotclExe Condition="'$(DotclExe)' == ''">dotcl</DotclExe>
-  </PropertyGroup>
-
-  <!-- dev: 出力に残った古い paalam.fasl を消す (dist→dev で fasl が残り source に戻らないのを防ぐ)。 -->
-  <Target Name="RemoveStaleFasl" BeforeTargets="Build" Condition="'$(Precompiled)' != 'true'">
-    <Delete Files="$(OutDir)paalam.fasl" />
-  </Target>
-
-  <!-- dev: ソース群 + asd を glob コピー (個別列挙せず asd :components と二重管理にしない)。 -->
-  <ItemGroup Condition="'$(Precompiled)' != 'true'">
-    <Content Include="src\*.lisp" Link="%(Filename)%(Extension)">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <Content Include="src\paalam.asd" Link="paalam.asd">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-  </ItemGroup>
-
-  <!-- dist: precompile.lisp で main.lisp -> paalam.fasl (incremental)、build 後に出力へコピー。
-       Content+CopyToOutputDirectory だと fasl 生成前にコピーが走るので、明示 Copy + DependsOn で
-       順序を保証する (PrecompiledLispDemo と同パターン)。 -->
-  <Target Name="PrecompilePaalam" Condition="'$(Precompiled)' == 'true'"
-          Inputs="src/main.lisp;precompile.lisp" Outputs="paalam.fasl">
-    <Exec WorkingDirectory="$(MSBuildProjectDirectory)" Command="$(DotclExe) precompile.lisp" />
-  </Target>
-  <Target Name="CopyPaalamFasl" AfterTargets="Build" DependsOnTargets="PrecompilePaalam"
-          Condition="'$(Precompiled)' == 'true'">
-    <Copy SourceFiles="$(MSBuildProjectDirectory)/paalam.fasl" DestinationFolder="$(OutDir)"
-          SkipUnchangedFiles="true" />
-  </Target>
 
   <ItemGroup>
     <!-- 実行時の Window.Icon 用に app.ico も出力へ。 -->

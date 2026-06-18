@@ -196,14 +196,11 @@ internal static class Program
             _ = typeof(PDFtoImage.Conversion).Assembly;
 
             DotclHost.Initialize();
-            DotclHost.LoadCore(DotclHost.FindCore()
-                ?? throw new InvalidOperationException("dotcl.core が見つかりません"));
-            // dist = 精コンパイル済み paalam.fasl (起動が速い・ソース非平文)、
-            // dev = main.lisp (デバッグ時の行番号が出る)。出力にある方を load (#22 Phase 2)。
-            var fasl = Path.Combine(AppContext.BaseDirectory, "paalam.fasl");
-            DotclHost.LoadLispFile(File.Exists(fasl)
-                ? fasl
-                : Path.Combine(AppContext.BaseDirectory, "main.lisp"));
+            // project-core build (dotcl #307): build 時に paalam.asd を精コンパイルした
+            // 成果物 (dotcl.core + 依存 fasl + paalam.fasl) を manifest 順にロードする。
+            // LoadFromManifest が dotcl.core のロードも兼ねる (LoadCore 不要)。
+            var manifest = Path.Combine(AppContext.BaseDirectory, "dotcl-fasl", "dotcl-deps.txt");
+            DotclHost.LoadFromManifest(manifest);
 
             // 第 1 引数 (フォルダ/アーカイブ/画像) を渡す。run-paalam は窓が閉じるまで blocking。
             var cmd = Environment.GetCommandLineArgs();
