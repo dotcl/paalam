@@ -1034,6 +1034,7 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
            (dnd-overlay nil)            ; DnD ドロップ可否ハイライト枠 (#20)
            (pending-count nil)          ; vi 風 count プレフィックス (数字キー蓄積; #23)
            (pending-g nil)              ; vi 風 多キー列 g 待ち (gg=先頭; #23)
+           cmd-bar cmd-input cmd-list (cmd-matches nil)  ; : コマンドバー (#23)
            menu)                        ; メニューバー (#21; 全画面時に隠す)
 
 (defun %reopen (vw)
@@ -1459,7 +1460,11 @@ KeyModifiers は大小キーで同じ Key.G になるため修飾で見分ける
   "Window KeyDown。vi 風入力 (#23): 数字=count 蓄積、g/G=先頭/末尾/移動の小状態機械、
 他は *keymap* を引いてコマンド実行 (count はコマンドが viewer-pending-count で読む)。
 0 単独は count を始めない (既存の 0=フィットを活かす; count 継続中の 0 のみ桁送り)。
-g/G: [count]g=count ページ目 / gg=先頭 / G(Shift)=末尾 / g 単独=次の g 待ち。"
+g/G: [count]g=count ページ目 / gg=先頭 / G(Shift)=末尾 / g 単独=次の g 待ち。
+コマンドバー表示中はここでは何もしない (入力は TextBox 側で捌く; コマンド誤発火防止)。"
+  (when (and (viewer-cmd-bar vw)
+             (dotnet:invoke (viewer-cmd-bar vw) "get_IsVisible"))
+    (return-from %on-key))
   (let* ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString"))
          (d  (%digit-key kn)))
     (cond
@@ -1746,63 +1751,98 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
               (when rank (push (cons rank c) scored))))
           (mapcar #'cdr (stable-sort (nreverse scored) #'< :key #'car))))))
 
+(defun %palette-row (c)
+  "候補1行: 「ラベル  名前  [キー]」(タイプすべき名前が分かるように)。"
+  (let ((k (%key-label (%command-primary-key (command-id c)))))
+    (format nil "~a   ~a~@[   [~a]~]" (command-label c) (%palette-name c) k)))
+
+(defun %cmd-populate (vw)
+  "入力に応じて候補リストを更新 (先頭を選択)。"
+  (let* ((tb (viewer-cmd-input vw))
+         (lb (viewer-cmd-list vw))
+         (ms (%palette-matches (or (dotnet:invoke tb "get_Text") ""))))
+    (setf (viewer-cmd-matches vw) ms)
+    (let ((items (dotnet:invoke lb "get_Items")))
+      (dotnet:invoke items "Clear")
+      (dolist (c ms) (dotnet:invoke items "Add" (%palette-row c))))
+    (dotnet:invoke lb "set_IsVisible" (and ms t))
+    (when ms (dotnet:invoke lb "set_SelectedIndex" 0))))
+
+(defun %cmd-move (vw d)
+  (let ((lb (viewer-cmd-list vw))
+        (n  (length (viewer-cmd-matches vw))))
+    (when (plusp n)
+      (dotnet:invoke lb "set_SelectedIndex"
+                     (mod (+ (max 0 (dotnet:invoke lb "get_SelectedIndex")) d) n)))))
+
+(defun %cmd-hide (vw)
+  "コマンドバーを閉じてビューポートにフォーカスを戻す。"
+  (dotnet:invoke (viewer-cmd-bar vw) "set_IsVisible" nil)
+  (%focus-viewport vw))
+
+(defun %cmd-run (vw)
+  (let* ((lb (viewer-cmd-list vw))
+         (i  (dotnet:invoke lb "get_SelectedIndex"))
+         (c  (and (>= i 0) (nth i (viewer-cmd-matches vw)))))
+    (%cmd-hide vw)
+    (when c (%run-command vw (command-id c)))))
+
 (defun %command-palette (vw)
-  "vi 風 : コマンドパレット (#23)。入力で絞り込み、↑↓/クリックで選択、Enter 実行、Esc 閉じる。"
-  (let* ((owner (viewer-window vw))
-         (w     (dotnet:new "Avalonia.Controls.Window"))
-         (tb    (dotnet:new "Avalonia.Controls.TextBox"))
-         (lb    (dotnet:new "Avalonia.Controls.ListBox"))
-         (panel (dotnet:new "Avalonia.Controls.StackPanel"))
-         (mbox  (list nil)))   ; 現在の候補リスト (holder; let 変数直接 setf は dotcl 不正 IL 回避)
-    (labels
-        ((row-text (c)
-           (let ((k (%key-label (%command-primary-key (command-id c)))))
-             (format nil "~a   ~a~@[   [~a]~]" (command-label c) (%palette-name c) k)))
-         (populate ()
-           (let ((ms (%palette-matches (or (dotnet:invoke tb "get_Text") ""))))
-             (setf (car mbox) ms)
-             (let ((items (dotnet:invoke lb "get_Items")))
-               (dotnet:invoke items "Clear")
-               (dolist (c ms) (dotnet:invoke items "Add" (row-text c))))
-             (when ms (dotnet:invoke lb "set_SelectedIndex" 0))))
-         (move (d)
-           (let ((n (length (car mbox)))
-                 (i (dotnet:invoke lb "get_SelectedIndex")))
-             (when (plusp n)
-               (dotnet:invoke lb "set_SelectedIndex" (mod (+ (max 0 i) d) n)))))
-         (run-selected ()
-           (let* ((i (dotnet:invoke lb "get_SelectedIndex"))
-                  (c (and (>= i 0) (nth i (car mbox)))))
-             (when c
-               (let ((id (command-id c)))
-                 (dotnet:invoke w "Close")
-                 (%run-command vw id))))))
-      (dotnet:invoke tb "set_Watermark" "コマンド名で絞り込み (Enter 実行 / Esc 閉じる)")
-      (dotnet:invoke tb "set_Margin" (dotnet:new "Avalonia.Thickness" 8d0))
-      (dotnet:invoke lb "set_MaxHeight" 320d0)
-      (dotnet:invoke lb "set_Margin" (dotnet:new "Avalonia.Thickness" 8d0 0d0 8d0 8d0))
-      (dotnet:add-event tb "TextChanged" (lambda (s e) (declare (ignore s e)) (populate)))
-      (dotnet:add-event lb "DoubleTapped" (lambda (s e) (declare (ignore s e)) (run-selected)))
-      (dotnet:add-event w "KeyDown"
-        (lambda (s e) (declare (ignore s))
-          (let ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString")))
-            (cond ((string= kn "Enter")  (dotnet:invoke e "set_Handled" t) (run-selected))
-                  ((string= kn "Escape") (dotnet:invoke e "set_Handled" t) (dotnet:invoke w "Close"))
-                  ((string= kn "Down")   (dotnet:invoke e "set_Handled" t) (move 1))
-                  ((string= kn "Up")     (dotnet:invoke e "set_Handled" t) (move -1))))))
-      (dotnet:add-event w "Opened" (lambda (s e) (declare (ignore s e)) (dotnet:invoke tb "Focus")))
-      (let ((ch (dotnet:invoke panel "get_Children")))
-        (dotnet:invoke ch "Add" tb)
-        (dotnet:invoke ch "Add" lb))
-      (populate)
-      (dotnet:invoke w "set_Title" "コマンドパレット")
-      (dotnet:invoke w "set_Width" 460d0)
-      (dotnet:invoke w "set_SizeToContent"
-                     (dotnet:static "Avalonia.Controls.SizeToContent" "Height"))
-      (dotnet:invoke w "set_WindowStartupLocation"
-                     (dotnet:static "Avalonia.Controls.WindowStartupLocation" "CenterOwner"))
-      (dotnet:invoke w "set_Content" panel)
-      (dotnet:invoke w "ShowDialog" owner))))
+  "vi 風 : コマンドバーを開く (#23)。入力で絞り込み、↑↓/クリック選択、Enter 実行、Esc 閉じる。
+別窓ではなく本体下部のオーバーレイ。バー表示中は %on-key が無効化され入力がコマンド誤発火しない。"
+  (let ((tb (viewer-cmd-input vw)))
+    (dotnet:invoke (viewer-cmd-bar vw) "set_IsVisible" t)
+    (dotnet:invoke tb "set_Text" "")
+    (%cmd-populate vw)
+    (dotnet:invoke tb "Focus")))
+
+(defun %make-cmdbar (vw)
+  "本体下部に貼る vi 風コマンドバー (既定非表示)。controls を viewer に保持して返す。"
+  (let* ((bar (dotnet:new "Avalonia.Controls.Border"))
+         (col (dotnet:new "Avalonia.Controls.StackPanel"))
+         (lb  (dotnet:new "Avalonia.Controls.ListBox"))
+         (row (dotnet:new "Avalonia.Controls.StackPanel"))
+         (lbl (dotnet:new "Avalonia.Controls.TextBlock"))
+         (tb  (dotnet:new "Avalonia.Controls.TextBox")))
+    (dotnet:invoke bar "set_IsVisible" nil)
+    (dotnet:invoke bar "set_VerticalAlignment"
+                   (dotnet:static "Avalonia.Layout.VerticalAlignment" "Bottom"))
+    (dotnet:invoke bar "set_Background" (dotnet:static "Avalonia.Media.Brushes" "Black"))
+    (dotnet:invoke bar "set_Opacity" 0.92d0)
+    (dotnet:invoke lb "set_MaxHeight" 220d0)
+    (dotnet:invoke lb "set_Background" (dotnet:static "Avalonia.Media.Brushes" "Transparent"))
+    (dotnet:invoke row "set_Orientation" (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
+    (dotnet:invoke lbl "set_Text" ":")
+    (dotnet:invoke lbl "set_Foreground" (dotnet:static "Avalonia.Media.Brushes" "White"))
+    (dotnet:invoke lbl "set_VerticalAlignment"
+                   (dotnet:static "Avalonia.Layout.VerticalAlignment" "Center"))
+    (dotnet:invoke lbl "set_Margin" (dotnet:new "Avalonia.Thickness" 8d0 0d0 4d0 0d0))
+    (dotnet:invoke tb "set_BorderThickness" (dotnet:new "Avalonia.Thickness" 0d0))
+    (dotnet:invoke tb "set_Background" (dotnet:static "Avalonia.Media.Brushes" "Transparent"))
+    (dotnet:invoke tb "set_Foreground" (dotnet:static "Avalonia.Media.Brushes" "White"))
+    (dotnet:invoke tb "set_MinWidth" 320d0)
+    (dotnet:invoke tb "set_Watermark" "コマンド名 (Enter 実行 / Esc 閉じる)")
+    (dotnet:add-event tb "TextChanged" (lambda (s e) (declare (ignore s e)) (%cmd-populate vw)))
+    ;; キーは TextBox 自身で捌く (Window に付けると Enter がバブルしないため)。
+    (dotnet:add-event tb "KeyDown"
+      (lambda (s e) (declare (ignore s))
+        (let ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString")))
+          (cond ((string= kn "Enter")  (dotnet:invoke e "set_Handled" t) (%cmd-run vw))
+                ((string= kn "Escape") (dotnet:invoke e "set_Handled" t) (%cmd-hide vw))
+                ((string= kn "Down")   (dotnet:invoke e "set_Handled" t) (%cmd-move vw 1))
+                ((string= kn "Up")     (dotnet:invoke e "set_Handled" t) (%cmd-move vw -1))))))
+    (dotnet:add-event lb "DoubleTapped" (lambda (s e) (declare (ignore s e)) (%cmd-run vw)))
+    (let ((rc (dotnet:invoke row "get_Children")))
+      (dotnet:invoke rc "Add" lbl)
+      (dotnet:invoke rc "Add" tb))
+    (let ((cc (dotnet:invoke col "get_Children")))
+      (dotnet:invoke cc "Add" lb)
+      (dotnet:invoke cc "Add" row))
+    (dotnet:invoke bar "set_Child" col)
+    (setf (viewer-cmd-bar vw) bar
+          (viewer-cmd-input vw) tb
+          (viewer-cmd-list vw) lb)
+    bar))
 
 (defun %open-settings (vw)
   ;; 左に折りたたみツリー (カテゴリ)、右に該当ページ。選択で右を差し替える master/detail。
@@ -2227,7 +2267,12 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
           (dotnet:invoke rc "Add" tpane)
           (dotnet:invoke rc "Add" vport)
           (dotnet:invoke rc "Add" pane)
-          (dotnet:invoke rc "Add" overlay))   ; 最後に追加 = 最前面
+          (dotnet:invoke rc "Add" overlay)   ; 最後に追加 = 最前面
+          ;; : コマンドバー (全列スパン・下部・最前面; #23)
+          (let ((cb (%make-cmdbar vw)))
+            (dotnet:static "Avalonia.Controls.Grid" "SetColumn" cb 0)
+            (dotnet:static "Avalonia.Controls.Grid" "SetColumnSpan" cb 4)
+            (dotnet:invoke rc "Add" cb)))
         (setf (viewer-clip-pane vw) pane (viewer-clip-stack vw) stack
               (viewer-dnd-overlay vw) overlay)
         ;; ペインへの DnD で素材追加 (#18 Phase 2b)。DnD 中はペイン背景を強調 (#20)。
