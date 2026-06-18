@@ -34,7 +34,12 @@
 
   <!-- Lisp 本体を出力直下へ (contrib は require が NuGet 同梱から解決)。 -->
   <ItemGroup>
-    <Content Include="src\main.lisp" Link="main.lisp">
+    <!-- #22 Phase 1: paalam.asd + ソース群を出力直下へ glob コピー (個別列挙しない =
+         asd の :components と二重管理にならない)。Phase 2 で dist は fasl 1個に差し替え。 -->
+    <Content Include="src\*.lisp" Link="%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="src\paalam.asd" Link="paalam.asd">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <!-- 実行時の Window.Icon 用に app.ico も出力へ。 -->
