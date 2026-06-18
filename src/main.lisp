@@ -1737,7 +1737,7 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
 (defun %palette-matches (query)
   "QUERY にマッチするコマンドをランク順 (完全一致→前方一致→部分一致→ラベル一致) で返す。
 空なら *commands* 全部。同ランク内は *commands* の元順を保つ。"
-  (let ((q (string-downcase (string-trim " " query))))
+  (let ((q (string-downcase (string-trim ": " query))))   ; 先頭の : / 空白は無視
     (if (string= q "")
         (copy-list *commands*)
         (let ((scored '()))
@@ -1758,15 +1758,22 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
 
 (defun %cmd-populate (vw)
   "入力に応じて候補リストを更新 (先頭を選択)。"
-  (let* ((tb (viewer-cmd-input vw))
-         (lb (viewer-cmd-list vw))
-         (ms (%palette-matches (or (dotnet:invoke tb "get_Text") ""))))
-    (setf (viewer-cmd-matches vw) ms)
-    (let ((items (dotnet:invoke lb "get_Items")))
-      (dotnet:invoke items "Clear")
-      (dolist (c ms) (dotnet:invoke items "Add" (%palette-row c))))
-    (dotnet:invoke lb "set_IsVisible" (and ms t))
-    (when ms (dotnet:invoke lb "set_SelectedIndex" 0))))
+  (let* ((tb  (viewer-cmd-input vw))
+         (lb  (viewer-cmd-list vw))
+         (raw (or (dotnet:invoke tb "get_Text") "")))
+    ;; : で開いた直後にその : がフィールドへ入り込む場合がある。先頭の : を除去して
+    ;; 表示と検索を整える (vi の :q 習慣にも合う)。除去後は : 無しなので再 TextChanged で再帰しない。
+    (when (and (plusp (length raw)) (char= (char raw 0) #\:))
+      (setf raw (string-left-trim ":" raw))
+      (dotnet:invoke tb "set_Text" raw)
+      (ignore-errors (dotnet:invoke tb "set_CaretIndex" (length raw))))
+    (let ((ms (%palette-matches raw)))
+      (setf (viewer-cmd-matches vw) ms)
+      (let ((items (dotnet:invoke lb "get_Items")))
+        (dotnet:invoke items "Clear")
+        (dolist (c ms) (dotnet:invoke items "Add" (%palette-row c))))
+      (dotnet:invoke lb "set_IsVisible" (and ms t))
+      (when ms (dotnet:invoke lb "set_SelectedIndex" 0)))))
 
 (defun %cmd-move (vw d)
   (let ((lb (viewer-cmd-list vw))
