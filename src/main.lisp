@@ -1040,7 +1040,9 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
            (dnd-overlay nil)            ; DnD ドロップ可否ハイライト枠 (#20)
            (pending-count nil)          ; vi 風 count プレフィックス (数字キー蓄積; #23)
            (pending-g nil)              ; vi 風 多キー列 g 待ち (gg=先頭; #23)
-           cmd-bar cmd-input cmd-list (cmd-matches nil)  ; : コマンドバー (#23)
+           cmd-bar cmd-input cmd-list cmd-prompt         ; : コマンドバー / 検索バー (#23)
+           (cmd-matches nil) (cmd-mode :command)         ; cmd-mode = :command / :search
+           (search-matches nil) (search-index 0)         ; / 全文検索: ヒットページ index リスト (#23)
            menu)                        ; メニューバー (#21; 全画面時に隠す)
 
 (defun %reopen (vw)
@@ -1050,6 +1052,7 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
     (multiple-value-bind (book start) (open-book (viewer-source vw))
       (declare (ignore start))
       (ignore-errors (loader-quiesce old-loader))   ; スレッドだけ止める (Bitmap は描画後に破棄)
+      (setf (viewer-search-matches vw) nil (viewer-search-index vw) 0)  ; 本が変わったら検索結果は無効
       (setf (viewer-book vw) book
             (viewer-loader vw) (open-loader
                                 (viewer-source vw)
@@ -1229,8 +1232,13 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
 (defun %update-title (vw)
   (let ((spreads (viewer-spreads vw)))
     (when (plusp (length spreads))
-      (dotnet:invoke (viewer-window vw) "set_Title"
-                     (%spread-title vw (aref spreads (viewer-sindex vw)))))))
+      (let ((base (%spread-title vw (aref spreads (viewer-sindex vw))))
+            (ms (viewer-search-matches vw)))
+        (dotnet:invoke (viewer-window vw) "set_Title"
+                       (if ms
+                           (format nil "~a  ｜ 検索 ~d/~d 件 (n/N)"
+                                   base (1+ (viewer-search-index vw)) (length ms))
+                           base))))))
 
 (defun %goto-bookmark (vw dir)
   "現在の本のブックマークのうち、現在ページから dir 方向の最寄りページへ。"
@@ -1401,6 +1409,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
    (make-command :fit-mode      "フィット切替"     '("W")     '%cycle-fit-mode)
    (make-command :goto          "ページ移動 (gg=先頭 / G=末尾 / [count]g)" '("G") '%goto-page)
    (make-command :palette       "コマンドパレット" '("OemSemicolon") '%command-palette)
+   (make-command :search        "検索 (/)"          '("OemQuestion" "Divide") '%command-search)
    (make-command :clip-pane     "素材ペイン"       '("P")     '%toggle-clip-pane)
    (make-command :thumb-pane    "本棚 (サムネ)"    '("T")     '%toggle-thumb-pane)
    (make-command :browse-pane   "フォルダ"         '("L")     '%toggle-browse-pane)
@@ -1487,6 +1496,10 @@ g/G: [count]g=count ページ目 / gg=先頭 / G(Shift)=末尾 / g 単独=次の
          (unless (and (not cnt) (not shift) (not was-g))
            (setf (viewer-pending-g vw) nil))
          (setf (viewer-pending-count vw) nil)))
+      ;; n / N — 検索ヒット間の巡回 (検索中のみ; n=次, N=Shift=前)。非検索時は通常キーマップへ落ちる。
+      ((and (string= kn "N") (viewer-search-matches vw))
+       (%search-step vw (if (%shift? e) -1 1))
+       (setf (viewer-pending-count vw) nil (viewer-pending-g vw) nil))
       ;; 数字: count 蓄積
       ((and d (or (> d 0) (viewer-pending-count vw)))
        (setf (viewer-pending-g vw) nil
@@ -1570,12 +1583,10 @@ g/G: [count]g=count ページ目 / gg=先頭 / G(Shift)=末尾 / g 単独=次の
     row))
 
 (defun %set-check (cb on)
-  "CheckBox.IsChecked (bool?) を確実に true/false に。Lisp nil をそのまま渡すと .NET null
-= 中間(indeterminate)状態になるので、false はボックス化した System.Boolean(既定=false) を渡す。
-注: #305(Nullable marshalling, D1207) を入れた 0.1.13-pkgtest1 でも set_IsChecked に nil を
-渡すと依然 null=中間 (青地に白四角) になる。bool? プロパティ setter のこの経路には効いていない模様
-なのでシム継続。dotcl 側で #305 の再確認 (setter/プロパティ経路) が要る。"
-  (dotnet:invoke cb "set_IsChecked" (if on t (dotnet:new "System.Boolean"))))
+  "CheckBox.IsChecked (bool?) を true/false に。#305 (setter, D1225 / 0.1.13-pkgtest3) で
+bool? プロパティ setter も nil→false になったので boxed-false シムを撤去 (true=t / false=nil)。
+indeterminate が要るなら (dotnet:null)。"
+  (dotnet:invoke cb "set_IsChecked" (if on t nil)))
 
 (defun %s-checkbox (checked)
   (let ((cb (dotnet:new "Avalonia.Controls.CheckBox")))
@@ -1762,6 +1773,44 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
               (when rank (push (cons rank c) scored))))
           (mapcar #'cdr (stable-sort (nreverse scored) #'< :key #'car))))))
 
+;;; / 全文検索 (#23)。pdf は本文 (PdfText/FPDFText)、他はページ名で。n/N でヒット間を巡回。
+(defun %int-array->list (arr)
+  (when arr
+    (loop for i from 0 below (dotnet:invoke arr "get_Length")
+          collect (dotnet:invoke arr "GetValue" i))))
+
+(defgeneric book-search (book query)
+  (:documentation "QUERY を含むページの 0-based index リスト (出現順)。"))
+(defmethod book-search ((b pdf-book) query)
+  (%int-array->list (dotnet:invoke (pdfb-doc b) "SearchPages" query)))
+(defmethod book-search ((b t) query)
+  ;; pdf 以外はページ名 (ファイル名) の部分一致 (大小無視)。
+  (let ((q (string-downcase query)) (acc '()))
+    (dotimes (i (book-page-count b))
+      (when (search q (string-downcase (or (book-page-name b i) "")))
+        (push i acc)))
+    (nreverse acc)))
+
+(defun %run-search (vw query)
+  "QUERY で現在の本を検索。ヒットがあれば先頭へジャンプ (件数はタイトルに出る)。"
+  (let* ((book (viewer-book vw))
+         ;; バーを開いた / (や : ) が先頭に入り込むので除去 (vi の /word 習慣にも合う)。
+         (q (string-trim '(#\Space #\/ #\:) (or query "")))
+         (ms (and book (plusp (length q)) (ignore-errors (book-search book q)))))
+    (setf (viewer-search-matches vw) ms (viewer-search-index vw) 0)
+    (if ms
+        (%jump-to-page vw (first ms))          ; show-spread→%update-title が件数込みで表示
+        (progn (%update-title vw)
+               (dotnet:invoke (viewer-window vw) "set_Title"
+                              (format nil "検索: 「~a」 見つかりません" q))))))
+
+(defun %search-step (vw dir)
+  "検索ヒット間を dir (+1/-1) 方向に循環してジャンプ (n/N)。"
+  (let ((ms (viewer-search-matches vw)))
+    (when ms
+      (setf (viewer-search-index vw) (mod (+ (viewer-search-index vw) dir) (length ms)))
+      (%jump-to-page vw (nth (viewer-search-index vw) ms)))))
+
 (defun %palette-row (c)
   "候補1行: 「ラベル  名前  [キー]」(タイプすべき名前が分かるように)。"
   (let ((k (%key-label (%command-primary-key (command-id c)))))
@@ -1786,6 +1835,15 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
       (dotnet:invoke lb "set_IsVisible" (and ms t))
       (when ms (dotnet:invoke lb "set_SelectedIndex" 0)))))
 
+(defun %cmd-strip-leading (vw ch)
+  "入力欄の先頭に紛れ込んだプロンプト文字 CH (: や /) を除去して表示を整える。"
+  (let* ((tb (viewer-cmd-input vw))
+         (raw (or (dotnet:invoke tb "get_Text") "")))
+    (when (and (plusp (length raw)) (char= (char raw 0) ch))
+      (let ((s (string-left-trim (string ch) raw)))
+        (dotnet:invoke tb "set_Text" s)
+        (ignore-errors (dotnet:invoke tb "set_CaretIndex" (length s)))))))
+
 (defun %cmd-move (vw d)
   (let ((lb (viewer-cmd-list vw))
         (n  (length (viewer-cmd-matches vw))))
@@ -1808,10 +1866,23 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
 (defun %command-palette (vw)
   "vi 風 : コマンドバーを開く (#23)。入力で絞り込み、↑↓/クリック選択、Enter 実行、Esc 閉じる。
 別窓ではなく本体下部のオーバーレイ。バー表示中は %on-key が無効化され入力がコマンド誤発火しない。"
+  (setf (viewer-cmd-mode vw) :command)
   (let ((tb (viewer-cmd-input vw)))
+    (when (viewer-cmd-prompt vw) (dotnet:invoke (viewer-cmd-prompt vw) "set_Text" ":"))
+    (dotnet:invoke (viewer-cmd-list vw) "set_IsVisible" t)
     (dotnet:invoke (viewer-cmd-bar vw) "set_IsVisible" t)
     (dotnet:invoke tb "set_Text" "")
     (%cmd-populate vw)
+    (dotnet:invoke tb "Focus")))
+
+(defun %command-search (vw)
+  "vi 風 / 検索バーを開く (#23)。Enter で本文/ページ名検索→先頭ヒットへ。以後 n/N で巡回。"
+  (setf (viewer-cmd-mode vw) :search)
+  (let ((tb (viewer-cmd-input vw)))
+    (when (viewer-cmd-prompt vw) (dotnet:invoke (viewer-cmd-prompt vw) "set_Text" "/"))
+    (dotnet:invoke (viewer-cmd-list vw) "set_IsVisible" nil)  ; 検索はリスト不要 (n/N で巡回)
+    (dotnet:invoke (viewer-cmd-bar vw) "set_IsVisible" t)
+    (dotnet:invoke tb "set_Text" "")
     (dotnet:invoke tb "Focus")))
 
 (defun %make-cmdbar (vw)
@@ -1848,14 +1919,23 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
     (dotnet:invoke tb "set_Foreground" (dotnet:static "Avalonia.Media.Brushes" "White"))
     (dotnet:invoke tb "set_MinWidth" 320d0)
     (dotnet:invoke tb "set_Watermark" "コマンド名 (Enter 実行 / Esc 閉じる)")
-    (dotnet:add-event tb "TextChanged" (lambda (s e) (declare (ignore s e)) (%cmd-populate vw)))
+    ;; 候補絞り込みは :command モードのみ (検索は Enter で実行、ライブ検索しない)。
+    (dotnet:add-event tb "TextChanged"
+      (lambda (s e) (declare (ignore s e))
+        (if (eq (viewer-cmd-mode vw) :command)
+            (%cmd-populate vw)                 ; 候補絞り込み (先頭 : も除去)
+            (%cmd-strip-leading vw #\/))))      ; 検索: 先頭 / を除去 (表示を整える)
     ;; キーは TextBox 自身で捌く (Window に付けると Enter がバブルしないため)。
     (dotnet:add-event tb "KeyDown"
       (lambda (s e) (declare (ignore s))
         (let ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString")))
           ;; Avalonia は Enter/Return が同値で ToString は "Return"。両方受ける。
           (cond ((or (string= kn "Return") (string= kn "Enter"))
-                 (dotnet:invoke e "set_Handled" t) (%cmd-run vw))
+                 (dotnet:invoke e "set_Handled" t)
+                 (if (eq (viewer-cmd-mode vw) :search)
+                     (let ((q (or (dotnet:invoke tb "get_Text") "")))
+                       (%cmd-hide vw) (%run-search vw q))  ; 先に閉じて n/N を有効化
+                     (%cmd-run vw)))
                 ((string= kn "Escape") (dotnet:invoke e "set_Handled" t) (%cmd-hide vw))
                 ((string= kn "Down")   (dotnet:invoke e "set_Handled" t) (%cmd-move vw 1))
                 ((string= kn "Up")     (dotnet:invoke e "set_Handled" t) (%cmd-move vw -1))))))
@@ -1869,7 +1949,8 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
     (dotnet:invoke bar "set_Child" col)
     (setf (viewer-cmd-bar vw) bar
           (viewer-cmd-input vw) tb
-          (viewer-cmd-list vw) lb)
+          (viewer-cmd-list vw) lb
+          (viewer-cmd-prompt vw) lbl)
     bar))
 
 (defun %open-settings (vw)

@@ -5,6 +5,8 @@
 
 using System;
 using System.IO;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using Avalonia.Input;
 using Avalonia.Platform.Storage;
 using DotCL;
@@ -34,6 +36,9 @@ public sealed class PdfDoc
         return new Avalonia.Media.Imaging.Bitmap(ms);
     }
 
+    // 全文検索 (#23 /): query を含むページの 0-based index 配列。PdfText に委譲 (自前の bytes を使う)。
+    public int[] SearchPages(string query) => PdfText.SearchPages(_bytes, query);
+
     // 素材掃き出し用: ページを PNG バイト列で返す。
     public byte[] RenderPagePng(int index, int dpi)
     {
@@ -42,6 +47,82 @@ public sealed class PdfDoc
         using var sk = PDFtoImage.Conversion.ToImage(_bytes, index, null, opts);
         using var data = sk.Encode(SkiaSharp.SKEncodedImageFormat.Png, 90);
         return data.ToArray();
+    }
+}
+
+// PDF 全文検索 (#23 / の PDF 対応)。PDFtoImage は描画専用なので、同梱の pdfium ネイティブを
+// 直接 P/Invoke してテキスト検索する (FPDFText_Find*)。新規ネイティブ依存なし・全プラット対応。
+// raw P/Invoke は Lisp の dotnet: FFI では宣言できないので C# に置く (正当なネイティブ interop)。
+public static class PdfText
+{
+    private static bool _init;
+    private static readonly object _lock = new();
+    private const CallingConvention CC = CallingConvention.Cdecl;
+
+    [DllImport("pdfium", CallingConvention = CC)] private static extern void FPDF_InitLibrary();
+    [DllImport("pdfium", CallingConvention = CC)] private static extern IntPtr FPDF_LoadMemDocument(IntPtr data, int size, IntPtr password);
+    [DllImport("pdfium", CallingConvention = CC)] private static extern void FPDF_CloseDocument(IntPtr doc);
+    [DllImport("pdfium", CallingConvention = CC)] private static extern int FPDF_GetPageCount(IntPtr doc);
+    [DllImport("pdfium", CallingConvention = CC)] private static extern IntPtr FPDF_LoadPage(IntPtr doc, int index);
+    [DllImport("pdfium", CallingConvention = CC)] private static extern void FPDF_ClosePage(IntPtr page);
+    [DllImport("pdfium", CallingConvention = CC)] private static extern IntPtr FPDFText_LoadPage(IntPtr page);
+    [DllImport("pdfium", CallingConvention = CC)] private static extern void FPDFText_ClosePage(IntPtr textPage);
+    [DllImport("pdfium", CallingConvention = CC)] private static extern IntPtr FPDFText_FindStart(IntPtr textPage, ushort[] findWhat, uint flags, int startIndex);
+    [DllImport("pdfium", CallingConvention = CC)][return: MarshalAs(UnmanagedType.Bool)] private static extern bool FPDFText_FindNext(IntPtr handle);
+    [DllImport("pdfium", CallingConvention = CC)] private static extern void FPDFText_FindClose(IntPtr handle);
+
+    // query を含むページの 0-based index 配列を返す (大文字小文字無視・出現順)。
+    // FPDF_LoadMemDocument はバッファを参照し続けるので、doc を閉じるまで byte[] を pin し続ける。
+    public static int[] SearchPages(byte[] bytes, string query)
+    {
+        if (bytes == null || bytes.Length == 0 || string.IsNullOrEmpty(query))
+            return Array.Empty<int>();
+        lock (_lock)
+        {
+            if (!_init) { FPDF_InitLibrary(); _init = true; }   // PDFtoImage と共有 OK (init は冪等運用)
+            var pin = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+            IntPtr doc = IntPtr.Zero;
+            try
+            {
+                doc = FPDF_LoadMemDocument(pin.AddrOfPinnedObject(), bytes.Length, IntPtr.Zero);
+                if (doc == IntPtr.Zero) return Array.Empty<int>();
+                var findWhat = ToUtf16(query);
+                var hits = new List<int>();
+                int n = FPDF_GetPageCount(doc);
+                for (int i = 0; i < n; i++)
+                {
+                    IntPtr page = FPDF_LoadPage(doc, i);
+                    if (page == IntPtr.Zero) continue;
+                    IntPtr tp = FPDFText_LoadPage(page);
+                    if (tp != IntPtr.Zero)
+                    {
+                        IntPtr sh = FPDFText_FindStart(tp, findWhat, 0, 0);   // flags 0 = 大小無視
+                        if (sh != IntPtr.Zero)
+                        {
+                            if (FPDFText_FindNext(sh)) hits.Add(i);
+                            FPDFText_FindClose(sh);
+                        }
+                        FPDFText_ClosePage(tp);
+                    }
+                    FPDF_ClosePage(page);
+                }
+                return hits.ToArray();
+            }
+            finally
+            {
+                if (doc != IntPtr.Zero) FPDF_CloseDocument(doc);
+                pin.Free();
+            }
+        }
+    }
+
+    // FPDF_WIDESTRING = UTF-16LE null 終端。
+    private static ushort[] ToUtf16(string s)
+    {
+        var a = new ushort[s.Length + 1];
+        for (int i = 0; i < s.Length; i++) a[i] = s[i];
+        a[s.Length] = 0;
+        return a;
     }
 }
 
