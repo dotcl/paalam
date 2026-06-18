@@ -40,6 +40,8 @@ public sealed class PdfDoc
     public int[] SearchPages(string query) => PdfText.SearchPages(_bytes, query);
     // ヒット箇所のハイライト矩形 (ページ正規化座標 [x,y,w,h,...]; 呼び側で表示寸法を掛ける)。
     public double[] MatchRects(int pageIndex, string query) => PdfText.MatchRects(_bytes, pageIndex, query);
+    // 目次 ("depth<TAB>page<TAB>title" 行の文字列)。
+    public string Outline() => PdfText.Outline(_bytes);
 
     // 素材掃き出し用: ページを PNG バイト列で返す。
     public byte[] RenderPagePng(int index, int dpi)
@@ -78,6 +80,51 @@ public static class PdfText
     [DllImport("pdfium", CallingConvention = CC)] private static extern void FPDFText_GetRect(IntPtr textPage, int rectIndex, out double left, out double top, out double right, out double bottom);
     [DllImport("pdfium", CallingConvention = CC)] private static extern float FPDF_GetPageHeightF(IntPtr page);
     [DllImport("pdfium", CallingConvention = CC)] private static extern float FPDF_GetPageWidthF(IntPtr page);
+    [DllImport("pdfium", CallingConvention = CC)] private static extern IntPtr FPDFBookmark_GetFirstChild(IntPtr doc, IntPtr bookmark);
+    [DllImport("pdfium", CallingConvention = CC)] private static extern IntPtr FPDFBookmark_GetNextSibling(IntPtr doc, IntPtr bookmark);
+    [DllImport("pdfium", CallingConvention = CC)] private static extern uint FPDFBookmark_GetTitle(IntPtr bookmark, byte[] buffer, uint buflen);
+    [DllImport("pdfium", CallingConvention = CC)] private static extern IntPtr FPDFBookmark_GetDest(IntPtr doc, IntPtr bookmark);
+    [DllImport("pdfium", CallingConvention = CC)] private static extern int FPDFDest_GetDestPageIndex(IntPtr doc, IntPtr dest);
+
+    // 目次 (PDF bookmark) を "depth<TAB>page<TAB>title" 行の文字列で返す (深さ優先)。無ければ ""。
+    // dotcl から扱いやすいよう区切り文字列にする (Lisp 側で行分割)。
+    public static string Outline(byte[] bytes)
+    {
+        if (bytes == null || bytes.Length == 0) return "";
+        lock (_lock)
+        {
+            if (!_init) { FPDF_InitLibrary(); _init = true; }
+            var pin = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+            IntPtr doc = IntPtr.Zero;
+            try
+            {
+                doc = FPDF_LoadMemDocument(pin.AddrOfPinnedObject(), bytes.Length, IntPtr.Zero);
+                if (doc == IntPtr.Zero) return "";
+                var sb = new System.Text.StringBuilder();
+                var buf = new byte[2048];
+                void Walk(IntPtr bm, int depth)
+                {
+                    int guard = 0;
+                    while (bm != IntPtr.Zero && guard++ < 5000)
+                    {
+                        uint n = FPDFBookmark_GetTitle(bm, buf, (uint)buf.Length);
+                        string title = n > 2
+                            ? System.Text.Encoding.Unicode.GetString(buf, 0, (int)Math.Min(n, buf.Length)).TrimEnd('\0')
+                            : "";
+                        IntPtr dest = FPDFBookmark_GetDest(doc, bm);
+                        int page = dest != IntPtr.Zero ? FPDFDest_GetDestPageIndex(doc, dest) : -1;
+                        sb.Append(depth).Append('\t').Append(page).Append('\t')
+                          .Append(title.Replace('\t', ' ').Replace('\n', ' ').Replace('\r', ' ')).Append('\n');
+                        Walk(FPDFBookmark_GetFirstChild(doc, bm), depth + 1);
+                        bm = FPDFBookmark_GetNextSibling(doc, bm);
+                    }
+                }
+                Walk(FPDFBookmark_GetFirstChild(doc, IntPtr.Zero), 0);
+                return sb.ToString();
+            }
+            finally { if (doc != IntPtr.Zero) FPDF_CloseDocument(doc); pin.Free(); }
+        }
+    }
 
     // pageIndex 上の query 最初のヒットの矩形群を、ページ寸法に対する正規化座標 (0..1, 左上原点)
     // で [x,y,w,h, x,y,w,h, ...] で返す (複数行なら複数矩形)。無ければ空配列。

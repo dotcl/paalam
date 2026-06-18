@@ -1048,6 +1048,8 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
            (search-matches nil) (search-index 0)         ; / 全文検索: ヒットページ index リスト (#23)
            (search-query nil) (search-hl nil)            ; 検索語 / ハイライト矩形 (overlay)
            (page-offsets nil)                            ; 現在見開きの page→(xoff yoff) (ハイライト配置用)
+           (toc-entries nil) (toc-filtered nil)          ; 目次 (depth page title) 全件 / 絞り込み後 (#23)
+           status-box status-text                        ; ウィンドウ内ステータス表示 (全画面でも見える; #23)
            menu)                        ; メニューバー (#21; 全画面時に隠す)
 
 (defun %reopen (vw)
@@ -1214,6 +1216,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
              (li (viewer-left-img vw))
              (ri (viewer-right-img vw)))
         (%clear-highlights vw)                ; ページが変わるので前の検索ハイライトを消す
+        (%status-clear vw)                    ; ステータスメッセージもページ移動で消す
         (setf (viewer-page-offsets vw) nil)
         (if (= (length pages) 1)
             (let ((bmp (%page-bitmap vw (first pages))))
@@ -1241,15 +1244,12 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
         (%apply-fit vw)))))
 
 (defun %update-title (vw)
+  ;; タイトルは本文情報のみ。検索件数等のメッセージは %status (ウィンドウ内) に出す
+  ;; (全画面ではタイトルバーが見えないため)。
   (let ((spreads (viewer-spreads vw)))
     (when (plusp (length spreads))
-      (let ((base (%spread-title vw (aref spreads (viewer-sindex vw))))
-            (ms (viewer-search-matches vw)))
-        (dotnet:invoke (viewer-window vw) "set_Title"
-                       (if ms
-                           (format nil "~a  ｜ 検索 ~d/~d 件 (n/N)"
-                                   base (1+ (viewer-search-index vw)) (length ms))
-                           base))))))
+      (dotnet:invoke (viewer-window vw) "set_Title"
+                     (%spread-title vw (aref spreads (viewer-sindex vw)))))))
 
 (defun %goto-bookmark (vw dir)
   "現在の本のブックマークのうち、現在ページから dir 方向の最寄りページへ。"
@@ -1421,6 +1421,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
    (make-command :goto          "ページ移動 (gg=先頭 / G=末尾 / [count]g)" '("G") '%goto-page)
    (make-command :palette       "コマンドパレット" '("OemSemicolon") '%command-palette)
    (make-command :search        "検索 (/)"          '("OemQuestion" "Divide") '%command-search)
+   (make-command :toc           "目次 (O)"          '("O")     '%command-toc)
    (make-command :clip-pane     "素材ペイン"       '("P")     '%toggle-clip-pane)
    (make-command :thumb-pane    "本棚 (サムネ)"    '("T")     '%toggle-thumb-pane)
    (make-command :browse-pane   "フォルダ"         '("L")     '%toggle-browse-pane)
@@ -1479,6 +1480,12 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
   "KeyEventArgs に Shift 修飾が乗っているか (vi の g/G 判別用; #23)。
 KeyModifiers は大小キーで同じ Key.G になるため修飾で見分ける。"
   (and (search "Shift"
+               (dotnet:invoke (dotnet:invoke e "get_KeyModifiers") "ToString"))
+       t))
+
+(defun %ctrl? (e)
+  "KeyEventArgs に Control 修飾が乗っているか (バー内の Ctrl-n/p 等)。"
+  (and (search "Control"
                (dotnet:invoke (dotnet:invoke e "get_KeyModifiers") "ToString"))
        t))
 
@@ -1801,6 +1808,28 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
         (push i acc)))
     (nreverse acc)))
 
+;;; 目次 (TOC) (#23)。pdf の bookmark を (depth page title) リストに。他形式は無し。
+(defun %parse-outline (s)
+  "PdfText.Outline の \"depth<TAB>page<TAB>title\" 行文字列を (depth page title) リストへ。"
+  (when (and s (plusp (length s)))
+    (let ((entries '()))
+      (with-input-from-string (in s)
+        (loop for line = (read-line in nil nil) while line do
+          (let* ((t1 (position #\Tab line))
+                 (t2 (and t1 (position #\Tab line :start (1+ t1)))))
+            (when t2
+              (let ((depth (ignore-errors (parse-integer line :end t1)))
+                    (page  (ignore-errors (parse-integer line :start (1+ t1) :end t2)))
+                    (title (subseq line (1+ t2))))
+                (when (and depth page)
+                  (push (list depth page title) entries)))))))
+      (nreverse entries))))
+
+(defgeneric book-outline (book)
+  (:documentation "目次 (depth page title) のリスト。無ければ nil。"))
+(defmethod book-outline ((b pdf-book)) (%parse-outline (dotnet:invoke (pdfb-doc b) "Outline")))
+(defmethod book-outline ((b t)) nil)
+
 (defun %run-search (vw query)
   "QUERY で現在の本を検索。ヒットがあれば先頭へジャンプ (件数はタイトルに出る)。"
   (let* ((book (viewer-book vw))
@@ -1809,11 +1838,11 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
          (ms (and book (plusp (length q)) (ignore-errors (book-search book q)))))
     (setf (viewer-search-matches vw) ms (viewer-search-index vw) 0 (viewer-search-query vw) q)
     (if ms
-        (progn (%jump-to-page vw (first ms))   ; show-spread→%update-title が件数込みで表示
-               (%highlight-match vw))
-        (progn (%update-title vw)
-               (dotnet:invoke (viewer-window vw) "set_Title"
-                              (format nil "検索: 「~a」 見つかりません" q))))))
+        (progn (%jump-to-page vw (first ms))   ; jump→render が status をクリア→下で出し直す
+               (%highlight-match vw)
+               (%status vw (format nil "検索 1/~d 件  n/N で移動" (length ms))))
+        (when (plusp (length q))
+          (%status vw (format nil "「~a」 見つかりません" q))))))
 
 (defun %search-step (vw dir)
   "検索ヒット間を dir (+1/-1) 方向に循環してジャンプ (n/N)。"
@@ -1821,7 +1850,8 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
     (when ms
       (setf (viewer-search-index vw) (mod (+ (viewer-search-index vw) dir) (length ms)))
       (%jump-to-page vw (nth (viewer-search-index vw) ms))
-      (%highlight-match vw))))
+      (%highlight-match vw)
+      (%status vw (format nil "検索 ~d/~d 件  n/N で移動" (1+ (viewer-search-index vw)) (length ms))))))
 
 (defun %clear-highlights (vw)
   "重ねた検索ハイライト矩形を stage canvas から除去。"
@@ -1894,8 +1924,9 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
         (ignore-errors (dotnet:invoke tb "set_CaretIndex" (length s)))))))
 
 (defun %cmd-move (vw d)
-  (let ((lb (viewer-cmd-list vw))
-        (n  (length (viewer-cmd-matches vw))))
+  ;; リストの実項目数で巡回 (モード非依存: command/toc どちらの一覧でも正しく動く)。
+  (let* ((lb (viewer-cmd-list vw))
+         (n  (dotnet:invoke (dotnet:invoke lb "get_Items") "get_Count")))
     (when (plusp n)
       (dotnet:invoke lb "set_SelectedIndex"
                      (mod (+ (max 0 (dotnet:invoke lb "get_SelectedIndex")) d) n)))))
@@ -1922,7 +1953,8 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
     (dotnet:invoke (viewer-cmd-bar vw) "set_IsVisible" t)
     (dotnet:invoke tb "set_Text" "")
     (%cmd-populate vw)
-    (dotnet:invoke tb "Focus")))
+    ;; フォーカスは1サイクル遅延 (開いたキー : 自身が入力欄に入るのを防ぐ)。
+    (%ui-post (lambda () (dotnet:invoke tb "Focus")))))
 
 (defun %command-search (vw)
   "vi 風 / 検索バーを開く (#23)。Enter で本文/ページ名検索→先頭ヒットへ。以後 n/N で巡回。"
@@ -1932,7 +1964,64 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
     (dotnet:invoke (viewer-cmd-list vw) "set_IsVisible" nil)  ; 検索はリスト不要 (n/N で巡回)
     (dotnet:invoke (viewer-cmd-bar vw) "set_IsVisible" t)
     (dotnet:invoke tb "set_Text" "")
-    (dotnet:invoke tb "Focus")))
+    ;; フォーカスは1サイクル遅延 (開いたキー / 自身が入力欄に入るのを防ぐ)。
+    (%ui-post (lambda () (dotnet:invoke tb "Focus")))))
+
+(defun %toc-row (e)
+  "目次1行: 深さインデント + タイトル + ページ。e = (depth page title)。"
+  (destructuring-bind (depth page title) e
+    (format nil "~a~a   p~d" (make-string (* 2 (max 0 depth)) :initial-element #\Space)
+            title (1+ page))))
+
+(defun %toc-populate (vw)
+  "入力で目次をタイトル部分一致 (大小無視) 絞り込みしてリスト更新。"
+  (let* ((tb (viewer-cmd-input vw))
+         (lb (viewer-cmd-list vw))
+         (q  (string-downcase (string-trim " " (or (dotnet:invoke tb "get_Text") ""))))
+         (es (if (string= q "")
+                 (viewer-toc-entries vw)
+                 (remove-if-not (lambda (e) (search q (string-downcase (third e))))
+                                (viewer-toc-entries vw)))))
+    (setf (viewer-toc-filtered vw) es)
+    (let ((items (dotnet:invoke lb "get_Items")))
+      (dotnet:invoke items "Clear")
+      (dolist (e es) (dotnet:invoke items "Add" (%toc-row e))))
+    (dotnet:invoke lb "set_IsVisible" (and es t))
+    (when es (dotnet:invoke lb "set_SelectedIndex" 0))))
+
+(defun %toc-run (vw)
+  "選択中の目次項目のページへジャンプ。"
+  (let* ((lb (viewer-cmd-list vw))
+         (i  (dotnet:invoke lb "get_SelectedIndex"))
+         (e  (and (>= i 0) (nth i (viewer-toc-filtered vw)))))
+    (%cmd-hide vw)
+    (when e
+      (let ((page (second e)))
+        (when (and page (>= page 0)) (%jump-to-page vw page))))))
+
+(defun %command-toc (vw)
+  "目次バーを開く (#23)。入力でタイトル絞り込み、Enter/クリックでそのページへ。目次が無ければ通知。"
+  (let ((es (ignore-errors (book-outline (viewer-book vw)))))
+    (if (null es)
+        (%status vw "目次なし (この本にはブックマークがありません)")
+        (progn
+          (setf (viewer-cmd-mode vw) :toc (viewer-toc-entries vw) es)
+          (let ((tb (viewer-cmd-input vw)))
+            (when (viewer-cmd-prompt vw) (dotnet:invoke (viewer-cmd-prompt vw) "set_Text" "≡"))
+            (dotnet:invoke (viewer-cmd-list vw) "set_IsVisible" t)
+            (dotnet:invoke (viewer-cmd-bar vw) "set_IsVisible" t)
+            (dotnet:invoke tb "set_Text" "")
+            (%toc-populate vw)
+            ;; フォーカスは1サイクル遅延 (開いたキー O 自身が入力欄に入るのを防ぐ)。
+            (%ui-post (lambda () (dotnet:invoke tb "Focus"))))))))
+
+(defun %cmd-accept (vw)
+  "コマンドバー確定 (Enter / ダブルクリック)。モードで分岐。"
+  (ecase (viewer-cmd-mode vw)
+    (:command (%cmd-run vw))
+    (:search  (let ((q (or (dotnet:invoke (viewer-cmd-input vw) "get_Text") "")))
+                (%cmd-hide vw) (%run-search vw q)))
+    (:toc     (%toc-run vw))))
 
 (defun %make-cmdbar (vw)
   "本体下部に貼る vi 風コマンドバー (既定非表示)。controls を viewer に保持して返す。"
@@ -1968,27 +2057,27 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
     (dotnet:invoke tb "set_Foreground" (dotnet:static "Avalonia.Media.Brushes" "White"))
     (dotnet:invoke tb "set_MinWidth" 320d0)
     (dotnet:invoke tb "set_Watermark" "コマンド名 (Enter 実行 / Esc 閉じる)")
-    ;; 候補絞り込みは :command モードのみ (検索は Enter で実行、ライブ検索しない)。
+    ;; ライブ絞り込み: command=コマンド / toc=目次。search はライブ検索せず先頭 / を除去のみ。
     (dotnet:add-event tb "TextChanged"
       (lambda (s e) (declare (ignore s e))
-        (if (eq (viewer-cmd-mode vw) :command)
-            (%cmd-populate vw)                 ; 候補絞り込み (先頭 : も除去)
-            (%cmd-strip-leading vw #\/))))      ; 検索: 先頭 / を除去 (表示を整える)
+        (ecase (viewer-cmd-mode vw)
+          (:command (%cmd-populate vw))      ; 候補絞り込み (先頭 : も除去)
+          (:toc     (%toc-populate vw))      ; 目次絞り込み
+          (:search  (%cmd-strip-leading vw #\/)))))  ; 検索: 先頭 / を除去 (表示を整える)
     ;; キーは TextBox 自身で捌く (Window に付けると Enter がバブルしないため)。
     (dotnet:add-event tb "KeyDown"
       (lambda (s e) (declare (ignore s))
         (let ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString")))
           ;; Avalonia は Enter/Return が同値で ToString は "Return"。両方受ける。
           (cond ((or (string= kn "Return") (string= kn "Enter"))
-                 (dotnet:invoke e "set_Handled" t)
-                 (if (eq (viewer-cmd-mode vw) :search)
-                     (let ((q (or (dotnet:invoke tb "get_Text") "")))
-                       (%cmd-hide vw) (%run-search vw q))  ; 先に閉じて n/N を有効化
-                     (%cmd-run vw)))
+                 (dotnet:invoke e "set_Handled" t) (%cmd-accept vw))  ; モードで分岐
                 ((string= kn "Escape") (dotnet:invoke e "set_Handled" t) (%cmd-hide vw))
+                ;; Ctrl-n/Ctrl-p で項目移動 (vi 寄り; 単一行 TextBox が ↑↓ を食う問題も回避)。↑↓ も一応残す。
+                ((and (string= kn "N") (%ctrl? e)) (dotnet:invoke e "set_Handled" t) (%cmd-move vw 1))
+                ((and (string= kn "P") (%ctrl? e)) (dotnet:invoke e "set_Handled" t) (%cmd-move vw -1))
                 ((string= kn "Down")   (dotnet:invoke e "set_Handled" t) (%cmd-move vw 1))
                 ((string= kn "Up")     (dotnet:invoke e "set_Handled" t) (%cmd-move vw -1))))))
-    (dotnet:add-event lb "DoubleTapped" (lambda (s e) (declare (ignore s e)) (%cmd-run vw)))
+    (dotnet:add-event lb "DoubleTapped" (lambda (s e) (declare (ignore s e)) (%cmd-accept vw)))
     (let ((rc (dotnet:invoke row "get_Children")))
       (dotnet:invoke rc "Add" lbl)
       (dotnet:invoke rc "Add" tb))
@@ -2001,6 +2090,35 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
           (viewer-cmd-list vw) lb
           (viewer-cmd-prompt vw) lbl)
     bar))
+
+(defun %make-status (vw)
+  "本体上部中央に出す小さなステータス表示 (検索件数/メッセージ; 全画面でも見える)。既定非表示。"
+  (let ((box (dotnet:new "Avalonia.Controls.Border"))
+        (txt (dotnet:new "Avalonia.Controls.TextBlock")))
+    (dotnet:invoke box "set_IsVisible" nil)
+    (dotnet:invoke box "set_VerticalAlignment" (dotnet:static "Avalonia.Layout.VerticalAlignment" "Top"))
+    (dotnet:invoke box "set_HorizontalAlignment" (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Center"))
+    (dotnet:invoke box "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 12d0 0d0 0d0))
+    (dotnet:invoke box "set_Padding" (dotnet:new "Avalonia.Thickness" 12d0 6d0 12d0 6d0))
+    (dotnet:invoke box "set_CornerRadius" (dotnet:new "Avalonia.CornerRadius" 6d0))
+    (dotnet:invoke box "set_Background" (dotnet:static "Avalonia.Media.Brushes" "Black"))
+    (dotnet:invoke box "set_Opacity" 0.8d0)
+    (dotnet:invoke box "set_IsHitTestVisible" nil)
+    (dotnet:invoke txt "set_Foreground" (dotnet:static "Avalonia.Media.Brushes" "White"))
+    (dotnet:invoke box "set_Child" txt)
+    (setf (viewer-status-box vw) box (viewer-status-text vw) txt)
+    box))
+
+(defun %status (vw text)
+  "ステータス表示に TEXT を出す (タイトルバーが無い全画面でも見える)。次のページ描画で消える。"
+  (let ((box (viewer-status-box vw)) (txt (viewer-status-text vw)))
+    (when (and box txt)
+      (dotnet:invoke txt "set_Text" text)
+      (dotnet:invoke box "set_IsVisible" t))))
+
+(defun %status-clear (vw)
+  (let ((box (viewer-status-box vw)))
+    (when box (dotnet:invoke box "set_IsVisible" nil))))
 
 (defun %open-settings (vw)
   ;; 左に折りたたみツリー (カテゴリ)、右に該当ページ。選択で右を差し替える master/detail。
@@ -2432,7 +2550,12 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
           (let ((cb (%make-cmdbar vw)))
             (dotnet:static "Avalonia.Controls.Grid" "SetColumn" cb 0)
             (dotnet:static "Avalonia.Controls.Grid" "SetColumnSpan" cb 4)
-            (dotnet:invoke rc "Add" cb)))
+            (dotnet:invoke rc "Add" cb))
+          ;; ステータス表示 (全列スパン・上部中央・最前面; 全画面でもメッセージが見える; #23)
+          (let ((st (%make-status vw)))
+            (dotnet:static "Avalonia.Controls.Grid" "SetColumn" st 0)
+            (dotnet:static "Avalonia.Controls.Grid" "SetColumnSpan" st 4)
+            (dotnet:invoke rc "Add" st)))
         (setf (viewer-clip-pane vw) pane (viewer-clip-stack vw) stack
               (viewer-dnd-overlay vw) overlay)
         ;; ペインへの DnD で素材追加 (#18 Phase 2b)。DnD 中はペイン背景を強調 (#20)。
