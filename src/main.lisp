@@ -1725,8 +1725,10 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
     (dotnet:invoke combo "set_SelectedIndex" (if (eq *page-direction* :rtl) 0 1))
     (labels
         ((add-binding (k)
-           (unless (assoc k (car kbox) :test #'string=)
-             (setf (car kbox) (cons (cons k (command-id (car *commands*))) (car kbox))))
+           ;; 数字 1-9 は count プレフィックス予約で割当てても発火しないので弾く (#23)。0 は可。
+           (let ((d (%digit-key k)))
+             (unless (or (and d (> d 0)) (assoc k (car kbox) :test #'string=))
+               (setf (car kbox) (cons (cons k (command-id (car *commands*))) (car kbox)))))
            (refresh))
          (remove-binding (pair) (setf (car kbox) (remove pair (car kbox))) (refresh))
          (kb-row (pair)
@@ -1859,7 +1861,7 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
                (progn
                  (dotnet:invoke scr "set_MaxHeight" 360d0)
                  (dotnet:invoke scr "set_Content" kb-stack)
-                 (page (list (%s-header "キー割当 (キー → 機能。1 キー 1 機能、複数可)")
+                 (page (list (%s-header "キー割当 (キー → 機能。1キー1機能・複数可。数字1-9はcount予約)")
                              scr addbtn))))
              (panel-assoc (assoc-page))
              (pages (append (list (cons "レイアウト" panel-layout)
