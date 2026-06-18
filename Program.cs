@@ -196,9 +196,12 @@ internal static class Program
             DotclHost.Initialize();
             DotclHost.LoadCore(DotclHost.FindCore()
                 ?? throw new InvalidOperationException("dotcl.core が見つかりません"));
-            // 実行時は単一 main.lisp を直接 load (速い)。asdf は分割管理 / 単一 fasl 化の
-            // *ビルド時* 専用 (paalam.asd, #22 Phase 2)。runtime に asdf は要らない。
-            DotclHost.LoadLispFile(Path.Combine(AppContext.BaseDirectory, "main.lisp"));
+            // dist = 精コンパイル済み paalam.fasl (起動が速い・ソース非平文)、
+            // dev = main.lisp (デバッグ時の行番号が出る)。出力にある方を load (#22 Phase 2)。
+            var fasl = Path.Combine(AppContext.BaseDirectory, "paalam.fasl");
+            DotclHost.LoadLispFile(File.Exists(fasl)
+                ? fasl
+                : Path.Combine(AppContext.BaseDirectory, "main.lisp"));
 
             // 第 1 引数 (フォルダ/アーカイブ/画像) を渡す。run-paalam は窓が閉じるまで blocking。
             var cmd = Environment.GetCommandLineArgs();

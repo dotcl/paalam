@@ -32,16 +32,45 @@
     <PackageReference Include="DotCL.Runtime" Version="0.1.11" />
   </ItemGroup>
 
-  <!-- Lisp 本体を出力直下へ (contrib は require が NuGet 同梱から解決)。 -->
-  <ItemGroup>
-    <!-- #22 Phase 1: paalam.asd + ソース群を出力直下へ glob コピー (個別列挙しない =
-         asd の :components と二重管理にならない)。Phase 2 で dist は fasl 1個に差し替え。 -->
+  <!-- 配布形態 (#22):
+       既定 (dev) … ソース (main.lisp 等) を同梱、起動時に load (デバッグ行番号が出る)。
+       -p:Precompiled=true (dist) … src/main.lisp を 1 個の paalam.fasl に精コンパイルして
+         それだけ同梱 (起動が速い・ソース非平文)。精コンパイルは build 時にインストール済み
+         dotcl で実行 (実行時ランタイムは NuGet)。 -->
+  <PropertyGroup>
+    <Precompiled Condition="'$(Precompiled)' == ''">false</Precompiled>
+    <DotclExe Condition="'$(DotclExe)' == ''">dotcl</DotclExe>
+  </PropertyGroup>
+
+  <!-- dev: 出力に残った古い paalam.fasl を消す (dist→dev で fasl が残り source に戻らないのを防ぐ)。 -->
+  <Target Name="RemoveStaleFasl" BeforeTargets="Build" Condition="'$(Precompiled)' != 'true'">
+    <Delete Files="$(OutDir)paalam.fasl" />
+  </Target>
+
+  <!-- dev: ソース群 + asd を glob コピー (個別列挙せず asd :components と二重管理にしない)。 -->
+  <ItemGroup Condition="'$(Precompiled)' != 'true'">
     <Content Include="src\*.lisp" Link="%(Filename)%(Extension)">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="src\paalam.asd" Link="paalam.asd">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+  </ItemGroup>
+
+  <!-- dist: precompile.lisp で main.lisp -> paalam.fasl (incremental)、build 後に出力へコピー。
+       Content+CopyToOutputDirectory だと fasl 生成前にコピーが走るので、明示 Copy + DependsOn で
+       順序を保証する (PrecompiledLispDemo と同パターン)。 -->
+  <Target Name="PrecompilePaalam" Condition="'$(Precompiled)' == 'true'"
+          Inputs="src/main.lisp;precompile.lisp" Outputs="paalam.fasl">
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)" Command="$(DotclExe) precompile.lisp" />
+  </Target>
+  <Target Name="CopyPaalamFasl" AfterTargets="Build" DependsOnTargets="PrecompilePaalam"
+          Condition="'$(Precompiled)' == 'true'">
+    <Copy SourceFiles="$(MSBuildProjectDirectory)/paalam.fasl" DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <ItemGroup>
     <!-- 実行時の Window.Icon 用に app.ico も出力へ。 -->
     <Content Include="app.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
