@@ -1033,6 +1033,7 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
            (reorder-line nil)           ; 挿入位置インジケータ Border (#20)
            (dnd-overlay nil)            ; DnD ドロップ可否ハイライト枠 (#20)
            (pending-count nil)          ; vi 風 count プレフィックス (数字キー蓄積; #23)
+           (pending-g nil)              ; vi 風 多キー列 g 待ち (gg=先頭; #23)
            menu)                        ; メニューバー (#21; 全画面時に隠す)
 
 (defun %reopen (vw)
@@ -1391,7 +1392,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
    (make-command :recursive     "再帰収集"         '("R")     '%toggle-recursive)
    (make-command :fit           "フィット"         '("D0" "NumPad0") 'reset-view)
    (make-command :fit-mode      "フィット切替"     '("W")     '%cycle-fit-mode)
-   (make-command :goto          "ページ移動 ([count]G)" '("G") '%goto-page)
+   (make-command :goto          "ページ移動 (gg=先頭 / G=末尾 / [count]g)" '("G") '%goto-page)
    (make-command :clip-pane     "素材ペイン"       '("P")     '%toggle-clip-pane)
    (make-command :thumb-pane    "本棚 (サムネ)"    '("T")     '%toggle-thumb-pane)
    (make-command :browse-pane   "フォルダ"         '("L")     '%toggle-browse-pane)
@@ -1446,17 +1447,44 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
         ((and (= (length kn) 7) (string= (subseq kn 0 6) "NumPad")) (digit-char-p (char kn 6)))
         (t nil)))
 
+(defun %shift? (e)
+  "KeyEventArgs に Shift 修飾が乗っているか (vi の g/G 判別用; #23)。
+KeyModifiers は大小キーで同じ Key.G になるため修飾で見分ける。"
+  (and (search "Shift"
+               (dotnet:invoke (dotnet:invoke e "get_KeyModifiers") "ToString"))
+       t))
+
 (defun %on-key (vw e)
-  "Window KeyDown。数字は count プレフィックスとして蓄積 (vi 風, #23)。それ以外は
-*keymap* を引いてコマンド実行 (count はコマンドが viewer-pending-count で読む)。
-0 単独は count を始めない (既存の 0=フィットを活かす; count 継続中の 0 のみ桁送り)。"
+  "Window KeyDown。vi 風入力 (#23): 数字=count 蓄積、g/G=先頭/末尾/移動の小状態機械、
+他は *keymap* を引いてコマンド実行 (count はコマンドが viewer-pending-count で読む)。
+0 単独は count を始めない (既存の 0=フィットを活かす; count 継続中の 0 のみ桁送り)。
+g/G: [count]g=count ページ目 / gg=先頭 / G(Shift)=末尾 / g 単独=次の g 待ち。"
   (let* ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString"))
          (d  (%digit-key kn)))
-    (if (and d (or (> d 0) (viewer-pending-count vw)))
-        (setf (viewer-pending-count vw) (+ (* 10 (or (viewer-pending-count vw) 0)) d))
-        (let ((id (gethash kn *keymap*)))
-          (when id (%run-command vw id))     ; count は実行中に pending-count で読まれる
-          (setf (viewer-pending-count vw) nil)))))
+    (cond
+      ;; g / G — Avalonia では大小とも Key.G。Shift で末尾、count で移動、二連で先頭。
+      ((string= kn "G")
+       (let ((cnt   (viewer-pending-count vw))
+             (shift (%shift? e))
+             (was-g (viewer-pending-g vw)))
+         (cond (cnt   (%goto-page vw))      ; [count]g / [count]G → count ページ目
+               (shift (%last-spread vw))    ; G → 末尾
+               (was-g (%first-spread vw))   ; gg → 先頭
+               (t     (setf (viewer-pending-g vw) t))) ; g 単独 → 次キー待ち
+         ;; 「待ち」分岐 (count/shift/前回g すべて無) のときだけ pending-g を残す。
+         (unless (and (not cnt) (not shift) (not was-g))
+           (setf (viewer-pending-g vw) nil))
+         (setf (viewer-pending-count vw) nil)))
+      ;; 数字: count 蓄積
+      ((and d (or (> d 0) (viewer-pending-count vw)))
+       (setf (viewer-pending-g vw) nil
+             (viewer-pending-count vw) (+ (* 10 (or (viewer-pending-count vw) 0)) d)))
+      ;; その他: 通常コマンド
+      (t
+       (setf (viewer-pending-g vw) nil)
+       (let ((id (gethash kn *keymap*)))
+         (when id (%run-command vw id))     ; count は実行中に pending-count で読まれる
+         (setf (viewer-pending-count vw) nil))))))
 
 ;;; ------------------------------------------------------------------
 ;;; ウィンドウ / アプリ (Avalonia)
@@ -1687,7 +1715,8 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
     (dotnet:invoke w "ShowDialog" owner)))
 
 (defun %goto-page (vw)
-  "vi 風ページ移動 (#23): [count]G で count ページ目へ、count 無しの G は末尾へ。
+  "vi 風ページ移動 (#23): [count]g で count ページ目へ。count 無しは末尾へ
+ (メニュー/パレットからの直接実行時のフォールバック; キーでは G が末尾を担う)。
 count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
   (let* ((n (book-page-count (viewer-book vw)))
          (cnt (viewer-pending-count vw))
