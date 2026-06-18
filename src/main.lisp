@@ -1827,7 +1827,9 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
     (dotnet:add-event tb "KeyDown"
       (lambda (s e) (declare (ignore s))
         (let ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString")))
-          (cond ((string= kn "Enter")  (dotnet:invoke e "set_Handled" t) (%cmd-run vw))
+          ;; Avalonia は Enter/Return が同値で ToString は "Return"。両方受ける。
+          (cond ((or (string= kn "Return") (string= kn "Enter"))
+                 (dotnet:invoke e "set_Handled" t) (%cmd-run vw))
                 ((string= kn "Escape") (dotnet:invoke e "set_Handled" t) (%cmd-hide vw))
                 ((string= kn "Down")   (dotnet:invoke e "set_Handled" t) (%cmd-move vw 1))
                 ((string= kn "Up")     (dotnet:invoke e "set_Handled" t) (%cmd-move vw -1))))))
