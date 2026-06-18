@@ -333,6 +333,7 @@
     (:background-color  . *background-color*)
     (:interpolation     . *interpolation*)
     (:pdf-dpi           . *pdf-dpi*)
+    (:cache-memory-mb   . *cache-memory-mb*)
     (:cache-size        . *cache-size*)
     (:prefetch-ahead    . *prefetch-ahead*)
     (:loader-threads    . *loader-threads*))
@@ -879,10 +880,15 @@ TARGET がツリーに出ない種別 (素の画像等) なら、辿れた最後
 ;;; めくる前に裏で先読みするので快適。
 ;;; ------------------------------------------------------------------
 
+(defparameter *cache-memory-mb* 256
+  "デコード済みページ cache のメモリ上限 (MB)。これが主予算 (#25)。ページの実バイト
+ (PixelSize×4) で見積もり、超えたら現在ページから読み方向の後方→遠方の順に Dispose。")
 (defparameter *cache-size* 48
-  "デコード済みページの最大保持数 (設定ファイルで調整可)。")
+  "cache の最大保持数 (副次的な上限; 主はメモリ予算 *cache-memory-mb*)。小さい画像が
+ 大量に溜まるのを防ぐガード。")
 (defparameter *prefetch-ahead* 8
-  "現在の見開きから何見開き先まで先読みするか (設定ファイルで調整可)。")
+  "現在の見開きから何見開き先まで先読みするか。後方は min(2, これ) 見開きを少しだけ
+ 先読みする (双方向・前方優先; #25)。設定ファイルで調整可。")
 (defparameter *loader-threads* 4
   "並列ローダースレッド数。各スレッドが自前の書庫ハンドルで同時に読むので、
 NAS の帯域/レイテンシを隠せる (設定ファイルで調整可)。")
@@ -895,6 +901,7 @@ NAS の帯域/レイテンシを隠せる (設定ファイルで調整可)。")
   (cv (make-condition-variable))
   (queue '())                         ; ロード待ち index (優先順)
   (current 0)                         ; LRU の中心 (現在ページ index)
+  (direction 1)                       ; 読み方向 (+1=index 増 / -1=減; エビクションのバイアス用; #25)
   (done nil)
   workers                             ; ワーカースレッドのリスト
   on-loaded)                          ; (lambda (index)) — UI へ通知
@@ -902,28 +909,51 @@ NAS の帯域/レイテンシを隠せる (設定ファイルで調整可)。")
 (defun loader-get (ld index)
   (with-lock-held ((loader-lock ld)) (gethash index (loader-cache ld))))
 
+(defun %bmp-bytes (bmp)
+  "Bitmap のおおよそのデコード済みバイト数 (PixelSize×4ch)。取れなければ 0。"
+  (or (ignore-errors
+        (let ((ps (dotnet:invoke bmp "get_PixelSize")))
+          (* (dotnet:invoke ps "get_Width") (dotnet:invoke ps "get_Height") 4)))
+      0))
+
+(defun %evict-score (k cur dir)
+  "エビクション優先度。大きいほど先に捨てる。読み方向(dir)の後方を最優先で捨て、
+同方向内は遠い順。現在ページ(s=0)は最小=最後まで残す (#25)。"
+  (let ((s (* (- k cur) (if (minusp dir) -1 1))))   ; s>=0: 読み方向の先 / s<0: 後方
+    (if (>= s 0) s (+ 1000000 (- s)))))              ; 後方は任意の前方より大
+
 (defun %loader-evict (ld)
-  "cache が *cache-size* を超えたら現在ページから最も遠いものを捨てる。
-Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず Dispose する
-(しないと ~100 ページで非マネージドメモリが膨らみ息切れする)。
-追い出すのは常に最遠ページなので現在見開きの Bitmap は対象にならない。"
-  (let ((cache (loader-cache ld)) (cur (loader-current ld)))
-    (loop while (> (hash-table-count cache) *cache-size*) do
-      (let ((far nil) (fard -1))
-        (maphash (lambda (k v) (declare (ignore v))
-                   (let ((d (abs (- k cur)))) (when (> d fard) (setf fard d far k))))
-                 cache)
-        (if far
-            (let ((bmp (gethash far cache)))
-              (remhash far cache)
-              (ignore-errors (dotnet:invoke bmp "Dispose")))
-            (return))))))
+  "メモリ予算 (*cache-memory-mb*) と枚数上限 (*cache-size*) を超えたら、現在ページから
+読み方向の後方→遠方の順に Dispose する (方向考慮; #25)。Avalonia Bitmap は Skia の
+非マネージドメモリを抱えるので必ず Dispose (しないと数十〜百ページで息切れ)。
+現在見開きの Bitmap は score 最小なので最後まで残る。"
+  (let* ((cache (loader-cache ld)) (cur (loader-current ld)) (dir (loader-direction ld))
+         (budget (* *cache-memory-mb* 1024 1024))
+         (total 0))
+    (maphash (lambda (k v) (declare (ignore k)) (incf total (%bmp-bytes v))) cache)
+    (loop while (and (> (hash-table-count cache) 1)        ; 最低 1 枚は残す
+                     (or (> total budget) (> (hash-table-count cache) *cache-size*)))
+          do (let ((victim nil) (vscore -1))
+               (maphash (lambda (k v) (declare (ignore v))
+                          (let ((sc (%evict-score k cur dir)))
+                            (when (> sc vscore) (setf vscore sc victim k))))
+                        cache)
+               (when (null victim) (return))
+               (let ((bmp (gethash victim cache)))
+                 (decf total (%bmp-bytes bmp))
+                 (remhash victim cache)
+                 (ignore-errors (dotnet:invoke bmp "Dispose")))))))
 
 (defun loader-request (ld indices current)
   "indices を優先順でロード要求 (既キャッシュはスキップ)。current は LRU 中心。"
   (with-lock-held ((loader-lock ld))
+    ;; current の変化から読み方向を推定 (エビクションのバイアス用; 0 なら前回方向を維持)。
+    (let ((prev (loader-current ld)))
+      (setf (loader-direction ld) (cond ((> current prev) 1) ((< current prev) -1)
+                                        (t (loader-direction ld)))))
     (setf (loader-current ld) current
           ;; 既にキャッシュ済み or ロード中のものは要求しない (二度読み防止)。
+          ;; queue は毎回置き換え = 高速ページ送り時に陳腐な先読み要求は自然に捨てられる (#25 dedup)。
           (loader-queue ld) (remove-if (lambda (i) (or (gethash i (loader-cache ld))
                                                        (gethash i (loader-inflight ld))))
                                        indices))
@@ -1263,14 +1293,23 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
       (show-spread vw))))
 
 (defun %load-order (vw)
-  "現在の見開き + prefetch 分の page index を優先順 (現在見開きが先) で。"
-  (let* ((spreads (viewer-spreads vw)) (m (length spreads)) (acc '()))
+  "現在の見開き + 双方向 prefetch の page index を優先順で (#25)。
+順序は 現在 → +1 → -1 → +2..+ahead → -2..-behind の前方優先。behind=min(2,ahead)。"
+  (let* ((spreads (viewer-spreads vw)) (m (length spreads)) (si (viewer-sindex vw))
+         (ahead (max 0 *prefetch-ahead*)) (behind (min 2 ahead))
+         (ks '()))
     (when (plusp m)
-      (loop for k from 0 to *prefetch-ahead*
-            for si = (+ (viewer-sindex vw) k)
-            when (< si m)
-            do (dolist (p (aref spreads si)) (push p acc))))
-    (nreverse acc)))
+      (push 0 ks)
+      (when (>= ahead 1) (push 1 ks))
+      (when (>= behind 1) (push -1 ks))
+      (loop for k from 2 to ahead do (push k ks))
+      (loop for k from 2 to behind do (push (- k) ks))
+      (let ((acc '()))
+        (dolist (k (nreverse ks))                       ; [0 1 -1 2..ahead -2..-behind]
+          (let ((s (+ si k)))
+            (when (and (>= s 0) (< s m))
+              (dolist (p (aref spreads s)) (push p acc)))))
+        (nreverse acc)))))
 
 (defun show-spread (vw)
   "見開き表示 (sindex クランプ)。必要ページをローダーに要求し cache から描画、
@@ -1707,7 +1746,7 @@ indeterminate が要るなら (dotnet:null)。"
       (dotnet:static "System.Diagnostics.Process" "Start" psi))))
 
 (defun %settings-apply (vw cb-spread cb-fps cb-rec combo tb-cache tb-pf tb-th
-                        fit-combo bg-combo interp-combo tb-dpi)
+                        fit-combo bg-combo interp-combo tb-dpi tb-mem)
   "コントロールの現在値をグローバルへ反映し永続化、変更内容に応じて再描画する。"
   (let ((old-spread *spread*) (old-fps *first-page-single*)
         (old-rec *recursive*) (old-threads *loader-threads*) (old-dpi *pdf-dpi*))
@@ -1719,6 +1758,7 @@ indeterminate が要るなら (dotnet:null)。"
           *background-color*  (%s-combo-value bg-combo *bg-choices*)
           *interpolation*     (%s-combo-value interp-combo *interp-choices*)
           *pdf-dpi*           (%parse-int (dotnet:invoke tb-dpi "get_Text") *pdf-dpi* 36)
+          *cache-memory-mb*   (%parse-int (dotnet:invoke tb-mem "get_Text") *cache-memory-mb* 16)
           *cache-size*        (%parse-int (dotnet:invoke tb-cache "get_Text") *cache-size* 1)
           *prefetch-ahead*    (%parse-int (dotnet:invoke tb-pf "get_Text") *prefetch-ahead* 0)
           *loader-threads*    (%parse-int (dotnet:invoke tb-th "get_Text") *loader-threads* 1))
@@ -2129,6 +2169,7 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
          (cb-spread (%s-checkbox *spread*))
          (cb-fps    (%s-checkbox *first-page-single*))
          (cb-rec    (%s-checkbox *recursive*))
+         (tb-mem    (%s-textbox *cache-memory-mb*))
          (tb-cache  (%s-textbox *cache-size*))
          (tb-pf     (%s-textbox *prefetch-ahead*))
          (tb-th     (%s-textbox *loader-threads*))
@@ -2293,6 +2334,7 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
                            (%s-row "PDF 解像度 (DPI)" tb-dpi))))
              (panel-perf
                (page (list (%s-header "先読み")
+                           (%s-row "キャッシュ上限 (MB)" tb-mem)
                            (%s-row "キャッシュ最大ページ数" tb-cache)
                            (%s-row "先読み見開き数" tb-pf)
                            (%s-row "ローダースレッド数" tb-th))))
@@ -2358,7 +2400,7 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
             (%s-button "OK"
               (lambda ()
                 (%settings-apply vw cb-spread cb-fps cb-rec combo tb-cache tb-pf tb-th
-                                 fit-combo bg-combo interp-combo tb-dpi)
+                                 fit-combo bg-combo interp-combo tb-dpi tb-mem)
                 ;; キー指向の作業リストを機能ごとにまとめ直して確定 (削除は空リストで反映)。
                 (setf *keybinds*
                       (mapcar (lambda (c)
