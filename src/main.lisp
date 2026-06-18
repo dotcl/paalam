@@ -682,6 +682,94 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
   (when (dotnet:invoke (viewer-clip-pane vw) "get_IsVisible") (%rebuild-clip-pane vw)))
 
 ;;; ------------------------------------------------------------------
+;;; ページサムネ本棚 (#6 A): サイドペインに現在の本の全ページを縮小サムネで並べ、
+;;; クリックでそのページへジャンプ。サムネは DecodeToWidth で縮小デコード (全ページ分
+;;; フル Bitmap を抱えないため)。背景スレッドで非同期ロードして後から差し込む。
+;;; ------------------------------------------------------------------
+(defparameter *thumb-width* 150 "ページサムネの幅 (px)。")
+(defparameter *page-thumb-cache* (make-hash-table :test 'equal)
+  "(source . page) -> 縮小サムネ Bitmap。本を変えたらクリア。")
+(defun %pthumb-get (src page) (gethash (cons src page) *page-thumb-cache*))
+(defun %pthumb-put (src page bmp) (setf (gethash (cons src page) *page-thumb-cache*) bmp))
+(defun %pthumb-clear ()
+  (maphash (lambda (k v) (declare (ignore k)) (ignore-errors (dotnet:invoke v "Dispose")))
+           *page-thumb-cache*)
+  (clrhash *page-thumb-cache*))
+
+(defun %make-page-thumb (book index width)
+  "BOOK の INDEX ページを WIDTH px に縮小デコードした Bitmap。バイト列から DecodeToWidth。
+MemoryStream(byte[]) ctor は overload バグ (#294) を踏むので無引数 + Write で渡す。"
+  (multiple-value-bind (bytes ext) (book-page-bytes book index)
+    (declare (ignore ext))
+    (let ((ms (dotnet:new "System.IO.MemoryStream")))
+      (unwind-protect
+           (progn
+             (dotnet:invoke ms "Write" bytes 0 (dotnet:invoke bytes "get_Length"))
+             (dotnet:invoke ms "set_Position" 0)
+             (dotnet:static "Avalonia.Media.Imaging.Bitmap" "DecodeToWidth" ms width))
+        (dotnet:invoke ms "Dispose")))))
+
+(defun %jump-to-page (vw page)
+  "PAGE を含む見開きへ移動 (本棚クリック)。フォーカスはビューポートへ戻す。"
+  (setf (viewer-sindex vw) (spread-index-of (viewer-spreads vw) page))
+  (show-spread vw)
+  (%focus-viewport vw))
+
+(defun %rebuild-thumb-pane (vw)
+  "thumb-stack を現在の本の全ページサムネで作り直す。キャッシュ済みは即表示、
+未キャッシュは背景スレッドで縮小デコードして差し込む (本は別ハンドルで開き直す)。"
+  (let* ((stack (viewer-thumb-stack vw))
+         (children (dotnet:invoke stack "get_Children"))
+         (src (viewer-source vw))
+         (n (book-page-count (viewer-book vw)))
+         (pending '()))
+    (dotnet:invoke children "Clear")
+    (dotimes (i n)
+      (let ((img (dotnet:new "Avalonia.Controls.Image"))
+            (page i)
+            (cached (%pthumb-get src i)))
+        (dotnet:invoke img "set_Width" (coerce *thumb-width* 'double-float))
+        (dotnet:invoke img "set_Stretch" (dotnet:static "Avalonia.Media.Stretch" "Uniform"))
+        (dotnet:invoke img "set_Margin" (dotnet:new "Avalonia.Thickness" 4d0 3d0 4d0 3d0))
+        (dotnet:add-event img "PointerPressed"
+          (lambda (s e) (declare (ignore s))
+            (dotnet:invoke e "set_Handled" t)   ; ウィンドウのパンを起こさない
+            (%jump-to-page vw page)))
+        (if cached
+            (dotnet:invoke img "set_Source" cached)
+            (push (cons img i) pending))
+        (dotnet:invoke children "Add" img)))
+    (when pending
+      (setf pending (nreverse pending))
+      (make-thread
+       (lambda ()
+         (let ((book (ignore-errors (open-book src))))
+           (when book
+             (unwind-protect
+                  (dolist (pair pending)
+                    (ignore-errors
+                      (let* ((img (car pair)) (page (cdr pair))
+                             (bmp (%make-page-thumb book page *thumb-width*)))
+                        (when bmp
+                          (%pthumb-put src page bmp)
+                          (%ui-post (lambda () (dotnet:invoke img "set_Source" bmp)))))))
+               (ignore-errors (book-close book))))))
+       :name "paalam-page-thumbs"))))
+
+(defun %toggle-thumb-pane (vw)
+  (let* ((pane (viewer-thumb-pane vw))
+         (vis (dotnet:invoke pane "get_IsVisible")))
+    (dotnet:invoke pane "set_IsVisible" (not vis))
+    (unless vis (%rebuild-thumb-pane vw))))
+
+(defun %thumb-pane-refresh (vw)
+  "本を変えたとき: サムネキャッシュを捨て、ペインが開いていれば作り直す。"
+  (%pthumb-clear)
+  (when (and (viewer-thumb-pane vw)
+             (dotnet:invoke (viewer-thumb-pane vw) "get_IsVisible"))
+    (%rebuild-thumb-pane vw)))
+
+;;; ------------------------------------------------------------------
 ;;; 先読みローダー (#17): 単一ワーカースレッドが書庫アクセスを一手に担い、
 ;;; デコード済み Bitmap を cache。UI は cache を読むだけ。ロード完了は
 ;;; Dispatcher.UIThread.Post で UI へ通知して差し替え。NAS 上の書庫でも
@@ -817,6 +905,7 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
            (content-w 0d0) (content-h 0d0)  ; 現在の見開きの content 寸法 (DIP; #15)
            (dragging nil) (lx 0d0) (ly 0d0)
            clip-pane clip-stack         ; 素材ペイン (#18 Phase 2)
+           thumb-pane thumb-stack       ; ページサムネ本棚 (#6 A)
            (reorder-from nil)           ; ドラッグ並べ替え中の元 index (Phase 3)
            (reorder-img nil)            ; ドラッグ中のサムネ (不透明度を戻す用; #20)
            (reorder-line nil)           ; 挿入位置インジケータ Border (#20)
@@ -838,7 +927,8 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
             (viewer-spreads vw) (compute-spreads (book-page-count book))
             (viewer-sindex vw) (spread-index-of (viewer-spreads vw)
                                                 (min keep (max 0 (1- (book-page-count book))))))
-      (show-spread vw))))
+      (show-spread vw)
+      (%thumb-pane-refresh vw))))
 
 (defun open-path (vw path)
   "別の本 (DnD 等) を開いて差し替える。履歴があればそのページ、無ければ先頭から。
@@ -857,7 +947,8 @@ UI スレッドで呼ぶこと。"
                                     (lambda (i) (%ui-post (lambda () (%on-page-loaded vw i)))))
                 (viewer-spreads vw) spreads
                 (viewer-sindex vw) (spread-index-of spreads page))
-          (show-spread vw)))
+          (show-spread vw)
+          (%thumb-pane-refresh vw)))
     (error (e) (log-err "open-path" e))))
 
 (defun apply-transform (vw)
@@ -1173,6 +1264,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
    (make-command :fit           "フィット"         '("D0" "NumPad0") 'reset-view)
    (make-command :fit-mode      "フィット切替"     '("W")     '%cycle-fit-mode)
    (make-command :clip-pane     "素材ペイン"       '("P")     '%toggle-clip-pane)
+   (make-command :thumb-pane    "本棚 (サムネ)"    '("T")     '%toggle-thumb-pane)
    (make-command :clip-add      "素材に追加"       '("A")     '%clip-add-current)
    (make-command :export        "掃き出し…"        '("E")     '%pane-export)
    (make-command :bookmark      "しおり切替"       '("B")     '%toggle-bookmark-current)
@@ -1738,7 +1830,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
         (m-view (%menu-item vw "表示"))
         (m-clip (%menu-item vw "素材")))
     (dolist (id '(:open-file :open-folder :settings :quit)) (%menu-cmd vw m-file id))
-    (dolist (id '(:fullscreen :spread :direction :recursive :fit :fit-mode :clip-pane)) (%menu-cmd vw m-view id))
+    (dolist (id '(:fullscreen :spread :direction :recursive :fit :fit-mode :thumb-pane :clip-pane)) (%menu-cmd vw m-view id))
     (dolist (id '(:export)) (%menu-cmd vw m-clip id))
     (let ((items (dotnet:invoke menu "get_Items")))
       (dotnet:invoke items "Add" m-file)
@@ -1793,18 +1885,31 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
                         (lambda (s e) (declare (ignore s e)) (%apply-fit vw)))
       ;; root: [viewport* | 素材ペイン(Auto, 既定非表示)] (#18 Phase 2)
       (let* ((root  (dotnet:new "Avalonia.Controls.Grid"))
+             (tpane (dotnet:new "Avalonia.Controls.ScrollViewer"))  ; ページサムネ本棚 (#6 A)
+             (tstack (dotnet:new "Avalonia.Controls.StackPanel"))
              (pane  (dotnet:new "Avalonia.Controls.DockPanel"))
              (ebtn  (dotnet:new "Avalonia.Controls.Button"))
              (scr   (dotnet:new "Avalonia.Controls.ScrollViewer"))
              (stack (dotnet:new "Avalonia.Controls.StackPanel"))
              (overlay (dotnet:new "Avalonia.Controls.Border")))   ; DnD ドロップ可否ハイライト枠 (#20)
+        ;; 3 列: [サムネ(Auto) | viewport(star) | 素材(Auto)]
         (let ((cols (dotnet:invoke root "get_ColumnDefinitions"))
-              (cd   (dotnet:new "Avalonia.Controls.ColumnDefinition")))
-          (dotnet:invoke cols "Add" (dotnet:new "Avalonia.Controls.ColumnDefinition")) ; star
-          (dotnet:invoke cd "set_Width" (dotnet:static "Avalonia.Controls.GridLength" "Auto"))
-          (dotnet:invoke cols "Add" cd))
-        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" vport 0)
-        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" pane  1)
+              (ct   (dotnet:new "Avalonia.Controls.ColumnDefinition"))
+              (cc   (dotnet:new "Avalonia.Controls.ColumnDefinition")))
+          (dotnet:invoke ct "set_Width" (dotnet:static "Avalonia.Controls.GridLength" "Auto"))
+          (dotnet:invoke cols "Add" ct)                                              ; col0 サムネ
+          (dotnet:invoke cols "Add" (dotnet:new "Avalonia.Controls.ColumnDefinition")) ; col1 star
+          (dotnet:invoke cc "set_Width" (dotnet:static "Avalonia.Controls.GridLength" "Auto"))
+          (dotnet:invoke cols "Add" cc))                                             ; col2 素材
+        ;; サムネペイン (左, 既定非表示)
+        (dotnet:invoke tpane "set_Width" 180d0)
+        (dotnet:invoke tpane "set_IsVisible" nil)
+        (dotnet:invoke tpane "set_Background" (dotnet:static "Avalonia.Media.Brushes" "DimGray"))
+        (dotnet:invoke tpane "set_Content" tstack)
+        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" tpane 0)
+        (setf (viewer-thumb-pane vw) tpane (viewer-thumb-stack vw) tstack)
+        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" vport 1)
+        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" pane  2)
         (dotnet:invoke pane "set_Width" 220d0)
         (dotnet:invoke pane "set_IsVisible" nil)
         (dotnet:invoke pane "set_Background" (dotnet:static "Avalonia.Media.Brushes" "DimGray"))
@@ -1814,7 +1919,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
         (dotnet:invoke overlay "set_IsHitTestVisible" nil)
         (dotnet:invoke overlay "set_IsVisible" nil)
         (dotnet:static "Avalonia.Controls.Grid" "SetColumn" overlay 0)
-        (dotnet:static "Avalonia.Controls.Grid" "SetColumnSpan" overlay 2)
+        (dotnet:static "Avalonia.Controls.Grid" "SetColumnSpan" overlay 3)
         (dotnet:invoke ebtn "set_Content" "掃き出し (zip)")
         (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" ebtn
                        (dotnet:static "Avalonia.Controls.Dock" "Top"))
@@ -1824,6 +1929,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
           (dotnet:invoke pc "Add" ebtn)
           (dotnet:invoke pc "Add" scr))
         (let ((rc (dotnet:invoke root "get_Children")))
+          (dotnet:invoke rc "Add" tpane)
           (dotnet:invoke rc "Add" vport)
           (dotnet:invoke rc "Add" pane)
           (dotnet:invoke rc "Add" overlay))   ; 最後に追加 = 最前面
