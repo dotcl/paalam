@@ -1571,7 +1571,9 @@ g/G: [count]g=count ページ目 / gg=先頭 / G(Shift)=末尾 / g 単独=次の
 
 (defun %set-check (cb on)
   "CheckBox.IsChecked (bool?) を確実に true/false に。Lisp nil をそのまま渡すと .NET null
-= 中間(indeterminate)状態になるので、false はボックス化した System.Boolean(既定=false) を渡す。"
+= 中間(indeterminate)状態になるので、false はボックス化した System.Boolean(既定=false) を渡す。
+注: #305 は CLOSED だが 0.1.12-pkgtest1 では未だ nil→null (青地に白四角=中間) になるためシム継続。
+tasks 同梱の修正版が出たら 0.1.12 本体で再検証する。"
   (dotnet:invoke cb "set_IsChecked" (if on t (dotnet:new "System.Boolean"))))
 
 (defun %s-checkbox (checked)
