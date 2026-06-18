@@ -770,6 +770,59 @@ MemoryStream(byte[]) ctor は overload バグ (#294) を踏むので無引数 + 
     (%rebuild-thumb-pane vw)))
 
 ;;; ------------------------------------------------------------------
+;;; フォルダツリー本棚 (#6 B): サイドにファイルシステムのツリー。ドライブをルートに
+;;; 遅延展開 (選択でその直下を読む)。クリック=展開ナビ、ダブルクリック=本として開く
+;;; (クリックだけで巨大フォルダを recursive 展開しないように分ける)。
+;;; ------------------------------------------------------------------
+(defparameter *book-file-extensions*
+  '("zip" "cbz" "rar" "cbr" "7z" "cb7" "tar" "cbt" "pdf")
+  "ツリーで本として扱うファイル拡張子 (フォルダ + これら)。")
+(defun %book-file-p (name)
+  (let ((ext (pathname-type name)))
+    (and ext (member (string-downcase ext) *book-file-extensions* :test #'string=) t)))
+
+(defun %dir-children (dir)
+  "DIR 直下の (label . fullpath): サブフォルダ(自然順) → 本ファイル(自然順)。アクセス不可は無視。"
+  (let ((folders '()) (files '()))
+    (ignore-errors
+      (dolist (d (%enum->list (dotnet:static "System.IO.Directory" "GetDirectories" dir)))
+        (push d folders)))
+    (ignore-errors
+      (dolist (f (%enum->list (dotnet:static "System.IO.Directory" "GetFiles" dir)))
+        (when (%book-file-p f) (push f files))))
+    (append (mapcar (lambda (p) (cons (%basename p) p)) (sort folders #'natural<))
+            (mapcar (lambda (p) (cons (%basename p) p)) (sort files #'natural<)))))
+
+(defun %browse-tvi (label path)
+  (let ((it (dotnet:new "Avalonia.Controls.TreeViewItem")))
+    (dotnet:invoke it "set_Header" label)
+    (dotnet:invoke it "set_Tag" path)   ; Tag=フルパス (文字列なので marshal は素直)
+    it))
+
+(defun %browse-populate (item dir)
+  "ITEM (フォルダノード) の子を未展開なら DIR 直下で埋める。"
+  (let ((items (dotnet:invoke item "get_Items")))
+    (when (zerop (dotnet:invoke items "get_Count"))
+      (dolist (e (%dir-children dir))
+        (dotnet:invoke items "Add" (%browse-tvi (car e) (cdr e)))))))
+
+(defun %rebuild-browse-pane (vw)
+  "ルート (論理ドライブ) を並べる。配下は選択時に遅延展開。"
+  (let ((items (dotnet:invoke (viewer-browse-tree vw) "get_Items")))
+    (dotnet:invoke items "Clear")
+    (ignore-errors
+      (dolist (d (%enum->list (dotnet:static "System.IO.Directory" "GetLogicalDrives")))
+        (dotnet:invoke items "Add" (%browse-tvi d d))))))
+
+(defun %toggle-browse-pane (vw)
+  (let* ((pane (viewer-browse-pane vw))
+         (vis (dotnet:invoke pane "get_IsVisible")))
+    (dotnet:invoke pane "set_IsVisible" (not vis))
+    (unless vis
+      (when (zerop (dotnet:invoke (dotnet:invoke (viewer-browse-tree vw) "get_Items") "get_Count"))
+        (%rebuild-browse-pane vw)))))
+
+;;; ------------------------------------------------------------------
 ;;; 先読みローダー (#17): 単一ワーカースレッドが書庫アクセスを一手に担い、
 ;;; デコード済み Bitmap を cache。UI は cache を読むだけ。ロード完了は
 ;;; Dispatcher.UIThread.Post で UI へ通知して差し替え。NAS 上の書庫でも
@@ -906,6 +959,7 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
            (dragging nil) (lx 0d0) (ly 0d0)
            clip-pane clip-stack         ; 素材ペイン (#18 Phase 2)
            thumb-pane thumb-stack       ; ページサムネ本棚 (#6 A)
+           browse-pane browse-tree      ; フォルダツリー (#6 B)
            (reorder-from nil)           ; ドラッグ並べ替え中の元 index (Phase 3)
            (reorder-img nil)            ; ドラッグ中のサムネ (不透明度を戻す用; #20)
            (reorder-line nil)           ; 挿入位置インジケータ Border (#20)
@@ -1265,6 +1319,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
    (make-command :fit-mode      "フィット切替"     '("W")     '%cycle-fit-mode)
    (make-command :clip-pane     "素材ペイン"       '("P")     '%toggle-clip-pane)
    (make-command :thumb-pane    "本棚 (サムネ)"    '("T")     '%toggle-thumb-pane)
+   (make-command :browse-pane   "フォルダ"         '("L")     '%toggle-browse-pane)
    (make-command :clip-add      "素材に追加"       '("A")     '%clip-add-current)
    (make-command :export        "掃き出し…"        '("E")     '%pane-export)
    (make-command :bookmark      "しおり切替"       '("B")     '%toggle-bookmark-current)
@@ -1830,7 +1885,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
         (m-view (%menu-item vw "表示"))
         (m-clip (%menu-item vw "素材")))
     (dolist (id '(:open-file :open-folder :settings :quit)) (%menu-cmd vw m-file id))
-    (dolist (id '(:fullscreen :spread :direction :recursive :fit :fit-mode :thumb-pane :clip-pane)) (%menu-cmd vw m-view id))
+    (dolist (id '(:fullscreen :spread :direction :recursive :fit :fit-mode :browse-pane :thumb-pane :clip-pane)) (%menu-cmd vw m-view id))
     (dolist (id '(:export)) (%menu-cmd vw m-clip id))
     (let ((items (dotnet:invoke menu "get_Items")))
       (dotnet:invoke items "Add" m-file)
@@ -1885,6 +1940,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
                         (lambda (s e) (declare (ignore s e)) (%apply-fit vw)))
       ;; root: [viewport* | 素材ペイン(Auto, 既定非表示)] (#18 Phase 2)
       (let* ((root  (dotnet:new "Avalonia.Controls.Grid"))
+             (btree (dotnet:new "Avalonia.Controls.TreeView"))      ; フォルダツリー (#6 B)
              (tpane (dotnet:new "Avalonia.Controls.ScrollViewer"))  ; ページサムネ本棚 (#6 A)
              (tstack (dotnet:new "Avalonia.Controls.StackPanel"))
              (pane  (dotnet:new "Avalonia.Controls.DockPanel"))
@@ -1892,24 +1948,42 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
              (scr   (dotnet:new "Avalonia.Controls.ScrollViewer"))
              (stack (dotnet:new "Avalonia.Controls.StackPanel"))
              (overlay (dotnet:new "Avalonia.Controls.Border")))   ; DnD ドロップ可否ハイライト枠 (#20)
-        ;; 3 列: [サムネ(Auto) | viewport(star) | 素材(Auto)]
-        (let ((cols (dotnet:invoke root "get_ColumnDefinitions"))
-              (ct   (dotnet:new "Avalonia.Controls.ColumnDefinition"))
-              (cc   (dotnet:new "Avalonia.Controls.ColumnDefinition")))
-          (dotnet:invoke ct "set_Width" (dotnet:static "Avalonia.Controls.GridLength" "Auto"))
-          (dotnet:invoke cols "Add" ct)                                              ; col0 サムネ
-          (dotnet:invoke cols "Add" (dotnet:new "Avalonia.Controls.ColumnDefinition")) ; col1 star
-          (dotnet:invoke cc "set_Width" (dotnet:static "Avalonia.Controls.GridLength" "Auto"))
-          (dotnet:invoke cols "Add" cc))                                             ; col2 素材
-        ;; サムネペイン (左, 既定非表示)
+        ;; 4 列: [フォルダ(Auto) | サムネ(Auto) | viewport(star) | 素材(Auto)]。Auto は非表示で潰れる。
+        (let ((cols (dotnet:invoke root "get_ColumnDefinitions")))
+          (dolist (w (list "Auto" "Auto" "*" "Auto"))
+            (let ((c (dotnet:new "Avalonia.Controls.ColumnDefinition")))
+              (unless (string= w "*")
+                (dotnet:invoke c "set_Width" (dotnet:static "Avalonia.Controls.GridLength" "Auto")))
+              (dotnet:invoke cols "Add" c))))
+        ;; フォルダツリーペイン (左端, 既定非表示)。選択=展開ナビ、ダブルクリック=開く。
+        (dotnet:invoke btree "set_Width" 220d0)
+        (dotnet:invoke btree "set_IsVisible" nil)
+        (dotnet:invoke btree "set_Background" (dotnet:static "Avalonia.Media.Brushes" "DimGray"))
+        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" btree 0)
+        (setf (viewer-browse-pane vw) btree (viewer-browse-tree vw) btree)
+        (dotnet:add-event btree "SelectionChanged"
+          (lambda (s e) (declare (ignore s e))
+            (let ((item (dotnet:invoke btree "get_SelectedItem")))
+              (when item
+                (let ((path (dotnet:invoke item "get_Tag")))
+                  (when (and path (dotnet:static "System.IO.Directory" "Exists" path))
+                    (%browse-populate item path)
+                    (dotnet:invoke item "set_IsExpanded" t)))))))
+        (dotnet:add-event btree "DoubleTapped"
+          (lambda (s e) (declare (ignore s e))
+            (let ((item (dotnet:invoke btree "get_SelectedItem")))
+              (when item
+                (let ((path (dotnet:invoke item "get_Tag")))
+                  (when path (ignore-errors (open-path vw path)) (%focus-viewport vw)))))))
+        ;; サムネペイン (既定非表示)
         (dotnet:invoke tpane "set_Width" 180d0)
         (dotnet:invoke tpane "set_IsVisible" nil)
         (dotnet:invoke tpane "set_Background" (dotnet:static "Avalonia.Media.Brushes" "DimGray"))
         (dotnet:invoke tpane "set_Content" tstack)
-        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" tpane 0)
+        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" tpane 1)
         (setf (viewer-thumb-pane vw) tpane (viewer-thumb-stack vw) tstack)
-        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" vport 1)
-        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" pane  2)
+        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" vport 2)
+        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" pane  3)
         (dotnet:invoke pane "set_Width" 220d0)
         (dotnet:invoke pane "set_IsVisible" nil)
         (dotnet:invoke pane "set_Background" (dotnet:static "Avalonia.Media.Brushes" "DimGray"))
@@ -1919,7 +1993,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
         (dotnet:invoke overlay "set_IsHitTestVisible" nil)
         (dotnet:invoke overlay "set_IsVisible" nil)
         (dotnet:static "Avalonia.Controls.Grid" "SetColumn" overlay 0)
-        (dotnet:static "Avalonia.Controls.Grid" "SetColumnSpan" overlay 3)
+        (dotnet:static "Avalonia.Controls.Grid" "SetColumnSpan" overlay 4)
         (dotnet:invoke ebtn "set_Content" "掃き出し (zip)")
         (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" ebtn
                        (dotnet:static "Avalonia.Controls.Dock" "Top"))
@@ -1929,6 +2003,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
           (dotnet:invoke pc "Add" ebtn)
           (dotnet:invoke pc "Add" scr))
         (let ((rc (dotnet:invoke root "get_Children")))
+          (dotnet:invoke rc "Add" btree)
           (dotnet:invoke rc "Add" tpane)
           (dotnet:invoke rc "Add" vport)
           (dotnet:invoke rc "Add" pane)
