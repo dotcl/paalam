@@ -1092,9 +1092,10 @@ UI スレッドで呼ぶこと。"
                    (dotnet:static "Avalonia.Media.Brushes" *background-color*))))
 
 (defun %apply-interpolation (vw)
-  "拡大補間品質を左右画像に設定 (#2)。"
+  "拡大補間品質を左右画像に設定 (#2)。:none=ニアレスト(ドット絵向け)/:low/:high。"
   (let ((mode (dotnet:static "Avalonia.Media.Imaging.BitmapInterpolationMode"
-                             (if (eq *interpolation* :low) "LowQuality" "HighQuality"))))
+                             (case *interpolation*
+                               (:none "None") (:low "LowQuality") (t "HighQuality")))))
     (dolist (img (list (viewer-left-img vw) (viewer-right-img vw)))
       (ignore-errors
         (dotnet:static "Avalonia.Media.RenderOptions" "SetBitmapInterpolationMode" img mode)))))
@@ -1543,7 +1544,8 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
 ;;; 設定コンボの選択肢 (表示ラベル . 値)。
 (defparameter *fit-choices*    '(("全体" . :whole) ("幅フィット" . :width) ("高さフィット" . :height)))
 (defparameter *bg-choices*     '(("黒" . "Black") ("濃い灰" . "DimGray") ("灰" . "Gray") ("白" . "White")))
-(defparameter *interp-choices* '(("高品質 (なめらか)" . :high) ("低品質 (くっきり寄り)" . :low)))
+(defparameter *interp-choices*
+  '(("高品質 (なめらか)" . :high) ("低品質" . :low) ("なし (ドット絵/最近傍)" . :none)))
 
 (defun %s-choice-combo (choices current &optional (test #'eql))
   "(ラベル . 値) の CHOICES から ComboBox を作り、CURRENT の項目を選択。"
