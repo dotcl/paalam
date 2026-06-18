@@ -277,6 +277,9 @@
   "PATH (ディレクトリ / アーカイブ / 画像ファイル) を本として開く。
 2 値 (book start-index) を返す。"
   (cond
+    ;; 未指定 (path = nil): 空の本を開く (本未オープン状態の窓)。
+    ((null path)
+     (values (make-instance 'directory-book :paths #()) 0))
     ((dotnet:static "System.IO.Directory" "Exists" path)
      (values (make-directory-book path) 0))
     ((dotnet:static "System.IO.File" "Exists" path)
@@ -1523,17 +1526,16 @@ g/G: [count]g=count ページ目 / gg=先頭 / G(Shift)=末尾 / g 単独=次の
 ;;; ウィンドウ / アプリ (Avalonia)
 ;;; ------------------------------------------------------------------
 
-(defparameter *default-image* "C:/Windows/System32/@WLOGO_96x96.png"
-  "対象未指定時のフォールバック (= その親フォルダを本として開く)。")
-
 (defvar *target-path* nil
   "RUN-PAALAM が受け取った対象パス (App は Avalonia が生成するので global で渡す)。")
 
 (defun %resolve-path (path)
+  "対象パスを決める。指定が無ければ nil を返す (= 本を開かず空の窓を出す)。
+以前は Windows 固定パス (@WLOGO_96x96.png) をフォールバックにしていたが、
+他 OS では存在せず open-book が例外 → 初期化中断で窓が出なかったため廃止。"
   (or (and (stringp path) (plusp (length path)) path)
       (let ((env (dotnet:static "System.Environment" "GetEnvironmentVariable" "PAALAM_PATH")))
-        (and env (plusp (length env)) env))
-      *default-image*))
+        (and env (plusp (length env)) env))))
 
 ;;; 表示トグル (キー / メニュー 共用)
 (defun %toggle-spread (vw)
