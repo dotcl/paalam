@@ -38,6 +38,8 @@ public sealed class PdfDoc
 
     // 全文検索 (#23 /): query を含むページの 0-based index 配列。PdfText に委譲 (自前の bytes を使う)。
     public int[] SearchPages(string query) => PdfText.SearchPages(_bytes, query);
+    // ヒット箇所のハイライト矩形 (ページ正規化座標 [x,y,w,h,...]; 呼び側で表示寸法を掛ける)。
+    public double[] MatchRects(int pageIndex, string query) => PdfText.MatchRects(_bytes, pageIndex, query);
 
     // 素材掃き出し用: ページを PNG バイト列で返す。
     public byte[] RenderPagePng(int index, int dpi)
@@ -70,6 +72,61 @@ public static class PdfText
     [DllImport("pdfium", CallingConvention = CC)] private static extern IntPtr FPDFText_FindStart(IntPtr textPage, ushort[] findWhat, uint flags, int startIndex);
     [DllImport("pdfium", CallingConvention = CC)][return: MarshalAs(UnmanagedType.Bool)] private static extern bool FPDFText_FindNext(IntPtr handle);
     [DllImport("pdfium", CallingConvention = CC)] private static extern void FPDFText_FindClose(IntPtr handle);
+    [DllImport("pdfium", CallingConvention = CC)] private static extern int FPDFText_GetSchResultIndex(IntPtr handle);
+    [DllImport("pdfium", CallingConvention = CC)] private static extern int FPDFText_GetSchCount(IntPtr handle);
+    [DllImport("pdfium", CallingConvention = CC)] private static extern int FPDFText_CountRects(IntPtr textPage, int startIndex, int count);
+    [DllImport("pdfium", CallingConvention = CC)] private static extern void FPDFText_GetRect(IntPtr textPage, int rectIndex, out double left, out double top, out double right, out double bottom);
+    [DllImport("pdfium", CallingConvention = CC)] private static extern float FPDF_GetPageHeightF(IntPtr page);
+    [DllImport("pdfium", CallingConvention = CC)] private static extern float FPDF_GetPageWidthF(IntPtr page);
+
+    // pageIndex 上の query 最初のヒットの矩形群を、ページ寸法に対する正規化座標 (0..1, 左上原点)
+    // で [x,y,w,h, x,y,w,h, ...] で返す (複数行なら複数矩形)。無ければ空配列。
+    // 正規化なので呼び側でページ画像の表示寸法を掛ければよい (DPI/メタデータ非依存)。
+    public static double[] MatchRects(byte[] bytes, int pageIndex, string query)
+    {
+        if (bytes == null || bytes.Length == 0 || string.IsNullOrEmpty(query)) return Array.Empty<double>();
+        lock (_lock)
+        {
+            if (!_init) { FPDF_InitLibrary(); _init = true; }
+            var pin = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+            IntPtr doc = IntPtr.Zero, page = IntPtr.Zero, tp = IntPtr.Zero, sh = IntPtr.Zero;
+            try
+            {
+                doc = FPDF_LoadMemDocument(pin.AddrOfPinnedObject(), bytes.Length, IntPtr.Zero);
+                if (doc == IntPtr.Zero) return Array.Empty<double>();
+                page = FPDF_LoadPage(doc, pageIndex);
+                if (page == IntPtr.Zero) return Array.Empty<double>();
+                tp = FPDFText_LoadPage(page);
+                if (tp == IntPtr.Zero) return Array.Empty<double>();
+                sh = FPDFText_FindStart(tp, ToUtf16(query), 0, 0);
+                if (sh == IntPtr.Zero || !FPDFText_FindNext(sh)) return Array.Empty<double>();
+                int start = FPDFText_GetSchResultIndex(sh);
+                int cnt = FPDFText_GetSchCount(sh);
+                int nr = FPDFText_CountRects(tp, start, cnt);
+                double pw = FPDF_GetPageWidthF(page);
+                double ph = FPDF_GetPageHeightF(page);   // 点 (1/72in)。PDF は原点が左下。
+                if (pw <= 0 || ph <= 0) return Array.Empty<double>();
+                var outv = new List<double>(nr * 4);
+                for (int i = 0; i < nr; i++)
+                {
+                    FPDFText_GetRect(tp, i, out double l, out double t, out double r, out double b);
+                    outv.Add(l / pw);                 // x 比
+                    outv.Add((ph - t) / ph);          // y 比 (上下反転: top が大きい y)
+                    outv.Add((r - l) / pw);           // w 比
+                    outv.Add((t - b) / ph);           // h 比
+                }
+                return outv.ToArray();
+            }
+            finally
+            {
+                if (sh != IntPtr.Zero) FPDFText_FindClose(sh);
+                if (tp != IntPtr.Zero) FPDFText_ClosePage(tp);
+                if (page != IntPtr.Zero) FPDF_ClosePage(page);
+                if (doc != IntPtr.Zero) FPDF_CloseDocument(doc);
+                pin.Free();
+            }
+        }
+    }
 
     // query を含むページの 0-based index 配列を返す (大文字小文字無視・出現順)。
     // FPDF_LoadMemDocument はバッファを参照し続けるので、doc を閉じるまで byte[] を pin し続ける。

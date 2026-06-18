@@ -1043,6 +1043,8 @@ Avalonia Bitmap は Skia の非マネージドメモリを抱えるので必ず 
            cmd-bar cmd-input cmd-list cmd-prompt         ; : コマンドバー / 検索バー (#23)
            (cmd-matches nil) (cmd-mode :command)         ; cmd-mode = :command / :search
            (search-matches nil) (search-index 0)         ; / 全文検索: ヒットページ index リスト (#23)
+           (search-query nil) (search-hl nil)            ; 検索語 / ハイライト矩形 (overlay)
+           (page-offsets nil)                            ; 現在見開きの page→(xoff yoff) (ハイライト配置用)
            menu)                        ; メニューバー (#21; 全画面時に隠す)
 
 (defun %reopen (vw)
@@ -1208,12 +1210,15 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
              (pages (aref spreads si))
              (li (viewer-left-img vw))
              (ri (viewer-right-img vw)))
+        (%clear-highlights vw)                ; ページが変わるので前の検索ハイライトを消す
+        (setf (viewer-page-offsets vw) nil)
         (if (= (length pages) 1)
             (let ((bmp (%page-bitmap vw (first pages))))
               (multiple-value-bind (w h) (if bmp (%bmp-size bmp) (values 0d0 0d0))
                 (%canvas-place li bmp 0d0 0d0)
                 (dotnet:invoke ri "set_IsVisible" nil)
-                (setf (viewer-content-w vw) w (viewer-content-h vw) h)))
+                (setf (viewer-content-w vw) w (viewer-content-h vw) h)
+                (setf (viewer-page-offsets vw) (list (list (first pages) 0d0 0d0 w h)))))
             (destructuring-bind (lo hi) pages
               ;; rtl(右開き): 下位 index=lo を右に、hi を左に。ltr は逆。
               (let* ((left-page  (if (eq *page-direction* :rtl) hi lo))
@@ -1226,7 +1231,10 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
                       (%canvas-place li lb 0d0 (/ (- ch lh) 2d0))
                       (%canvas-place ri rb lw  (/ (- ch rh) 2d0))
                       (setf (viewer-content-w vw) (+ lw rw)
-                            (viewer-content-h vw) ch)))))))
+                            (viewer-content-h vw) ch)
+                      (setf (viewer-page-offsets vw)
+                            (list (list left-page  0d0 (/ (- ch lh) 2d0) lw lh)
+                                  (list right-page lw  (/ (- ch rh) 2d0) rw rh)))))))))
         (%apply-fit vw)))))
 
 (defun %update-title (vw)
@@ -1774,7 +1782,7 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
           (mapcar #'cdr (stable-sort (nreverse scored) #'< :key #'car))))))
 
 ;;; / 全文検索 (#23)。pdf は本文 (PdfText/FPDFText)、他はページ名で。n/N でヒット間を巡回。
-(defun %int-array->list (arr)
+(defun %array->list (arr)
   (when arr
     (loop for i from 0 below (dotnet:invoke arr "get_Length")
           collect (dotnet:invoke arr "GetValue" i))))
@@ -1782,7 +1790,7 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
 (defgeneric book-search (book query)
   (:documentation "QUERY を含むページの 0-based index リスト (出現順)。"))
 (defmethod book-search ((b pdf-book) query)
-  (%int-array->list (dotnet:invoke (pdfb-doc b) "SearchPages" query)))
+  (%array->list (dotnet:invoke (pdfb-doc b) "SearchPages" query)))
 (defmethod book-search ((b t) query)
   ;; pdf 以外はページ名 (ファイル名) の部分一致 (大小無視)。
   (let ((q (string-downcase query)) (acc '()))
@@ -1797,9 +1805,10 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
          ;; バーを開いた / (や : ) が先頭に入り込むので除去 (vi の /word 習慣にも合う)。
          (q (string-trim '(#\Space #\/ #\:) (or query "")))
          (ms (and book (plusp (length q)) (ignore-errors (book-search book q)))))
-    (setf (viewer-search-matches vw) ms (viewer-search-index vw) 0)
+    (setf (viewer-search-matches vw) ms (viewer-search-index vw) 0 (viewer-search-query vw) q)
     (if ms
-        (%jump-to-page vw (first ms))          ; show-spread→%update-title が件数込みで表示
+        (progn (%jump-to-page vw (first ms))   ; show-spread→%update-title が件数込みで表示
+               (%highlight-match vw))
         (progn (%update-title vw)
                (dotnet:invoke (viewer-window vw) "set_Title"
                               (format nil "検索: 「~a」 見つかりません" q))))))
@@ -1809,7 +1818,45 @@ count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
   (let ((ms (viewer-search-matches vw)))
     (when ms
       (setf (viewer-search-index vw) (mod (+ (viewer-search-index vw) dir) (length ms)))
-      (%jump-to-page vw (nth (viewer-search-index vw) ms)))))
+      (%jump-to-page vw (nth (viewer-search-index vw) ms))
+      (%highlight-match vw))))
+
+(defun %clear-highlights (vw)
+  "重ねた検索ハイライト矩形を stage canvas から除去。"
+  (let ((hl (viewer-search-hl vw)))
+    (when hl
+      (let ((canvas (ignore-errors (dotnet:invoke (viewer-left-img vw) "get_Parent"))))
+        (when canvas
+          (let ((children (dotnet:invoke canvas "get_Children")))
+            (dolist (r hl) (ignore-errors (dotnet:invoke children "Remove" r))))))
+      (setf (viewer-search-hl vw) nil))))
+
+(defun %highlight-match (vw)
+  "現在のヒットページの一致矩形 (正規化) をページ表示寸法で展開し、stage に半透明黄で重ねる。
+pdf-book のみ (page-name 検索の他形式は矩形なし)。"
+  (%clear-highlights vw)
+  (let ((ms (viewer-search-matches vw))
+        (book (viewer-book vw))
+        (q (viewer-search-query vw)))
+    (when (and ms q (typep book 'pdf-book))
+      (let* ((page (nth (viewer-search-index vw) ms))
+             (lay (assoc page (viewer-page-offsets vw)))
+             (canvas (ignore-errors (dotnet:invoke (viewer-left-img vw) "get_Parent"))))
+        (when (and lay canvas)
+          (destructuring-bind (xoff yoff w h) (cdr lay)
+            (let ((coords (%array->list (dotnet:invoke (pdfb-doc book) "MatchRects" page q)))
+                  (children (dotnet:invoke canvas "get_Children")))
+              (loop for (rx ry rw rh) on coords by #'cddddr while rh do
+                (let ((rect (dotnet:new "Avalonia.Controls.Shapes.Rectangle")))
+                  (dotnet:invoke rect "set_Width"  (coerce (* rw w) 'double-float))
+                  (dotnet:invoke rect "set_Height" (coerce (* rh h) 'double-float))
+                  (dotnet:invoke rect "set_Fill" (dotnet:static "Avalonia.Media.Brushes" "Yellow"))
+                  (dotnet:invoke rect "set_Opacity" 0.5d0)
+                  (dotnet:invoke rect "set_IsHitTestVisible" nil)
+                  (dotnet:static "Avalonia.Controls.Canvas" "SetLeft" rect (coerce (+ xoff (* rx w)) 'double-float))
+                  (dotnet:static "Avalonia.Controls.Canvas" "SetTop"  rect (coerce (+ yoff (* ry h)) 'double-float))
+                  (dotnet:invoke children "Add" rect)
+                  (push rect (viewer-search-hl vw)))))))))))
 
 (defun %palette-row (c)
   "候補1行: 「ラベル  名前  [キー]」(タイプすべき名前が分かるように)。"
