@@ -1474,6 +1474,20 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
 
 (defun %command (id) (find id *commands* :key #'command-id))
 
+;;; メニュー構成 (#26): メニュー/コンテキストメニューの単一の出どころ。
+;;; (group-key  メニュータイトル  コマンドid...) の順序付きリスト。ここを編集すれば
+;;; メニューが変わる (手書きの %build-menu との二重管理を解消)。未掲載のコマンド
+;;; (reading-fwd/bwd, escape 等の内部操作) はメニューに出さない。
+(defparameter *command-menu*
+  '((:file "ファイル" :open-file :open-folder :settings :quit)
+    (:view "表示"    :fullscreen :fit :fit-mode :spread :direction :recursive
+                     :browse-pane :thumb-pane :clip-pane)
+    (:jump "移動"    :first-spread :prev-spread :next-spread :last-spread :goto
+                     :prev-bookmark :next-bookmark)
+    (:tool "ツール"  :palette :search :toc)
+    (:clip "素材"    :clip-add :export :bookmark))
+  "メニュー構成。group ごとに submenu を作り該当コマンドを並べる。")
+
 ;;; キー割当 (#10 段階2): ユーザ上書きを *keybinds* に持ち、無いコマンドは既定キー。
 ;;; *keymap* (キー名→id) はそこから構築。keymap.lisp に永続化 (設定ウィンドウで編集)。
 (defparameter *keybinds* nil
@@ -2458,20 +2472,28 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
          (header (if k (format nil "~a (~a)" (command-label c) k) (command-label c))))
     (%menu-add parent (%menu-item vw header (lambda () (%run-command vw id))))))
 
+(defun %add-menu-groups (vw container)
+  "CONTAINER (Menu / ContextMenu) に *command-menu* の順でグループ submenu を追加し、
+各グループに該当コマンドを %menu-cmd で並べる (メニュー/コンテキスト共通; #26)。"
+  (let ((items (dotnet:invoke container "get_Items")))
+    (dolist (g *command-menu*)
+      (destructuring-bind (gkey title &rest ids) g
+        (declare (ignore gkey))
+        (let ((sub (%menu-item vw title)) (any nil))
+          (dolist (id ids) (when (%command id) (%menu-cmd vw sub id) (setf any t)))
+          (when any (dotnet:invoke items "Add" sub)))))))
+
 (defun %build-menu (vw win)
   (declare (ignore win))   ; 開く系コマンドは (viewer-window vw) を owner に使う
-  (let ((menu   (dotnet:new "Avalonia.Controls.Menu"))
-        (m-file (%menu-item vw "ファイル"))
-        (m-view (%menu-item vw "表示"))
-        (m-clip (%menu-item vw "素材")))
-    (dolist (id '(:open-file :open-folder :settings :quit)) (%menu-cmd vw m-file id))
-    (dolist (id '(:fullscreen :spread :direction :recursive :fit :fit-mode :browse-pane :thumb-pane :clip-pane)) (%menu-cmd vw m-view id))
-    (dolist (id '(:export)) (%menu-cmd vw m-clip id))
-    (let ((items (dotnet:invoke menu "get_Items")))
-      (dotnet:invoke items "Add" m-file)
-      (dotnet:invoke items "Add" m-view)
-      (dotnet:invoke items "Add" m-clip))
+  (let ((menu (dotnet:new "Avalonia.Controls.Menu")))
+    (%add-menu-groups vw menu)
     menu))
+
+(defun %build-context-menu (vw)
+  "ビューポート右クリック用。メニューと同じ *command-menu* 定義から作る (#26)。"
+  (let ((cm (dotnet:new "Avalonia.Controls.ContextMenu")))
+    (%add-menu-groups vw cm)
+    cm))
 
 (defun build-main-window ()
   "現在の *target-path* の本を開き、見開き対応の Avalonia Window を返す
@@ -2610,6 +2632,7 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
                                                  (dotnet:static "Avalonia.Media.Brushes"
                                                                 (if on "SteelBlue" "DimGray"))))))
         ;; メニューバー (#21): Window.Content を DockPanel [Menu(Top) | root] に包む。
+        (dotnet:invoke vport "set_ContextMenu" (%build-context-menu vw))   ; 右クリックメニュー (#26)
         (let ((dock (dotnet:new "Avalonia.Controls.DockPanel"))
               (menu (%build-menu vw win)))
           (setf (viewer-menu vw) menu)
