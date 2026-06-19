@@ -706,6 +706,97 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
   (when (dotnet:invoke (viewer-clip-pane vw) "get_IsVisible") (%rebuild-clip-pane vw)))
 
 ;;; ------------------------------------------------------------------
+;;; ドラッグ&ドロップ (#302): C# シム (Paalam.DragDropHelper) を剥がし Lisp 直叩き。
+;;; Avalonia 12 の DnD は IDataTransfer + DataFormat。ルーテッドイベントは静的
+;;; RoutedEvent フィールド (DragDrop.DropEvent 等) を読み、EventHandler<DragEventArgs>
+;;; デリゲートで AddHandler 購読する。ファイル取り出し/パス化は静的拡張メソッド
+;;; (DataTransferExtensions / StorageProviderExtensions) を直叩き。
+;;; ------------------------------------------------------------------
+
+(defun %dnd-has-files (e)
+  "DragEventArgs e がファイルを含むか (DataTransferExtensions.Contains(_, DataFormat.File))。"
+  (handler-case
+      (let ((dt (dotnet:invoke e "get_DataTransfer")))
+        (and dt
+             (dotnet:static "Avalonia.Input.DataTransferExtensions" "Contains"
+                            dt (dotnet:static "Avalonia.Input.DataFormat" "get_File"))
+             t))
+    (error (err) (log-err "dnd-has-files" err) nil)))
+
+(defun %dnd-paths (e)
+  "DragEventArgs e からドロップされたローカルパスのリストを取り出す。"
+  (handler-case
+      (let ((dt (dotnet:invoke e "get_DataTransfer"))
+            (paths '()))
+        (when dt
+          (let ((files (dotnet:static "Avalonia.Input.DataTransferExtensions" "TryGetFiles" dt)))
+            (when files
+              (let ((en (dotnet:invoke files "GetEnumerator")))
+                (loop while (dotnet:invoke en "MoveNext")
+                      do (let* ((item (dotnet:invoke en "get_Current"))
+                                (p (and item (dotnet:static
+                                              "Avalonia.Platform.Storage.StorageProviderExtensions"
+                                              "TryGetLocalPath" item))))
+                           (when (and p (> (length p) 0)) (push p paths))))))))
+        (nreverse paths))
+    (error (err) (log-err "dnd-paths" err) nil)))
+
+(defun %dnd-add-handler (target event-name handler &optional handled-too)
+  "target (Interactive) の静的 RoutedEvent (DragDrop の event-name フィールド) に
+handler=(lambda (sender args)) を購読。
+AddHandler(RoutedEvent, EventHandler<DragEventArgs>, RoutingStrategies, bool)。"
+  ;; 構築済みジェネリック デリゲート型は型引数を [[Type, Assembly]] と
+  ;; アセンブリ修飾しないと dotcl が解決できない (単純 [Type] は corelib 型のみ; #302)。
+  (dotnet:invoke target "AddHandler"
+                 (dotnet:static "Avalonia.Input.DragDrop" event-name)
+                 (dotnet:make-delegate
+                  "System.EventHandler`1[[Avalonia.Input.DragEventArgs, Avalonia.Base]]"
+                  handler)
+                 "Direct, Bubble"
+                 (and handled-too t)))
+
+(defun %dnd-set-effect (e has)
+  (dotnet:invoke e "set_DragEffects"
+                 (dotnet:static "Avalonia.Input.DragDropEffects" (if has "Copy" "None"))))
+
+(defun %dnd-enable (win on-drop on-highlight)
+  "ウィンドウへ本ファイルの DnD を配線。on-drop=(lambda (path))、on-highlight=(lambda (bool))。
+ファイルが来たら Copy エフェクト、ドロップで先頭パスを on-drop に渡す。"
+  (dotnet:static "Avalonia.Input.DragDrop" "SetAllowDrop" win t)
+  (%dnd-add-handler win "DragOverEvent"
+                    (lambda (s e) (declare (ignore s))
+                      (let ((has (%dnd-has-files e)))
+                        (%dnd-set-effect e has)
+                        (funcall on-highlight has))))
+  (%dnd-add-handler win "DragLeaveEvent"
+                    (lambda (s e) (declare (ignore s e)) (funcall on-highlight nil)))
+  (%dnd-add-handler win "DropEvent"
+                    (lambda (s e) (declare (ignore s))
+                      (funcall on-highlight nil)
+                      (let ((paths (%dnd-paths e)))
+                        (when paths (funcall on-drop (first paths)))))))
+
+(defun %dnd-enable-clip (pane on-drop on-highlight)
+  "素材ペインへ DnD を配線。落ちた全パスを on-drop に渡し、e.Handled=t で
+ウィンドウ側の「本を開く」DnD と区別する。"
+  (dotnet:static "Avalonia.Input.DragDrop" "SetAllowDrop" pane t)
+  (%dnd-add-handler pane "DragOverEvent"
+                    (lambda (s e) (declare (ignore s))
+                      (let ((has (%dnd-has-files e)))
+                        (%dnd-set-effect e has)
+                        (funcall on-highlight has)
+                        (dotnet:invoke e "set_Handled" t))))
+  (%dnd-add-handler pane "DragLeaveEvent"
+                    (lambda (s e) (declare (ignore s))
+                      (funcall on-highlight nil)
+                      (dotnet:invoke e "set_Handled" t)))
+  (%dnd-add-handler pane "DropEvent"
+                    (lambda (s e) (declare (ignore s))
+                      (funcall on-highlight nil)
+                      (dolist (p (%dnd-paths e)) (funcall on-drop p))
+                      (dotnet:invoke e "set_Handled" t))))
+
+;;; ------------------------------------------------------------------
 ;;; ページサムネ本棚 (#6 A): サイドペインに現在の本の全ページを縮小サムネで並べ、
 ;;; クリックでそのページへジャンプ。サムネは DecodeToWidth で縮小デコード (全ページ分
 ;;; フル Bitmap を抱えないため)。背景スレッドで非同期ロードして後から差し込む。
@@ -2885,14 +2976,12 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
         (setf (viewer-clip-pane vw) pane (viewer-clip-stack vw) stack
               (viewer-dnd-overlay vw) overlay)
         ;; ペインへの DnD で素材追加 (#18 Phase 2b)。DnD 中はペイン背景を強調 (#20)。
-        (dotnet:static "Paalam.DragDropHelper" "EnableClipDrop" pane
-                       (dotnet:make-delegate "System.Action`1[System.String]"
-                                             (lambda (p) (%clip-drop vw p)))
-                       (dotnet:make-delegate "System.Action`1[System.Boolean]"
-                                             (lambda (on)
-                                               (dotnet:invoke pane "set_Background"
-                                                 (dotnet:static "Avalonia.Media.Brushes"
-                                                                (if on "SteelBlue" "DimGray"))))))
+        (%dnd-enable-clip pane
+                          (lambda (p) (%clip-drop vw p))
+                          (lambda (on)
+                            (dotnet:invoke pane "set_Background"
+                                           (dotnet:static "Avalonia.Media.Brushes"
+                                                          (if on "SteelBlue" "DimGray")))))
         ;; メニューバー (#21): Window.Content を DockPanel [Menu(Top) | root] に包む。
         (dotnet:invoke vport "set_ContextMenu" (%build-context-menu vw))   ; 右クリックメニュー (#26)
         (let ((dock (dotnet:new "Avalonia.Controls.DockPanel"))
@@ -2933,11 +3022,9 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
                           (book-close book)))
       ;; ドラッグ&ドロップで別の本を開く (#19)。配線は C# シムに封じ込め。
       ;; DnD 中はウィンドウ全面にハイライト枠を出す (#20)。
-      (dotnet:static "Paalam.DragDropHelper" "Enable" win
-                     (dotnet:make-delegate "System.Action`1[System.String]"
-                                           (lambda (p) (open-path vw p)))
-                     (dotnet:make-delegate "System.Action`1[System.Boolean]"
-                                           (lambda (on) (dotnet:invoke (viewer-dnd-overlay vw) "set_IsVisible" (and on t)))))
+      (%dnd-enable win
+                   (lambda (p) (open-path vw p))
+                   (lambda (on) (dotnet:invoke (viewer-dnd-overlay vw) "set_IsVisible" (and on t))))
       ;; 先読みローダーを起動 (vw を closure で参照するので vw 作成後)。
       (setf (viewer-loader vw)
             (open-loader path
