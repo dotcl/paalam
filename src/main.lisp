@@ -755,6 +755,19 @@ AddHandler(RoutedEvent, EventHandler<DragEventArgs>, RoutingStrategies, bool)。
                  "Direct, Bubble"
                  (and handled-too t)))
 
+(defun %add-pressed-tunnel (target handler)
+  "PointerPressed を Tunnel + handledEventsToo で購読 (handler=(lambda (sender args)))。
+TreeViewItem 等が選択処理で PointerPressed を Handled にしても先に受け取れる
+(intra-app ドラッグ開始トリガ用; #32)。CLR の += (add-event) は handledEventsToo=false
+なので捕捉済みイベントを取りこぼす。"
+  (dotnet:invoke target "AddHandler"
+                 (dotnet:static "Avalonia.Input.InputElement" "PointerPressedEvent")
+                 (dotnet:make-delegate
+                  "System.EventHandler`1[[Avalonia.Input.PointerPressedEventArgs, Avalonia.Base]]"
+                  handler)
+                 "Tunnel"
+                 t))
+
 (defun %dnd-set-effect (e has)
   (dotnet:invoke e "set_DragEffects"
                  (dotnet:static "Avalonia.Input.DragDropEffects" (if has "Copy" "None"))))
@@ -2735,20 +2748,31 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
       (let ((j (+ pos dir)))
         (when (and (>= j 0) (< j (length v))) (rotatef (nth pos v) (nth j v)))))
     v))
+(defun %insert-before (ids item before)
+  "IDS に ITEM を BEFORE の直前へ挿入した新リスト (BEFORE 不在なら末尾)。
+ITEM は呼び側で除去済み前提 (重複は作らない)。"
+  (if (member before ids)
+      (loop for x in ids
+            when (eql x before) collect item
+            collect x)
+      (append ids (list item))))
 (defun %menu-norm (menu)   ; (gkey title id...) → (gkey title (id...)) 編集用コピー
   (mapcar (lambda (g) (list (first g) (second g) (copy-list (cddr g)))) menu))
 (defun %menu-denorm (menu) ; 逆変換
   (mapcar (lambda (g) (list* (first g) (second g) (third g))) menu))
 
 (defun %open-menu-editor (vw)
-  "メニュー構成の編集ウィンドウ (#32: NeeView 流 TreeView + 右クリック操作)。
-グループ=展開ノード / コマンド=子。項目を右クリックで 上へ/下へ/削除/別グループへ、
-グループに「コマンドを追加」。OK で *command-menu* を menu.lisp に保存し即反映。
-(ドラッグ&ドロップは Avalonia RoutedEvent 購読 = dotcl #302 待ちで #32 に残置。)"
+  "メニュー構成の編集ウィンドウ (#32: NeeView 流 TreeView + ドラッグ&ドロップ + 右クリック)。
+グループ=展開ノード / コマンド=子。コマンドをドラッグして別コマンド上に落とすとその直前へ、
+グループ見出しに落とすとそのグループ末尾へ移動 (Avalonia intra-app DnD)。右クリックで
+上へ/下へ/削除/別グループへ・グループに「コマンドを追加」。OK で *command-menu* を
+menu.lisp に保存し即反映。"
   (let* ((owner (viewer-window vw))
          (w    (dotnet:new "Avalonia.Controls.Window"))
          (tree (dotnet:new "Avalonia.Controls.TreeView"))
-         (mbox (list (%menu-norm *command-menu*))))
+         (mbox (list (%menu-norm *command-menu*)))
+         (dstate (list nil))     ; ドラッグ中のコマンド (cons gk id)
+         (dragging (list nil)))  ; 多重開始防止
     (labels
         ((groups () (car mbox))
          (upd (gk fn)
@@ -2773,6 +2797,63 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
                                    (t g)))
                            (groups)))
              (refresh)))
+         ;; --- ドラッグ&ドロップ並べ替え (#32, Avalonia intra-app DnD) ---
+         (drop-on-cmd (tgt-gk tgt-id)   ; コマンド行に落とす = その直前へ
+           (let ((src (car dstate)))
+             (when src
+               (let ((sgk (car src)) (sid (cdr src)))
+                 (unless (and (eq sgk tgt-gk) (eql sid tgt-id))
+                   (setf (car mbox)
+                         (mapcar (lambda (g)
+                                   (let ((k (first g)) (ids (third g)))
+                                     (cond
+                                       ((and (eq k sgk) (eq k tgt-gk))
+                                        (list k (second g) (%insert-before (remove sid ids) sid tgt-id)))
+                                       ((eq k sgk)    (list k (second g) (remove sid ids)))
+                                       ((eq k tgt-gk) (list k (second g) (%insert-before ids sid tgt-id)))
+                                       (t g))))
+                                 (groups)))
+                   (refresh))))
+             (setf (car dstate) nil)))
+         (drop-on-grp (tgt-gk)          ; グループ見出しに落とす = 末尾へ移動
+           (let ((src (car dstate)))
+             (when src (move-to-group (car src) (cdr src) tgt-gk)))
+           (setf (car dstate) nil))
+         (left-pressed (item e)         ; その PointerPressed は左ボタンか
+           (let ((props (dotnet:invoke (dotnet:invoke e "GetCurrentPoint" item) "get_Properties")))
+             (dotnet:invoke props "get_IsLeftButtonPressed")))
+         (start-drag (item gk id e)     ; 生きた PointerPressedEventArgs でその場でドラッグ開始
+           ;; TreeViewItem は押下でポインタを捕捉するため PointerMoved 遅延開始は不可。
+           ;; DoDragDropAsync は移動が無ければ何も起きない (純クリックは安全)。
+           (unless (car dragging)
+             (setf (car dragging) t (car dstate) (cons gk id))
+             (let ((dt (dotnet:new "Avalonia.Input.DataTransfer")))
+               (dotnet:invoke dt "Add"
+                              (dotnet:static "Avalonia.Input.DataTransferItem" "CreateText" "paalam-menu"))
+               (handler-case
+                   (dotnet:static "Avalonia.Input.DragDrop" "DoDragDropAsync"
+                                  e dt (dotnet:static "Avalonia.Input.DragDropEffects" "Move"))
+                 (error (err) (log-err "menu-dnd" err))))
+             (setf (car dragging) nil (car dstate) nil)))
+         (setup-drag (item gk id)       ; コマンド行をドラッグ元に (左押下で開始)
+           ;; Tunnel+handledEventsToo: TreeViewItem の選択処理に PointerPressed を
+           ;; 食われる前に取る (CLR += では取りこぼす)。
+           (%add-pressed-tunnel item
+                                (lambda (s e) (declare (ignore s))
+                                  (when (left-pressed item e) (start-drag item gk id e)))))
+         (setup-drop (item on-drop)     ; ドロップ先 (コマンド行/グループ見出し)
+           (dotnet:static "Avalonia.Input.DragDrop" "SetAllowDrop" item t)
+           (%dnd-add-handler item "DragOverEvent"
+                             (lambda (s e) (declare (ignore s))
+                               (dotnet:invoke e "set_DragEffects"
+                                              (dotnet:static "Avalonia.Input.DragDropEffects" "Move"))
+                               (dotnet:invoke e "set_Handled" t))
+                             t)
+           (%dnd-add-handler item "DropEvent"
+                             (lambda (s e) (declare (ignore s))
+                               (funcall on-drop)
+                               (dotnet:invoke e "set_Handled" t))
+                             t))
          (mkmi (header thunk)            ; Click する MenuItem
            (let ((m (dotnet:new "Avalonia.Controls.MenuItem")))
              (dotnet:invoke m "set_Header" header)
@@ -2805,15 +2886,19 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
            (let ((items (dotnet:invoke tree "get_Items")))
              (dotnet:invoke items "Clear")
              (dolist (g (groups))
-               (let ((gi (dotnet:new "Avalonia.Controls.TreeViewItem")))
+               (let ((gi (dotnet:new "Avalonia.Controls.TreeViewItem"))
+                     (gk (first g)))
                  (dotnet:invoke gi "set_Header" (format nil "~a (~d)" (second g) (length (third g))))
                  (dotnet:invoke gi "set_IsExpanded" t)
-                 (dotnet:invoke gi "set_ContextMenu" (grp-ctx (first g)))
+                 (dotnet:invoke gi "set_ContextMenu" (grp-ctx gk))
+                 (setup-drop gi (let ((k gk)) (lambda () (drop-on-grp k))))  ; グループ末尾へ
                  (let ((gci (dotnet:invoke gi "get_Items")))
                    (dolist (id (third g))
                      (let ((ci (dotnet:new "Avalonia.Controls.TreeViewItem")) (c (%command id)))
                        (dotnet:invoke ci "set_Header" (if c (command-label c) (format nil "~a" id)))
-                       (dotnet:invoke ci "set_ContextMenu" (cmd-ctx (first g) id))
+                       (dotnet:invoke ci "set_ContextMenu" (cmd-ctx gk id))
+                       (setup-drag ci gk id)
+                       (setup-drop ci (let ((k gk) (i id)) (lambda () (drop-on-cmd k i))))
                        (dotnet:invoke gci "Add" ci))))
                  (dotnet:invoke items "Add" gi))))))
       (refresh)
@@ -2829,7 +2914,7 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
                        (lambda ()
                          (setf *command-menu* (%menu-denorm (groups)))
                          (save-menu) (%rebuild-menus vw) (dotnet:invoke w "Close")))))
-        (dotnet:invoke hint "set_Text" "項目を右クリックで操作 (上へ/下へ/削除/別グループへ・グループに追加)")
+        (dotnet:invoke hint "set_Text" "ドラッグで並べ替え (コマンド上=直前へ / グループ見出し=末尾へ)。右クリックで上へ/下へ/削除/別グループへ・追加")
         (dotnet:invoke hint "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 0d0 0d0 8d0))
         (dotnet:invoke btns "set_Orientation" (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
         (dotnet:invoke btns "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 12d0 0d0 0d0))
