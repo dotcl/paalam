@@ -1813,9 +1813,12 @@ g/G: [count]g=count ページ目 / gg=先頭 / G(Shift)=末尾 / g 単独=次の
 (defvar *target-path* nil
   "RUN-PAALAM が受け取った対象パス (App は Avalonia が生成するので global で渡す)。")
 
-(defvar *viewer* nil
-  "現在のメイン viewer。macOS の Finder「開く」(IActivatableLifetime) で
-ファイルが来たとき、起動済みならこの viewer を差し替えるために保持する。")
+(defvar *viewers* nil
+  "開いている全ウィンドウの viewer リスト。build-main-window で push、
+ウィンドウ Closed で remove する。macOS の Finder「開く」(IActivatableLifetime)
+で起動済みのとき、新しいファイルを別ウィンドウで開くか (空なら *target-path* に積む)
+の判定に使う。Windows/Linux は OS がファイル毎に別プロセスを起動するので、
+この activation 経路は通らず実質 macOS 専用。")
 
 (defun %resolve-path (path)
   "対象パスを決める。指定が無ければ nil を返す (= 本を開かず空の窓を出す)。
@@ -2930,10 +2933,11 @@ menu.lisp に保存し即反映。"
       (dotnet:invoke w "set_WindowStartupLocation" (dotnet:static "Avalonia.Controls.WindowStartupLocation" "CenterOwner"))
       (dotnet:invoke w "ShowDialog" owner))))
 
-(defun build-main-window ()
-  "現在の *target-path* の本を開き、見開き対応の Avalonia Window を返す
-(呼び出しスレッド上で構築)。2 列 Grid に 2 枚の Image を中央で突き合わせる。"
-  (multiple-value-bind (book start) (open-book (%resolve-path *target-path*))
+(defun build-main-window (&optional (target *target-path*))
+  "TARGET (既定 *target-path*) の本を開き、見開き対応の Avalonia Window を返す
+(呼び出しスレッド上で構築)。2 列 Grid に 2 枚の Image を中央で突き合わせる。
+TARGET を引数化したので open-in-new-window から任意パスで別ウィンドウを作れる。"
+  (multiple-value-bind (book start) (open-book (%resolve-path target))
     (setf *page-direction* (%book-direction book))   ; 種類で綴じ方向 (#33)
     (let* ((win   (dotnet:new "Avalonia.Controls.Window"))
            (vport (dotnet:new "Avalonia.Controls.Border"))   ; クリップ用ビューポート
@@ -2945,7 +2949,7 @@ menu.lisp に保存し即反映。"
            (trans (dotnet:new "Avalonia.Media.TranslateTransform"))
            (grp   (dotnet:new "Avalonia.Media.TransformGroup"))
            (spreads (compute-spreads (book-page-count book)))
-           (path  (%resolve-path *target-path*))
+           (path  (%resolve-path target))
            ;; 履歴があればそのページから再開 (#7)。
            (start2 (let ((r (history-page path)))
                      (if r (max 0 (min r (1- (book-page-count book)))) start)))
@@ -3104,7 +3108,10 @@ menu.lisp に保存し即反映。"
                         (lambda (s e) (declare (ignore s e))
                           (ignore-errors (save-history))   ; 最終ページを永続化 (#7)
                           (ignore-errors (loader-stop (viewer-loader vw)))
-                          (book-close book)))
+                          ;; open-path で差し替え後も「現在の本」を閉じる (初期 book ではなく)。
+                          (ignore-errors (book-close (viewer-book vw)))
+                          ;; マルチウィンドウ: この viewer をリストから外す。
+                          (setf *viewers* (remove vw *viewers*))))
       ;; ドラッグ&ドロップで別の本を開く (#19)。配線は C# シムに封じ込め。
       ;; DnD 中はウィンドウ全面にハイライト枠を出す (#20)。
       (%dnd-enable win
@@ -3116,8 +3123,29 @@ menu.lisp に保存し即反映。"
                          (lambda (index)
                            (%ui-post (lambda () (%on-page-loaded vw index))))))
       (show-spread vw)
-      (setf *viewer* vw)   ; Finder「開く」(activation) が差し替えに使う
+      (push vw *viewers*)   ; マルチウィンドウ: 開いている viewer を登録 (Closed で remove)
       win)))
+
+(defun open-in-new-window (path)
+  "PATH を新しいウィンドウで開く (UI スレッド上で呼ぶこと)。macOS の activation で
+2 個目以降のファイルを別ウィンドウに開くのに使う。初回ウィンドウは lifetime が
+set_MainWindow で表示するが、2 枚目以降は明示 Show が要る。"
+  (let ((win (build-main-window path)))
+    (dotnet:invoke win "Show")
+    win))
+
+(defun %activate-open (path)
+  "macOS の Finder「開く」/Dock ドロップで来た PATH を開く (UI スレッド上)。
+- まだ何も開いていない空ウィンドウ (viewer-source = nil) があれば、それを差し替える
+  (未起動→1ファイルで空窓+ファイル窓の2枚にならないように)。
+- 空ウィンドウが無ければ新しいウィンドウで開く (複数ファイルは1件ずつ来る)。
+- 初回 build 前 (*viewers* 空) なら *target-path* に積む (起動シーケンスが開く)。"
+  (cond
+    ((null *viewers*) (setf *target-path* path))
+    (t (let ((empty (find-if (lambda (vw) (null (viewer-source vw))) *viewers*)))
+         (if empty
+             (open-path empty path)
+             (open-in-new-window path))))))
 
 (defun %maybe-autoclose (life)
   "デバッグ用: PAALAM_DEBUG 有効時に限り DOTCL_AUTOCLOSE_MS (正の ms) 後に
@@ -3160,10 +3188,7 @@ lifetime.Shutdown する (起動確認の自動終了)。本番起動 (Finder/la
             (dotnet:static "Paalam.FileOpenHelper" "Enable" self
                            (dotnet:make-delegate "System.Action`1[System.String]"
                              (lambda (p)
-                               (%ui-post (lambda ()
-                                           (if *viewer*
-                                               (open-path *viewer* p)
-                                               (setf *target-path* p)))))))
+                               (%ui-post (lambda () (%activate-open p))))))
             (%maybe-autoclose life))
         (error (e) (log-err "init" e))))))
 
