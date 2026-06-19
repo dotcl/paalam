@@ -1528,6 +1528,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
    (make-command :open-file     "開く (ファイル)…" '()        (lambda (vw) (%open-file-dialog vw (viewer-window vw))))
    (make-command :open-folder   "開く (フォルダ)…" '()        (lambda (vw) (%open-folder-dialog vw (viewer-window vw))))
    (make-command :settings      "設定…"            '()        (lambda (vw) (%open-settings vw)))
+   (make-command :edit-menu     "メニュー編集…"    '()        '%open-menu-editor)
    (make-command :quit          "終了"             '("Q")     '%quit)
    (make-command :next-spread   "次の見開き"       '("PageDown" "Next" "Space" "J") '%next-spread)
    (make-command :prev-spread   "前の見開き"       '("PageUp" "Prior" "Back" "K")   '%prev-spread)
@@ -1567,7 +1568,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
 ;;; メニューが変わる (手書きの %build-menu との二重管理を解消)。未掲載のコマンド
 ;;; (reading-fwd/bwd, escape 等の内部操作) はメニューに出さない。
 (defparameter *command-menu*
-  '((:file "ファイル" :open-file :open-folder :settings :quit)
+  '((:file "ファイル" :open-file :open-folder :settings :edit-menu :quit)
     (:view "表示"    :fullscreen :fit :fit-mode :rotate-left :rotate-right :loupe :slideshow
                      :spread :direction :recursive
                      :browse-pane :thumb-pane :clip-pane)
@@ -1575,7 +1576,10 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
                      :prev-bookmark :next-bookmark)
     (:tool "ツール"  :palette :search :toc)
     (:clip "素材"    :clip-add :export :bookmark))
-  "メニュー構成。group ごとに submenu を作り該当コマンドを並べる。")
+  "メニュー構成。group ごとに submenu を作り該当コマンドを並べる。ユーザ編集で
+menu.lisp に永続化され差し替わる (#26)。")
+(defparameter *default-command-menu* (copy-tree *command-menu*)
+  "出荷時のメニュー構成 (編集の「既定に戻す」用)。")
 
 ;;; キー割当 (#10 段階2): ユーザ上書きを *keybinds* に持ち、無いコマンドは既定キー。
 ;;; *keymap* (キー名→id) はそこから構築。keymap.lisp に永続化 (設定ウィンドウで編集)。
@@ -1600,6 +1604,12 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
   (let ((d (%read-state "keymap.lisp"))) (when (listp d) (setf *keybinds* d)))
   (rebuild-keymap))
 (defun save-keybinds () (%write-state "keymap.lisp" *keybinds*))
+
+;;; メニュー構成の永続化 (#26)。menu.lisp があれば *command-menu* を差し替え。
+(defun load-menu ()
+  (let ((d (%read-state "menu.lisp")))
+    (when (and (consp d) (consp (car d))) (setf *command-menu* d))))
+(defun save-menu () (%write-state "menu.lisp" *command-menu*))
 
 (defun %command-primary-key (id)
   "ID の代表キー (メニュー表示用; 既定キー順を優先、無ければ keymap から拾う)。"
@@ -2596,6 +2606,115 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
     (%add-menu-groups vw cm)
     cm))
 
+(defun %rebuild-menus (vw)
+  "*command-menu* からメニューバーとコンテキストメニューを作り直す (#26 編集の即時反映)。"
+  (when (viewer-menu vw)
+    (dotnet:invoke (dotnet:invoke (viewer-menu vw) "get_Items") "Clear")
+    (%add-menu-groups vw (viewer-menu vw)))
+  (ignore-errors
+    (dotnet:invoke (viewer-viewport vw) "set_ContextMenu" (%build-context-menu vw))))
+
+;;; メニュー編集 (#26)。グループ内の並べ替え/削除/追加 → menu.lisp 永続化 + 即反映。
+(defun %shift-in-list (lst item dir)
+  "LST 内の ITEM を dir (-1 上 / +1 下) 方向に隣と入れ替えた新リスト。"
+  (let ((v (copy-list lst)) (pos (position item lst)))
+    (when pos
+      (let ((j (+ pos dir)))
+        (when (and (>= j 0) (< j (length v))) (rotatef (nth pos v) (nth j v)))))
+    v))
+(defun %menu-norm (menu)   ; (gkey title id...) → (gkey title (id...)) 編集用コピー
+  (mapcar (lambda (g) (list (first g) (second g) (copy-list (cddr g)))) menu))
+(defun %menu-denorm (menu) ; 逆変換
+  (mapcar (lambda (g) (list* (first g) (second g) (third g))) menu))
+
+(defun %open-menu-editor (vw)
+  "メニュー構成の編集ウィンドウ。グループ内の▲▼並べ替え/×削除、下で追加。OK で保存+反映。"
+  (let* ((owner (viewer-window vw))
+         (w     (dotnet:new "Avalonia.Controls.Window"))
+         (stack (dotnet:new "Avalonia.Controls.StackPanel"))
+         (scr   (dotnet:new "Avalonia.Controls.ScrollViewer"))
+         (cmd-combo (dotnet:new "Avalonia.Controls.ComboBox"))
+         (grp-combo (dotnet:new "Avalonia.Controls.ComboBox"))
+         (mbox  (list (%menu-norm *command-menu*))))
+    (labels
+        ((groups () (car mbox))
+         (upd (gk fn)   ; グループ gk の id-list を fn で置換した新 mbox
+           (setf (car mbox)
+                 (mapcar (lambda (g) (if (eq (first g) gk)
+                                         (list (first g) (second g) (funcall fn (third g))) g))
+                         (groups)))
+           (refresh))
+         (move-cmd (gk id dir) (upd gk (lambda (ids) (%shift-in-list ids id dir))))
+         (remove-cmd (gk id)   (upd gk (lambda (ids) (remove id ids))))
+         (add-cmd (gk id)      (upd gk (lambda (ids) (if (member id ids) ids (append ids (list id))))))
+         (cmd-row (gk id)
+           (let ((row (dotnet:new "Avalonia.Controls.DockPanel"))
+                 (up  (%s-button "▲" (lambda () (move-cmd gk id -1))))
+                 (dn  (%s-button "▼" (lambda () (move-cmd gk id 1))))
+                 (del (%s-button "×" (lambda () (remove-cmd gk id))))
+                 (lbl (dotnet:new "Avalonia.Controls.TextBlock"))
+                 (c   (%command id)))
+             (dotnet:invoke lbl "set_Text" (if c (command-label c) (format nil "~a" id)))
+             (dotnet:invoke lbl "set_Margin" (dotnet:new "Avalonia.Thickness" 8d0 0d0 0d0 0d0))
+             (dotnet:invoke lbl "set_VerticalAlignment" (dotnet:static "Avalonia.Layout.VerticalAlignment" "Center"))
+             (dolist (b (list up dn del))
+               (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" b (dotnet:static "Avalonia.Controls.Dock" "Left")))
+             (let ((rc (dotnet:invoke row "get_Children")))
+               (dotnet:invoke rc "Add" up) (dotnet:invoke rc "Add" dn)
+               (dotnet:invoke rc "Add" del) (dotnet:invoke rc "Add" lbl))
+             row))
+         (refresh ()
+           (let ((ch (dotnet:invoke stack "get_Children")))
+             (dotnet:invoke ch "Clear")
+             (dolist (g (groups))
+               (let ((hdr (dotnet:new "Avalonia.Controls.TextBlock")))
+                 (dotnet:invoke hdr "set_Text" (format nil "― ~a ―" (second g)))
+                 (dotnet:invoke hdr "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 8d0 0d0 2d0))
+                 (dotnet:invoke ch "Add" hdr))
+               (dolist (id (third g)) (dotnet:invoke ch "Add" (cmd-row (first g) id)))))))
+      (let ((items (dotnet:invoke cmd-combo "get_Items")))
+        (dolist (c *commands*) (dotnet:invoke items "Add" (command-label c))))
+      (dotnet:invoke cmd-combo "set_SelectedIndex" 0)
+      (let ((items (dotnet:invoke grp-combo "get_Items")))
+        (dolist (g (groups)) (dotnet:invoke items "Add" (second g))))
+      (dotnet:invoke grp-combo "set_SelectedIndex" 0)
+      (refresh)
+      (dotnet:invoke scr "set_Content" stack)
+      (dotnet:invoke scr "set_MaxHeight" 420d0)
+      (let* ((root (dotnet:new "Avalonia.Controls.StackPanel"))
+             (add-row (dotnet:new "Avalonia.Controls.StackPanel"))
+             (btns (dotnet:new "Avalonia.Controls.StackPanel"))
+             (add-btn (%s-button "＋ 追加"
+                        (lambda ()
+                          (let ((ci (dotnet:invoke cmd-combo "get_SelectedIndex"))
+                                (gi (dotnet:invoke grp-combo "get_SelectedIndex")))
+                            (when (and (>= ci 0) (>= gi 0))
+                              (add-cmd (first (nth gi (groups))) (command-id (nth ci *commands*))))))))
+             (reset-btn (%s-button "既定に戻す"
+                          (lambda () (setf (car mbox) (%menu-norm *default-command-menu*)) (refresh))))
+             (cancel-btn (%s-button "キャンセル" (lambda () (dotnet:invoke w "Close"))))
+             (ok-btn (%s-button "OK"
+                       (lambda ()
+                         (setf *command-menu* (%menu-denorm (groups)))
+                         (save-menu) (%rebuild-menus vw) (dotnet:invoke w "Close")))))
+        (dotnet:invoke add-row "set_Orientation" (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
+        (dotnet:invoke add-row "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 8d0 0d0 0d0))
+        (let ((c (dotnet:invoke add-row "get_Children")))
+          (dotnet:invoke c "Add" cmd-combo) (dotnet:invoke c "Add" grp-combo) (dotnet:invoke c "Add" add-btn))
+        (dotnet:invoke btns "set_Orientation" (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
+        (dotnet:invoke btns "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 12d0 0d0 0d0))
+        (let ((c (dotnet:invoke btns "get_Children")))
+          (dotnet:invoke c "Add" reset-btn) (dotnet:invoke c "Add" cancel-btn) (dotnet:invoke c "Add" ok-btn))
+        (dotnet:invoke root "set_Margin" (dotnet:new "Avalonia.Thickness" 12d0))
+        (let ((c (dotnet:invoke root "get_Children")))
+          (dotnet:invoke c "Add" scr) (dotnet:invoke c "Add" add-row) (dotnet:invoke c "Add" btns))
+        (dotnet:invoke w "set_Content" root))
+      (dotnet:invoke w "set_Title" "メニュー編集")
+      (dotnet:invoke w "set_Width" 400d0)
+      (dotnet:invoke w "set_SizeToContent" (dotnet:static "Avalonia.Controls.SizeToContent" "Height"))
+      (dotnet:invoke w "set_WindowStartupLocation" (dotnet:static "Avalonia.Controls.WindowStartupLocation" "CenterOwner"))
+      (dotnet:invoke w "ShowDialog" owner))))
+
 (defun build-main-window ()
   "現在の *target-path* の本を開き、見開き対応の Avalonia Window を返す
 (呼び出しスレッド上で構築)。2 列 Grid に 2 枚の Image を中央で突き合わせる。"
@@ -2829,6 +2948,7 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
                   (and e (plusp (length e)) t)))
   (load-settings)
   (load-keybinds)
+  (load-menu)
   (load-history)
   (load-bookmarks)
   (load-clip)
