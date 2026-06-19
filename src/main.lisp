@@ -311,7 +311,15 @@
 
 ;;; --- 表示設定 (将来のカスタマイズ UI / 設定ファイルの対象) ---------
 (defparameter *page-direction* :rtl
-  "綴じ方向。:rtl = NeeView 既定 (右開き/漫画) で ← が次・→ が前。:ltr は逆。")
+  "現在の本の綴じ方向 (実行時の値)。:rtl=右開き/漫画 (← が次・→ が前)、:ltr=左開き。
+本を開くと種類で *image-direction* / *pdf-direction* から決まり、D キーでその場反転 (#33)。")
+(defparameter *image-direction* :rtl
+  "画像/書庫 (漫画) を開いた時の既定綴じ方向 (#33)。")
+(defparameter *pdf-direction* :ltr
+  "PDF (論文/技術書) を開いた時の既定綴じ方向 (#33)。")
+(defun %book-direction (book)
+  "本の種類ごとの既定綴じ方向 (#33)。pdf=*pdf-direction* / 画像・書庫=*image-direction*。"
+  (if (typep book 'pdf-book) *pdf-direction* *image-direction*))
 (defparameter *spread* t
   "見開き表示。t = 2 ページ並べ、nil = 単ページ。")
 (defparameter *first-page-single* t
@@ -328,7 +336,8 @@
 
 ;;; --- 設定の永続化 (s式 plist / OS の app data) ---------------------
 (defparameter *settings*
-  '((:page-direction    . *page-direction*)
+  '((:image-direction   . *image-direction*)
+    (:pdf-direction     . *pdf-direction*)
     (:spread            . *spread*)
     (:first-page-single . *first-page-single*)
     (:recursive         . *recursive*)
@@ -1101,6 +1110,7 @@ NAS の帯域/レイテンシを隠せる (設定ファイルで調整可)。")
         (old-loader (viewer-loader vw)) (old-book (viewer-book vw)))
     (multiple-value-bind (book start) (open-book (viewer-source vw))
       (declare (ignore start))
+      (setf *page-direction* (%book-direction book))   ; 種類で綴じ方向 (#33)
       (ignore-errors (loader-quiesce old-loader))   ; スレッドだけ止める (Bitmap は描画後に破棄)
       (setf (viewer-search-matches vw) nil (viewer-search-index vw) 0)  ; 本が変わったら検索結果は無効
       (%slideshow-stop vw)                       ; 本切替でスライドショー停止 (#28)
@@ -1122,6 +1132,7 @@ NAS の帯域/レイテンシを隠せる (設定ファイルで調整可)。")
 UI スレッドで呼ぶこと。"
   (handler-case
       (multiple-value-bind (book start) (open-book path)
+        (setf *page-direction* (%book-direction book))   ; 種類で綴じ方向 (#33)
         (let ((old-loader (viewer-loader vw)) (old-book (viewer-book vw)))
           (ignore-errors (loader-quiesce old-loader))   ; スレッドだけ止める (Bitmap は描画後に破棄)
           (let* ((spreads (compute-spreads (book-page-count book)))
@@ -1793,6 +1804,7 @@ indeterminate が要るなら (dotnet:null)。"
     b))
 
 ;;; 設定コンボの選択肢 (表示ラベル . 値)。
+(defparameter *dir-choices*    '(("右開き (RTL)" . :rtl) ("左開き (LTR)" . :ltr)))
 (defparameter *fit-choices*    '(("全体" . :whole) ("幅フィット" . :width) ("高さフィット" . :height)))
 (defparameter *bg-choices*     '(("黒" . "Black") ("濃い灰" . "DimGray") ("灰" . "Gray") ("白" . "White")))
 (defparameter *interp-choices*
@@ -1872,15 +1884,19 @@ indeterminate が要るなら (dotnet:null)。"
       (dotnet:invoke psi "set_UseShellExecute" t)
       (dotnet:static "System.Diagnostics.Process" "Start" psi))))
 
-(defun %settings-apply (vw cb-spread cb-fps cb-rec combo tb-cache tb-pf tb-th
-                        fit-combo bg-combo interp-combo tb-dpi tb-mem tb-slide)
+(defun %settings-apply (vw cb-spread cb-fps cb-rec tb-cache tb-pf tb-th
+                        fit-combo bg-combo interp-combo tb-dpi tb-mem tb-slide
+                        dir-img-combo dir-pdf-combo)
   "コントロールの現在値をグローバルへ反映し永続化、変更内容に応じて再描画する。"
   (let ((old-spread *spread*) (old-fps *first-page-single*)
         (old-rec *recursive*) (old-threads *loader-threads*) (old-dpi *pdf-dpi*))
     (setf *spread*            (and (dotnet:invoke cb-spread "get_IsChecked") t)
           *first-page-single* (and (dotnet:invoke cb-fps "get_IsChecked") t)
           *recursive*         (and (dotnet:invoke cb-rec "get_IsChecked") t)
-          *page-direction*    (if (zerop (dotnet:invoke combo "get_SelectedIndex")) :rtl :ltr)
+          *image-direction*   (%s-combo-value dir-img-combo *dir-choices*)   ; 種類別の既定 (#33)
+          *pdf-direction*     (%s-combo-value dir-pdf-combo *dir-choices*)
+          ;; 現在の本の綴じ方向も新しい種類別既定で更新 (D で反転した分は上書き)。
+          *page-direction*    (%book-direction (viewer-book vw))
           *fit-mode*          (%s-combo-value fit-combo *fit-choices*)
           *background-color*  (%s-combo-value bg-combo *bg-choices*)
           *interpolation*     (%s-combo-value interp-combo *interp-choices*)
@@ -2293,7 +2309,8 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
   ;; OK/キャンセルは全ページ共通 (コントロールは非表示でも値を保持するので OK で読める)。
   (let* ((owner (viewer-window vw))
          (swin  (dotnet:new "Avalonia.Controls.Window"))
-         (combo (dotnet:new "Avalonia.Controls.ComboBox"))
+         (dir-img-combo (%s-choice-combo *dir-choices* *image-direction*))   ; 画像/書庫の綴じ方向 (#33)
+         (dir-pdf-combo (%s-choice-combo *dir-choices* *pdf-direction*))     ; PDF の綴じ方向 (#33)
          (cb-spread (%s-checkbox *spread*))
          (cb-fps    (%s-checkbox *first-page-single*))
          (cb-rec    (%s-checkbox *recursive*))
@@ -2316,10 +2333,6 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
          (content  (dotnet:new "Avalonia.Controls.ContentControl"))
          (win-p (dotnet:static "System.OperatingSystem" "IsWindows"))  ; 関連付けは Windows のみ (#11)
          (assoc-status (dotnet:new "Avalonia.Controls.TextBlock")))
-    (let ((items (dotnet:invoke combo "get_Items")))
-      (dotnet:invoke items "Add" "右開き (RTL)")
-      (dotnet:invoke items "Add" "左開き (LTR)"))
-    (dotnet:invoke combo "set_SelectedIndex" (if (eq *page-direction* :rtl) 0 1))
     (labels
         ((add-binding (k)
            ;; 数字 1-9 は count プレフィックス予約で割当てても発火しないので弾く (#23)。0 は可。
@@ -2451,7 +2464,8 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
                             (refresh))))
              (panel-layout
                (page (list (%s-header "レイアウト")
-                           (%s-row "綴じ方向" combo)
+                           (%s-row "綴じ方向 (画像/書庫)" dir-img-combo)
+                           (%s-row "綴じ方向 (PDF)" dir-pdf-combo)
                            (%s-row "見開き" cb-spread)
                            (%s-row "表紙を単独表示" cb-fps)
                            (%s-row "サブフォルダも再帰収集" cb-rec)
@@ -2529,8 +2543,9 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
           (dotnet:invoke bc "Add"
             (%s-button "OK"
               (lambda ()
-                (%settings-apply vw cb-spread cb-fps cb-rec combo tb-cache tb-pf tb-th
-                                 fit-combo bg-combo interp-combo tb-dpi tb-mem tb-slide)
+                (%settings-apply vw cb-spread cb-fps cb-rec tb-cache tb-pf tb-th
+                                 fit-combo bg-combo interp-combo tb-dpi tb-mem tb-slide
+                                 dir-img-combo dir-pdf-combo)
                 ;; キー指向の作業リストを機能ごとにまとめ直して確定 (削除は空リストで反映)。
                 (setf *keybinds*
                       (mapcar (lambda (c)
@@ -2743,6 +2758,7 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
   "現在の *target-path* の本を開き、見開き対応の Avalonia Window を返す
 (呼び出しスレッド上で構築)。2 列 Grid に 2 枚の Image を中央で突き合わせる。"
   (multiple-value-bind (book start) (open-book (%resolve-path *target-path*))
+    (setf *page-direction* (%book-direction book))   ; 種類で綴じ方向 (#33)
     (let* ((win   (dotnet:new "Avalonia.Controls.Window"))
            (vport (dotnet:new "Avalonia.Controls.Border"))   ; クリップ用ビューポート
            (stage (dotnet:new "Avalonia.Controls.Canvas"))   ; 見開き stage (座標は自前計算; #15)
