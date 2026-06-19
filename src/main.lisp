@@ -337,6 +337,7 @@
     (:cache-size        . *cache-size*)
     (:prefetch-ahead    . *prefetch-ahead*)
     (:slideshow-interval . *slideshow-interval*)
+    (:loupe-scale       . *loupe-scale*)
     (:loader-threads    . *loader-threads*))
   "保存対象の (設定キー . 特殊変数シンボル)。ここに足すだけで永続化対象になる。")
 
@@ -892,6 +893,8 @@ TARGET がツリーに出ない種別 (素の画像等) なら、辿れた最後
  先読みする (双方向・前方優先; #25)。設定ファイルで調整可。")
 (defparameter *slideshow-interval* 4
   "スライドショーの自動送り間隔 (秒; #28)。")
+(defparameter *loupe-scale* 2.5d0
+  "ルーペ (拡大鏡) の倍率 (#28)。")
 (defparameter *loader-threads* 4
   "並列ローダースレッド数。各スレッドが自前の書庫ハンドルで同時に読むので、
 NAS の帯域/レイテンシを隠せる (設定ファイルで調整可)。")
@@ -1068,6 +1071,7 @@ NAS の帯域/レイテンシを隠せる (設定ファイルで調整可)。")
            (content-w 0d0) (content-h 0d0)  ; 現在の見開きの content 寸法 (DIP; #15)
            (rotation 0) rot-xf          ; 回転角(度) と RotateTransform (#28)
            (slide-timer nil)            ; スライドショーの DispatcherTimer (nil=停止; #28)
+           (loupe nil) (loupe-tx0 0d0) (loupe-ty0 0d0)  ; ルーペ状態とフィット時のパン基準 (#28)
            (dragging nil) (lx 0d0) (ly 0d0)
            clip-pane clip-stack         ; 素材ペイン (#18 Phase 2)
            thumb-pane thumb-stack       ; ページサムネ本棚 (#6 A)
@@ -1330,6 +1334,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
 (defun show-spread (vw)
   "見開き表示 (sindex クランプ)。必要ページをローダーに要求し cache から描画、
 読み方向の次見開きも prefetch 要求する。"
+  (setf (viewer-loupe vw) nil)          ; ページ移動でルーペは解除 (#28)
   (let* ((spreads (viewer-spreads vw)) (m (length spreads)))
     (when (plusp m)
       (let ((si (max 0 (min (viewer-sindex vw) (1- m)))))
@@ -1391,11 +1396,13 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
 
 (defun %on-press (vw e)
   ;; パン開始は左ボタンのみ。メニュー等の押下で誤ってドラッグ状態にしない。
-  (when (%left-pressed-p vw e)
+  ;; ルーペ中はパンしない (移動はカーソル追従が担う)。
+  (when (and (not (viewer-loupe vw)) (%left-pressed-p vw e))
     (multiple-value-bind (x y) (%pos-xy e (viewer-viewport vw))
       (setf (viewer-dragging vw) t (viewer-lx vw) x (viewer-ly vw) y))))
 
 (defun %on-move (vw e)
+  (when (viewer-loupe vw) (%loupe-follow vw e) (return-from %on-move))
   (when (viewer-dragging vw)
     ;; release を取りこぼして dragging が居残っても、ボタンが離れていれば自己修復で停止
     ;; (メニュー/別ウィンドウのダイアログで PointerReleased が main に返らない場合の対策)。
@@ -1451,6 +1458,32 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
         (setf (viewer-slide-timer vw) timer)
         (%status vw (format nil "スライドショー (~d秒間隔)" *slideshow-interval*)))))
 
+;;; ルーペ (拡大鏡) (#28)。フルビュー型: カーソル位置の content を *loupe-scale* で拡大し、
+;;; カーソル移動に追従。フィット時のパン基準 (loupe-tx0/ty0) からカーソル固定式で再計算する。
+(defun %loupe-apply (vw cx cy)
+  "ビューポート座標 (cx,cy) のフィット時 content をその場で *loupe-scale* 倍に拡大配置。"
+  (let ((f *loupe-scale*))
+    (setf (viewer-zoom vw) f
+          (viewer-tx vw) (- cx (* (- cx (viewer-loupe-tx0 vw)) f))
+          (viewer-ty vw) (- cy (* (- cy (viewer-loupe-ty0 vw)) f)))
+    (apply-transform vw)))
+
+(defun %loupe-follow (vw e)
+  (multiple-value-bind (cx cy) (%pos-xy e (viewer-viewport vw)) (%loupe-apply vw cx cy)))
+
+(defun %loupe-toggle (vw)
+  "ルーペ ON/OFF。ON 時はフィット(zoom1)に戻してパン基準を確定 → 中央で拡大開始。"
+  (if (viewer-loupe vw)
+      (progn (setf (viewer-loupe vw) nil) (reset-view vw) (%status vw "ルーペ OFF"))
+      (progn
+        (reset-view vw)                                  ; フィットに戻して tx/ty を確定
+        (setf (viewer-loupe-tx0 vw) (viewer-tx vw)
+              (viewer-loupe-ty0 vw) (viewer-ty vw)
+              (viewer-loupe vw) t)
+        (multiple-value-bind (vpw vph) (%viewport-size vw)
+          (%loupe-apply vw (/ vpw 2d0) (/ vph 2d0)))     ; 初期は中央で拡大
+        (%status vw (format nil "ルーペ ON (~,1fx) — カーソルで移動 / Z で OFF" *loupe-scale*)))))
+
 ;;; ------------------------------------------------------------------
 ;;; コマンドテーブル (#10): キー操作とメニューの単一の出どころ。
 ;;; 各コマンドは id・ラベル (メニュー表示)・既定キー (Avalonia Key.ToString 名)・
@@ -1505,6 +1538,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
    (make-command :rotate-right  "右回転"           '("OemPeriod") '%rotate-right)
    (make-command :rotate-left   "左回転"           '("OemComma")  '%rotate-left)
    (make-command :slideshow     "スライドショー"   '("F5")    '%slideshow-toggle)
+   (make-command :loupe         "ルーペ (拡大鏡)"  '("Z")     '%loupe-toggle)
    (make-command :goto          "ページ移動 (gg=先頭 / G=末尾 / [count]g)" '("G") '%goto-page)
    (make-command :palette       "コマンドパレット" '("OemSemicolon") '%command-palette)
    (make-command :search        "検索 (/)"          '("OemQuestion" "Divide") '%command-search)
@@ -1528,7 +1562,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
 ;;; (reading-fwd/bwd, escape 等の内部操作) はメニューに出さない。
 (defparameter *command-menu*
   '((:file "ファイル" :open-file :open-folder :settings :quit)
-    (:view "表示"    :fullscreen :fit :fit-mode :rotate-left :rotate-right :slideshow
+    (:view "表示"    :fullscreen :fit :fit-mode :rotate-left :rotate-right :loupe :slideshow
                      :spread :direction :recursive
                      :browse-pane :thumb-pane :clip-pane)
     (:jump "移動"    :first-spread :prev-spread :next-spread :last-spread :goto
