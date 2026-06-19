@@ -1072,6 +1072,7 @@ NAS の帯域/レイテンシを隠せる (設定ファイルで調整可)。")
            (rotation 0) rot-xf          ; 回転角(度) と RotateTransform (#28)
            (slide-timer nil)            ; スライドショーの DispatcherTimer (nil=停止; #28)
            (loupe nil) (loupe-tx0 0d0) (loupe-ty0 0d0)  ; ルーペ状態とフィット時のパン基準 (#28)
+           (loupe-cx 0d0) (loupe-cy 0d0)                ; ルーペの現在中心 (矢印キー移動用; #28)
            (dragging nil) (lx 0d0) (ly 0d0)
            clip-pane clip-stack         ; 素材ペイン (#18 Phase 2)
            thumb-pane thumb-stack       ; ページサムネ本棚 (#6 A)
@@ -1463,10 +1464,15 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
 (defun %loupe-apply (vw cx cy)
   "ビューポート座標 (cx,cy) のフィット時 content をその場で *loupe-scale* 倍に拡大配置。"
   (let ((f *loupe-scale*))
-    (setf (viewer-zoom vw) f
+    (setf (viewer-loupe-cx vw) cx (viewer-loupe-cy vw) cy
+          (viewer-zoom vw) f
           (viewer-tx vw) (- cx (* (- cx (viewer-loupe-tx0 vw)) f))
           (viewer-ty vw) (- cy (* (- cy (viewer-loupe-ty0 vw)) f)))
     (apply-transform vw)))
+
+(defun %loupe-nudge (vw dx dy)
+  "ルーペ中心を矢印キーで動かす (ページ送りの代わり; #28)。"
+  (%loupe-apply vw (+ (viewer-loupe-cx vw) dx) (+ (viewer-loupe-cy vw) dy)))
 
 (defun %loupe-follow (vw e)
   (multiple-value-bind (cx cy) (%pos-xy e (viewer-viewport vw)) (%loupe-apply vw cx cy)))
@@ -1482,7 +1488,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
               (viewer-loupe vw) t)
         (multiple-value-bind (vpw vph) (%viewport-size vw)
           (%loupe-apply vw (/ vpw 2d0) (/ vph 2d0)))     ; 初期は中央で拡大
-        (%status vw (format nil "ルーペ ON (~,1fx) — カーソルで移動 / Z で OFF" *loupe-scale*)))))
+        (%status vw (format nil "ルーペ ON (~,1fx) — マウス/矢印で移動 / Z で OFF" *loupe-scale*)))))
 
 ;;; ------------------------------------------------------------------
 ;;; コマンドテーブル (#10): キー操作とメニューの単一の出どころ。
@@ -1637,6 +1643,13 @@ g/G: [count]g=count ページ目 / gg=先頭 / G(Shift)=末尾 / g 単独=次の
   (let* ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString"))
          (d  (%digit-key kn)))
     (cond
+      ;; ルーペ中の矢印キーはルーペ中心を動かす (ページ送りに化けるのを防ぐ; #28)。
+      ((and (viewer-loupe vw) (member kn '("Left" "Right" "Up" "Down") :test #'string=))
+       (let ((step 60d0))
+         (cond ((string= kn "Left")  (%loupe-nudge vw (- step) 0d0))
+               ((string= kn "Right") (%loupe-nudge vw step 0d0))
+               ((string= kn "Up")    (%loupe-nudge vw 0d0 (- step)))
+               ((string= kn "Down")  (%loupe-nudge vw 0d0 step)))))
       ;; g / G — Avalonia では大小とも Key.G。Shift で末尾、count で移動、二連で先頭。
       ((string= kn "G")
        (let ((cnt   (viewer-pending-count vw))
