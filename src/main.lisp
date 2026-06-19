@@ -336,6 +336,7 @@
     (:cache-memory-mb   . *cache-memory-mb*)
     (:cache-size        . *cache-size*)
     (:prefetch-ahead    . *prefetch-ahead*)
+    (:slideshow-interval . *slideshow-interval*)
     (:loader-threads    . *loader-threads*))
   "保存対象の (設定キー . 特殊変数シンボル)。ここに足すだけで永続化対象になる。")
 
@@ -889,6 +890,8 @@ TARGET がツリーに出ない種別 (素の画像等) なら、辿れた最後
 (defparameter *prefetch-ahead* 8
   "現在の見開きから何見開き先まで先読みするか。後方は min(2, これ) 見開きを少しだけ
  先読みする (双方向・前方優先; #25)。設定ファイルで調整可。")
+(defparameter *slideshow-interval* 4
+  "スライドショーの自動送り間隔 (秒; #28)。")
 (defparameter *loader-threads* 4
   "並列ローダースレッド数。各スレッドが自前の書庫ハンドルで同時に読むので、
 NAS の帯域/レイテンシを隠せる (設定ファイルで調整可)。")
@@ -1063,6 +1066,8 @@ NAS の帯域/レイテンシを隠せる (設定ファイルで調整可)。")
            viewport scale-xf trans-xf (zoom 1d0) (tx 0d0) (ty 0d0)
            (fit-base 1d0)               ; フィット基準スケール (実効 = fit-base*zoom; #15)
            (content-w 0d0) (content-h 0d0)  ; 現在の見開きの content 寸法 (DIP; #15)
+           (rotation 0) rot-xf          ; 回転角(度) と RotateTransform (#28)
+           (slide-timer nil)            ; スライドショーの DispatcherTimer (nil=停止; #28)
            (dragging nil) (lx 0d0) (ly 0d0)
            clip-pane clip-stack         ; 素材ペイン (#18 Phase 2)
            thumb-pane thumb-stack       ; ページサムネ本棚 (#6 A)
@@ -1090,6 +1095,8 @@ NAS の帯域/レイテンシを隠せる (設定ファイルで調整可)。")
       (declare (ignore start))
       (ignore-errors (loader-quiesce old-loader))   ; スレッドだけ止める (Bitmap は描画後に破棄)
       (setf (viewer-search-matches vw) nil (viewer-search-index vw) 0)  ; 本が変わったら検索結果は無効
+      (%slideshow-stop vw)                       ; 本切替でスライドショー停止 (#28)
+      (setf (viewer-rotation vw) 0)              ; 回転もリセット
       (setf (viewer-book vw) book
             (viewer-loader vw) (open-loader
                                 (viewer-source vw)
@@ -1125,7 +1132,11 @@ UI スレッドで呼ぶこと。"
     (error (e) (log-err "open-path" e))))
 
 (defun apply-transform (vw)
-  ;; 実効スケール = フィット基準 × user zoom。translate は親 (viewport) 座標系の絶対オフセット。
+  ;; 変換順: 回転(content 中心まわり) → スケール(原点) → 平行移動。実効スケール = フィット基準 × zoom。
+  (when (viewer-rot-xf vw)
+    (dotnet:invoke (viewer-rot-xf vw) "set_Angle" (coerce (viewer-rotation vw) 'double-float))
+    (dotnet:invoke (viewer-rot-xf vw) "set_CenterX" (/ (viewer-content-w vw) 2d0))
+    (dotnet:invoke (viewer-rot-xf vw) "set_CenterY" (/ (viewer-content-h vw) 2d0)))
   (let ((s (* (viewer-fit-base vw) (viewer-zoom vw))))
     (dotnet:invoke (viewer-scale-xf vw) "set_ScaleX" s)
     (dotnet:invoke (viewer-scale-xf vw) "set_ScaleY" s))
@@ -1165,17 +1176,22 @@ UI スレッドで呼ぶこと。"
 
 (defun %apply-fit (vw)
   "現在の content 寸法と viewport から基準スケールとアンカー (tx/ty) を決めて適用。
-whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でスクロール)。user zoom は保持。"
+whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でスクロール)。user zoom は保持。
+回転 90/270 時は実効寸法を入れ替え、回転後 bbox (content 中心まわり) に合わせて配置 (#28)。"
   (multiple-value-bind (vpw vph) (%viewport-size vw)
     (let* ((cw (viewer-content-w vw)) (ch (viewer-content-h vw))
-           (base (%fit-base cw ch vpw vph))
+           (rot (mod (viewer-rotation vw) 360))
+           (swap (or (= rot 90) (= rot 270)))
+           (ew (if swap ch cw)) (eh (if swap cw ch))   ; 回転後の実効寸法
+           (base (%fit-base ew eh vpw vph))
            (s (* base (viewer-zoom vw))))
       (setf (viewer-fit-base vw) base)
-      ;; 各軸: 収まるなら中央寄せ、はみ出すなら先頭(上/左)アンカー (はみ出し分は pan で
-      ;; スクロール)。これで whole=中央、width=縦・height=横の自由軸が「余れば中央/
-      ;; あふれれば先頭」になる。
-      (setf (viewer-tx vw) (max 0d0 (/ (- vpw (* cw s)) 2d0))
-            (viewer-ty vw) (max 0d0 (/ (- vph (* ch s)) 2d0)))
+      ;; 回転後 bbox は content 中心 (cw/2,ch/2) を中心に ew×eh。その content 座標での左上 =
+      ;; ((cw-ew)/2,(ch-eh)/2)。viewport 内の配置先 (余れば中央 / あふれれば先頭) へ平行移動。
+      (let ((target-x (max 0d0 (/ (- vpw (* ew s)) 2d0)))
+            (target-y (max 0d0 (/ (- vph (* eh s)) 2d0))))
+        (setf (viewer-tx vw) (- target-x (* (/ (- cw ew) 2d0) s))
+              (viewer-ty vw) (- target-y (* (/ (- ch eh) 2d0) s))))
       (apply-transform vw))))
 
 (defun reset-view (vw)
@@ -1406,6 +1422,35 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
 
 (defun %quit (vw) (dotnet:invoke (viewer-window vw) "Close"))
 
+;;; 回転 (#28)。stage の RotateTransform を回し、%apply-fit が 90/270 で寸法を入れ替えて配置。
+(defun %rotate (vw deg)
+  (setf (viewer-rotation vw) (mod (+ (viewer-rotation vw) deg) 360))
+  (%apply-fit vw)
+  (%status vw (format nil "回転 ~d°" (viewer-rotation vw))))
+(defun %rotate-right (vw) (%rotate vw 90))
+(defun %rotate-left  (vw) (%rotate vw -90))
+
+;;; スライドショー (#28)。DispatcherTimer で自動送り、末尾で停止。
+(defun %slideshow-stop (vw)
+  (when (viewer-slide-timer vw)
+    (ignore-errors (dotnet:invoke (viewer-slide-timer vw) "Stop"))
+    (setf (viewer-slide-timer vw) nil)))
+(defun %slideshow-toggle (vw)
+  "スライドショーの開始/停止。間隔 *slideshow-interval* 秒で次の見開きへ、末尾で停止。"
+  (if (viewer-slide-timer vw)
+      (progn (%slideshow-stop vw) (%status vw "スライドショー停止"))
+      (let ((timer (dotnet:new "Avalonia.Threading.DispatcherTimer")))
+        (dotnet:invoke timer "set_Interval"
+                       (dotnet:static "System.TimeSpan" "FromSeconds"
+                                      (coerce (max 1 *slideshow-interval*) 'double-float)))
+        (dotnet:add-event timer "Tick"
+          (lambda (s e) (declare (ignore s e))
+            (let ((m (length (viewer-spreads vw))) (si (viewer-sindex vw)))
+              (if (< si (1- m)) (%next-spread vw) (%slideshow-stop vw)))))
+        (dotnet:invoke timer "Start")
+        (setf (viewer-slide-timer vw) timer)
+        (%status vw (format nil "スライドショー (~d秒間隔)" *slideshow-interval*)))))
+
 ;;; ------------------------------------------------------------------
 ;;; コマンドテーブル (#10): キー操作とメニューの単一の出どころ。
 ;;; 各コマンドは id・ラベル (メニュー表示)・既定キー (Avalonia Key.ToString 名)・
@@ -1457,6 +1502,9 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
    (make-command :recursive     "再帰収集"         '("R")     '%toggle-recursive)
    (make-command :fit           "フィット"         '("D0" "NumPad0") 'reset-view)
    (make-command :fit-mode      "フィット切替"     '("W")     '%cycle-fit-mode)
+   (make-command :rotate-right  "右回転"           '("OemPeriod") '%rotate-right)
+   (make-command :rotate-left   "左回転"           '("OemComma")  '%rotate-left)
+   (make-command :slideshow     "スライドショー"   '("F5")    '%slideshow-toggle)
    (make-command :goto          "ページ移動 (gg=先頭 / G=末尾 / [count]g)" '("G") '%goto-page)
    (make-command :palette       "コマンドパレット" '("OemSemicolon") '%command-palette)
    (make-command :search        "検索 (/)"          '("OemQuestion" "Divide") '%command-search)
@@ -1480,7 +1528,8 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
 ;;; (reading-fwd/bwd, escape 等の内部操作) はメニューに出さない。
 (defparameter *command-menu*
   '((:file "ファイル" :open-file :open-folder :settings :quit)
-    (:view "表示"    :fullscreen :fit :fit-mode :spread :direction :recursive
+    (:view "表示"    :fullscreen :fit :fit-mode :rotate-left :rotate-right :slideshow
+                     :spread :direction :recursive
                      :browse-pane :thumb-pane :clip-pane)
     (:jump "移動"    :first-spread :prev-spread :next-spread :last-spread :goto
                      :prev-bookmark :next-bookmark)
@@ -1760,7 +1809,7 @@ indeterminate が要るなら (dotnet:null)。"
       (dotnet:static "System.Diagnostics.Process" "Start" psi))))
 
 (defun %settings-apply (vw cb-spread cb-fps cb-rec combo tb-cache tb-pf tb-th
-                        fit-combo bg-combo interp-combo tb-dpi tb-mem)
+                        fit-combo bg-combo interp-combo tb-dpi tb-mem tb-slide)
   "コントロールの現在値をグローバルへ反映し永続化、変更内容に応じて再描画する。"
   (let ((old-spread *spread*) (old-fps *first-page-single*)
         (old-rec *recursive*) (old-threads *loader-threads*) (old-dpi *pdf-dpi*))
@@ -1773,6 +1822,7 @@ indeterminate が要るなら (dotnet:null)。"
           *interpolation*     (%s-combo-value interp-combo *interp-choices*)
           *pdf-dpi*           (%parse-int (dotnet:invoke tb-dpi "get_Text") *pdf-dpi* 36)
           *cache-memory-mb*   (%parse-int (dotnet:invoke tb-mem "get_Text") *cache-memory-mb* 16)
+          *slideshow-interval* (%parse-int (dotnet:invoke tb-slide "get_Text") *slideshow-interval* 1)
           *cache-size*        (%parse-int (dotnet:invoke tb-cache "get_Text") *cache-size* 1)
           *prefetch-ahead*    (%parse-int (dotnet:invoke tb-pf "get_Text") *prefetch-ahead* 0)
           *loader-threads*    (%parse-int (dotnet:invoke tb-th "get_Text") *loader-threads* 1))
@@ -2187,6 +2237,7 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
          (tb-cache  (%s-textbox *cache-size*))
          (tb-pf     (%s-textbox *prefetch-ahead*))
          (tb-th     (%s-textbox *loader-threads*))
+         (tb-slide  (%s-textbox *slideshow-interval*))
          (fit-combo    (%s-choice-combo *fit-choices* *fit-mode*))
          (bg-combo     (%s-choice-combo *bg-choices* *background-color* #'string=))
          (interp-combo (%s-choice-combo *interp-choices* *interpolation*))
@@ -2351,7 +2402,8 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
                            (%s-row "キャッシュ上限 (MB)" tb-mem)
                            (%s-row "キャッシュ最大ページ数" tb-cache)
                            (%s-row "先読み見開き数" tb-pf)
-                           (%s-row "ローダースレッド数" tb-th))))
+                           (%s-row "ローダースレッド数" tb-th)
+                           (%s-row "スライドショー間隔 (秒)" tb-slide))))
              (panel-keys
                (progn
                  (dotnet:invoke scr "set_MaxHeight" 360d0)
@@ -2414,7 +2466,7 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
             (%s-button "OK"
               (lambda ()
                 (%settings-apply vw cb-spread cb-fps cb-rec combo tb-cache tb-pf tb-th
-                                 fit-combo bg-combo interp-combo tb-dpi tb-mem)
+                                 fit-combo bg-combo interp-combo tb-dpi tb-mem tb-slide)
                 ;; キー指向の作業リストを機能ごとにまとめ直して確定 (削除は空リストで反映)。
                 (setf *keybinds*
                       (mapcar (lambda (c)
@@ -2463,6 +2515,8 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
         ((string= k "OemOpenBrackets") "[")
         ((string= k "OemCloseBrackets") "]")
         ((string= k "OemSemicolon") ":")
+        ((string= k "OemComma") ",")
+        ((string= k "OemPeriod") ".")
         (t k)))
 
 (defun %menu-cmd (vw parent id)
@@ -2504,6 +2558,7 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
            (stage (dotnet:new "Avalonia.Controls.Canvas"))   ; 見開き stage (座標は自前計算; #15)
            (li    (dotnet:new "Avalonia.Controls.Image"))
            (ri    (dotnet:new "Avalonia.Controls.Image"))
+           (rot   (dotnet:new "Avalonia.Media.RotateTransform"))   ; 回転 (#28)
            (scale (dotnet:new "Avalonia.Media.ScaleTransform"))
            (trans (dotnet:new "Avalonia.Media.TranslateTransform"))
            (grp   (dotnet:new "Avalonia.Media.TransformGroup"))
@@ -2516,7 +2571,7 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
                               :sindex (spread-index-of spreads start2)
                               :source path
                               :window win :left-img li :right-img ri
-                              :viewport vport :scale-xf scale :trans-xf trans)))
+                              :viewport vport :scale-xf scale :trans-xf trans :rot-xf rot)))
       ;; Canvas 上にネイティブ寸法で配置 (座標は %render-spread が計算)。Stretch=None。
       (dolist (im (list li ri))
         (dotnet:invoke im "set_Stretch" (dotnet:static "Avalonia.Media.Stretch" "None")))
@@ -2526,6 +2581,7 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
       ;; stage に RenderTransform (実効スケール = フィット基準×zoom + パン)。原点 = 左上、
       ;; これで screen = scale*canvas座標 + translate と単純合成できる。
       (let ((gc (dotnet:invoke grp "get_Children")))
+        (dotnet:invoke gc "Add" rot)       ; 回転 → スケール → 平行移動 の順 (#28)
         (dotnet:invoke gc "Add" scale)
         (dotnet:invoke gc "Add" trans))
       (dotnet:invoke stage "set_RenderTransform" grp)
