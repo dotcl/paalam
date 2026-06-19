@@ -37,17 +37,23 @@ build:
 run:
 	dotnet run -c $(CONFIG) -- $(ARGS)
 
-# framework-dependent publish (.NET ランタイムは同梱しない)。
+# publish。SELF_CONTAINED=true で .NET ランタイムを同梱する。
+# 既定は framework-dependent (軽い)。`make app` は self-contained を使う:
+# Finder ダブルクリック起動は DOTNET_ROOT 等のシェル環境変数を引き継がないため、
+# framework-dependent だと (特に Homebrew など非標準パスの dotnet では) ランタイムを
+# 発見できず Main 到達前に SIGABRT する。同梱すれば環境非依存で起動できる。
+SELF_CONTAINED ?= false
 publish:
 	rm -rf $(PUBLISH_DIR)
-	dotnet publish -c $(CONFIG) -r $(RID) --self-contained false -o $(PUBLISH_DIR)
+	dotnet publish -c $(CONFIG) -r $(RID) --self-contained $(SELF_CONTAINED) -o $(PUBLISH_DIR)
 
-# macOS の .app バンドル。packaging/macos/make-app.sh に委譲。
-app: publish
+# macOS の .app バンドル。ランタイム同梱 (self-contained) で publish して委譲。
+app:
 ifneq ($(UNAME_S),Darwin)
 	@echo "make app は macOS 専用です (現在: $(UNAME_S))。Linux の配布は別途 (packaging/linux/)。"
 	@exit 1
 endif
+	$(MAKE) publish SELF_CONTAINED=true
 	PUBLISH_DIR="$(PUBLISH_DIR)" RID="$(RID)" packaging/macos/make-app.sh
 
 clean:

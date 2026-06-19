@@ -359,6 +359,57 @@ public static class DialogHelper
     }
 }
 
+// macOS の Finder「このアプリで開く」/ Dock へのドロップ / 関連付け起動で渡される
+// ファイルを受ける (#19)。これらは argv ではなく Apple Event 経由で来るので、
+// Avalonia の IActivatableLifetime.Activated (ActivationKind.File) を購読する。
+// ジェネリック TryGetFeature<T> と FileActivatedEventArgs のキャストは Lisp の
+// dotnet: FFI では扱いづらいので C# シムに閉じ込め、Lisp へは文字列パスだけ渡す。
+public static class FileOpenHelper
+{
+    // app: Avalonia.Application (Paalam.App)。onFile: 開くべきローカルパスを 1 件ずつ通知。
+    public static void Enable(Avalonia.Application app, Action<string> onFile)
+    {
+        try
+        {
+            // Avalonia 12 の TryGetFeature は非ジェネリック (Type を取る) 版。
+            var life = app.TryGetFeature(
+                typeof(Avalonia.Controls.ApplicationLifetimes.IActivatableLifetime))
+                as Avalonia.Controls.ApplicationLifetimes.IActivatableLifetime;
+            if (life == null) return;   // 非対応プラットフォーム
+            life.Activated += (s, e) =>
+            {
+                if (e is Avalonia.Controls.ApplicationLifetimes.FileActivatedEventArgs fa)
+                {
+                    foreach (var item in fa.Files)
+                    {
+                        var p = item.TryGetLocalPath();
+                        if (!string.IsNullOrEmpty(p)) onFile(p!);
+                    }
+                }
+            };
+        }
+        catch { /* 機能が無い環境では黙ってスキップ */ }
+    }
+}
+
+// macOS の RenderTimer/-6661 回避 (Avalonia #14927)。CVDisplayLink ベースの
+// RenderTimer が起動初期に CreateAvaloniaNative/RegisterTick で失敗する
+// (蓋を閉じた・外部ディスプレイのみ・起動経路によるレース等の条件で再現)。
+// 公開 API では RenderTimer を直接差し替えられないので、GPU パス (Metal/OpenGl) を
+// 使わない Software レンダリングに固定して CVDisplayLink/Metal の初期化自体を避ける。
+// ジェネリックな AppBuilder.With<T> と IList<enum> 構築は Lisp の dotnet: FFI から
+// 扱いづらいので C# 側で組む。macOS でのみ呼ぶこと (他 OS には無効なオプション)。
+public static class MacRenderFix
+{
+    public static Avalonia.AppBuilder UseSoftwareRendering(Avalonia.AppBuilder builder)
+    {
+        return builder.With(new Avalonia.AvaloniaNativePlatformOptions
+        {
+            RenderingMode = new[] { Avalonia.AvaloniaNativeRenderingMode.Software }
+        });
+    }
+}
+
 internal static class Program
 {
     [STAThread]
@@ -388,8 +439,16 @@ internal static class Program
         }
         catch (Exception ex)
         {
-            File.WriteAllText(
-                Path.Combine(AppContext.BaseDirectory, "paalam-boot.log"), ex.ToString());
+            // boot 例外はログに残す。署名済み .app の BaseDirectory は書けないことがあるので
+            // ホーム配下に出す (Console.Error は Finder 起動では見えない)。
+            try
+            {
+                var log = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                    "paalam-boot.log");
+                File.WriteAllText(log, ex.ToString());
+            }
+            catch { }
             Console.Error.WriteLine(ex);
             throw;
         }

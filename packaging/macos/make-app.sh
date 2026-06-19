@@ -33,6 +33,12 @@ mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 # 同一階層にまとめて入れる必要がある。
 cp -R "$PUBLISH_DIR/." "$CONTENTS/MacOS/"
 
+# dotcl の contrib ソースに紛れ込むビルド中間物 (bin/ obj/) を除去する。
+# これらは実行に不要 (.deps.json/.pdb のみで dll は無い)。かつ bin/Release/net10.0 の
+# ようなディレクトリが残ると codesign が「ネストした bundle」と誤認して署名が壊れ、
+# Finder/Gatekeeper がアプリの起動自体を拒否する (open では通るが Finder で即死)。
+find "$CONTENTS/MacOS/contrib" -type d \( -name bin -o -name obj \) -prune -exec rm -rf {} + 2>/dev/null || true
+
 echo "==> アイコン (app.ico -> AppIcon.icns)"
 ICONSET="$DIST/AppIcon.iconset"
 rm -rf "$ICONSET"; mkdir -p "$ICONSET"
@@ -51,12 +57,15 @@ sed -e "s/@APP_NAME@/$APP_NAME/g" \
     -e "s/@VERSION@/$VERSION/g" \
     packaging/macos/Info.plist.in > "$CONTENTS/Info.plist"
 
-# 署名について:
-#   .NET の publish は Contents/MacOS/ 直下に dll/json/dylib/contrib をすべて置く
-#   非標準レイアウトのため、codesign が内部を別 bundle と誤認して通りにくい。
-#   ad-hoc 署名なしでも自分の Mac では起動できる (検証済み)。他者配布時は
-#   Developer ID 署名 + 公証が別途必要。
-echo "==> (署名はスキップ: 自分の Mac で使う前提)"
+# ad-hoc 署名: publish は apphost に apphost 名義の ad-hoc 署名を付けるが、その後
+# MacOS/ にファイルを足すとバンドル署名が不整合になり、Finder/Gatekeeper が起動を
+# 拒否する ("code has no resources but signature indicates they must be present")。
+# open では通るが Finder ダブルクリックで即死する。バンドル全体を ad-hoc で署名し直す。
+# 上で contrib の bin/obj を除いてあるので --deep のネスト誤認は起きない。
+echo "==> ad-hoc 署名 (バンドル全体を署名し直し)"
+codesign --remove-signature "$CONTENTS/MacOS/$APP_NAME" 2>/dev/null || true
+codesign --force --deep --sign - "$APP"
+codesign --verify --verbose "$APP" 2>&1 | tail -2 || true
 
 echo
 echo "完成: $APP"

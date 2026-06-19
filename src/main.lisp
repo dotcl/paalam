@@ -30,10 +30,13 @@
         (format s "~a~%" (apply #'format nil fmt args))))))
 
 (defun log-err (where e)
+  ;; 署名済み .app バンドル内 (BaseDirectory) は書けないので、ホーム配下に出す。
+  ;; Finder 起動時の初期化例外 (Avalonia 等) を確実に残すため。
   (ignore-errors
     (with-open-file (s (concatenate 'string
-                                    (dotnet:static "System.AppContext" "BaseDirectory")
-                                    "paalam-error.log")
+                                    (dotnet:static "System.Environment" "GetFolderPath"
+                                                   (dotnet:static "System.Environment+SpecialFolder" "UserProfile"))
+                                    "/paalam-error.log")
                        :direction :output :if-exists :append :if-does-not-exist :create)
       (format s "[~a] ~a~%" where e))))
 
@@ -1695,6 +1698,10 @@ g/G: [count]g=count ページ目 / gg=先頭 / G(Shift)=末尾 / g 単独=次の
 (defvar *target-path* nil
   "RUN-PAALAM が受け取った対象パス (App は Avalonia が生成するので global で渡す)。")
 
+(defvar *viewer* nil
+  "現在のメイン viewer。macOS の Finder「開く」(IActivatableLifetime) で
+ファイルが来たとき、起動済みならこの viewer を差し替えるために保持する。")
+
 (defun %resolve-path (path)
   "対象パスを決める。指定が無ければ nil を返す (= 本を開かず空の窓を出す)。
 以前は Windows 固定パス (@WLOGO_96x96.png) をフォールバックにしていたが、
@@ -2921,23 +2928,28 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
                          (lambda (index)
                            (%ui-post (lambda () (%on-page-loaded vw index))))))
       (show-spread vw)
+      (setf *viewer* vw)   ; Finder「開く」(activation) が差し替えに使う
       win)))
 
 (defun %maybe-autoclose (life)
-  "DOTCL_AUTOCLOSE_MS があれば その ms 後に lifetime.Shutdown (動作確認用)。"
-  (let ((s (dotnet:static "System.Environment" "GetEnvironmentVariable" "DOTCL_AUTOCLOSE_MS")))
-    (when (and s (plusp (length s)))
-      (let ((ms (parse-integer s :junk-allowed t))
-            (timer (dotnet:new "Avalonia.Threading.DispatcherTimer")))
-        (when ms
-          (dotnet:invoke timer "set_Interval"
-                         (dotnet:static "System.TimeSpan" "FromMilliseconds"
-                                        (coerce ms 'double-float)))
-          (dotnet:add-event timer "Tick"
-                            (lambda (sndr e) (declare (ignore sndr e))
-                              (dotnet:invoke timer "Stop")
-                              (dotnet:invoke life "Shutdown" 0)))
-          (dotnet:invoke timer "Start"))))))
+  "デバッグ用: PAALAM_DEBUG 有効時に限り DOTCL_AUTOCLOSE_MS (正の ms) 後に
+lifetime.Shutdown する (起動確認の自動終了)。本番起動 (Finder/launchd 等) で
+環境にゴミの DOTCL_AUTOCLOSE_MS が残っていても誤って即終了しないよう、
+*debug* と「正の整数 ms」の両方を満たすときだけ作動させる。"
+  (when *debug*
+    (let ((s (dotnet:static "System.Environment" "GetEnvironmentVariable" "DOTCL_AUTOCLOSE_MS")))
+      (when (and s (plusp (length s)))
+        (let ((ms (parse-integer s :junk-allowed t))
+              (timer (dotnet:new "Avalonia.Threading.DispatcherTimer")))
+          (when (and ms (plusp ms))   ; 0 や負値・非数では発火しない
+            (dotnet:invoke timer "set_Interval"
+                           (dotnet:static "System.TimeSpan" "FromMilliseconds"
+                                          (coerce ms 'double-float)))
+            (dotnet:add-event timer "Tick"
+                              (lambda (sndr e) (declare (ignore sndr e))
+                                (dotnet:invoke timer "Stop")
+                                (dotnet:invoke life "Shutdown" 0)))
+            (dotnet:invoke timer "Start")))))))
 
 ;;; Avalonia.Application 派生を Lisp 側で emit。
 (dotnet:define-class "Paalam.App" ("Avalonia.Application")
@@ -2955,6 +2967,15 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
           (let ((life (dotnet:invoke self "get_ApplicationLifetime"))
                 (win  (build-main-window)))
             (dotnet:invoke life "set_MainWindow" win)
+            ;; macOS の Finder「開く」/ Dock ドロップ / 関連付け起動で来るファイルを受ける。
+            ;; viewer があれば差し替え、無ければ次の build で開く target に積む。
+            (dotnet:static "Paalam.FileOpenHelper" "Enable" self
+                           (dotnet:make-delegate "System.Action`1[System.String]"
+                             (lambda (p)
+                               (%ui-post (lambda ()
+                                           (if *viewer*
+                                               (open-path *viewer* p)
+                                               (setf *target-path* p)))))))
             (%maybe-autoclose life))
         (error (e) (log-err "init" e))))))
 
@@ -2972,6 +2993,11 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
   (setf *target-path* target)
   (let* ((b    (dotnet:static-generic "Avalonia.AppBuilder" "Configure" (list "Paalam.App")))
          (b    (dotnet:static "Avalonia.AppBuilderDesktopExtensions" "UsePlatformDetect" b))
+         ;; macOS: CVDisplayLink RenderTimer の起動失敗 (-6661, Avalonia #14927) を避けるため
+         ;; Software レンダリングに固定する (Finder 起動 / 蓋閉じ等で再現する -6661 対策)。
+         (b    (if (dotnet:static "System.OperatingSystem" "IsMacOS")
+                   (dotnet:static "Paalam.MacRenderFix" "UseSoftwareRendering" b)
+                   b))
          (args (dotnet:static-generic "System.Array" "Empty" (list "System.String"))))
     (dotnet:static "Avalonia.ClassicDesktopStyleApplicationLifetimeExtensions"
                    "StartWithClassicDesktopLifetime"

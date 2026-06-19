@@ -175,3 +175,37 @@ DotCL.Runtime.targets が dotcl.core と contrib を出力に自動コピーす�
 5. Fit モード (幅/高/全体) + ホイールズーム + ドラッグパン
 6. 本棚 (フォルダツリー) + サムネイル + 履歴 + ブックマーク + 設定 UI
 7. (拡張) RAR/7z = SharpCompress, PDF = Docnet, AVIF 等 = 追加 codec (NuGet)
+
+## macOS .app 化の調査 (2026-06-19, 未解決の壁あり)
+
+### 解決済み
+- **未指定起動で窓が出ない**: `*default-image*` に Windows 固定パス
+  (`C:/Windows/System32/@WLOGO_96x96.png`) をフォールバックにしていたため、
+  macOS で open-book が例外 → 初期化中断。→ 廃止し未指定は空の本を開く (push 済)。
+- **RenderTimer -6661 (Avalonia #14927, OPEN)**: CVDisplayLink ベースの RenderTimer が
+  初期化失敗。ディスプレイ非接続/蓋閉じ/起動経路で再現。公開 API に RenderTimer 差替えは
+  無いので `AvaloniaNativePlatformOptions.RenderingMode = [Software]` を macOS のみ適用
+  (`Paalam.MacRenderFix`)。これで「ディスプレイ非接続な手元 exec」では起動継続を確認。
+- **codesign 失敗 (contrib の bin/obj 誤認)**: DotCL.Runtime の contrib ソースに
+  `bin/Release/net10.0` `obj/...` が紛れ込み、codesign が「ネスト bundle」と誤認して
+  署名が壊れる。実行に不要 (中身は .deps.json/.pdb のみ) なので make-app.sh で除去。
+- **`%maybe-autoclose` の暴発防止**: DOTCL_AUTOCLOSE_MS を *debug* かつ正の ms のときだけ
+  有効化 (本番起動で環境のゴミ変数により即終了しないように)。
+- **log-err / 起動 trace の出力先**: 署名済み .app の BaseDirectory は書けないので
+  `~/paalam-error.log` / `~/paalam-trace.log` (ホーム) に出すよう変更。
+
+### 未解決 (要・追加調査 / web 検索)
+**Finder ダブルクリックでだけ即死する。** 一貫した観測:
+- `dotnet run` / `open paalam.app` / `launchctl asuser <uid> open -W paalam.app`
+  (= GUI セッション経由) → **すべて起動成功**。RUN-PAALAM 到達、正常終了まで確認。
+- **Finder ダブルクリック → .NET の Main にすら到達せず SIGABRT (終了コード 33536=131)**。
+  trace ログが 1 行も増えない = CLR 起動前/起動中に abort。
+- システムログに AMFI / code signature / Library Validation / dyld のエラーは出ない。
+  runningboard は running-active まで認識した直後に termination (0,0,33536)。
+- 試して効かなかった: Software レンダリング / ad-hoc 署名し直し / JIT entitlements
+  (allow-jit, allow-unsigned-executable-memory, disable-library-validation) /
+  lsregister 再登録 / 右クリック→開く。
+- 候補だが未確認: Finder が渡す `-psn_` 引数 (ただし launchctl asuser open では
+  argc=1 で来ず、trace 未到達の説明にもならない)。LaunchServices の別経路。
+- 関連 issue: AvaloniaUI/Avalonia #14927 (RenderTimer), #8983 (packed app crash)。
+- 当面の実用上の回避: **`open paalam.app` または `dotnet run` で起動する** (Finder 不可)。
