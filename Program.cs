@@ -285,6 +285,51 @@ public static class DialogHelper
         catch { }
     }
 
+    // 設定の export/import (#24): paalam-config.lisp (s式) の保存/開く。
+    public static async void PickSaveConfig(Avalonia.Controls.Window win, string suggestedName,
+                                            Action<string> onPicked)
+    {
+        try
+        {
+            var file = await win.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+            {
+                SuggestedFileName = suggestedName,
+                DefaultExtension = "lisp",
+                FileTypeChoices = new[]
+                {
+                    new FilePickerFileType("paalam 設定") { Patterns = new[] { "*.lisp" } }
+                }
+            });
+            if (file != null)
+            {
+                var p = file.TryGetLocalPath();
+                if (!string.IsNullOrEmpty(p)) onPicked(p!);
+            }
+        }
+        catch { }
+    }
+
+    public static async void PickOpenConfig(Avalonia.Controls.Window win, Action<string> onPicked)
+    {
+        try
+        {
+            var files = await win.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+            {
+                AllowMultiple = false,
+                FileTypeFilter = new[]
+                {
+                    new FilePickerFileType("paalam 設定") { Patterns = new[] { "*.lisp" } }
+                }
+            });
+            if (files != null && files.Count > 0)
+            {
+                var p = files[0].TryGetLocalPath();
+                if (!string.IsNullOrEmpty(p)) onPicked(p!);
+            }
+        }
+        catch { }
+    }
+
     public static async void PickOpenFolder(Avalonia.Controls.Window win, Action<string> onPicked)
     {
         try

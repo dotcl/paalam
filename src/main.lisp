@@ -410,36 +410,40 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
 
 (defun %state-file (name) (concatenate 'string (%config-dir) name))
 
-(defun %read-state (name)
+(defun %read-sexp-file (file)
+  "FILE があれば 1 個の s式を読んで返す (*read-eval* nil)。無ければ/壊れていれば nil。
+任意パス対応 (設定の import や状態ファイル読みの共通土台; #24/#34)。"
   (handler-case
-      (let ((file (%state-file name)))
-        (when (dotnet:static "System.IO.File" "Exists" file)
-          (with-open-file (s file :direction :input)
-            (let ((*read-eval* nil)) (read s nil nil)))))
-    (error (e) (log-err name e) nil)))
+      (when (dotnet:static "System.IO.File" "Exists" file)
+        (with-open-file (s file :direction :input)
+          (let ((*read-eval* nil)) (read s nil nil))))
+    (error (e) (log-err (format nil "read ~a" file) e) nil)))
 
-(defun %write-state (name data)
+(defun %atomic-write (file data)
   ;; アトミック書き込み (#34): temp に書いて rename で置換する。複数インスタンス
   ;; 同時起動でも、読み手が書き込み途中の中途半端なファイルを見ない (= partial read
   ;; による parse 失敗→既定で上書き、を防ぐ)。temp 名に PID を入れて他インスタンスの
   ;; temp と衝突させない。同一ディレクトリの File.Move(overwrite) は実質 atomic な rename。
+  ;; 任意パス対応 (設定の export と状態ファイル書きの共通土台; #24/#34)。
   (handler-case
-      (progn
-        (dotnet:static "System.IO.Directory" "CreateDirectory" (%config-dir))
-        (let* ((dest (%state-file name))
-               (tmp  (concatenate 'string dest "."
-                                  (princ-to-string (dotnet:static "System.Environment" "ProcessId"))
-                                  ".tmp")))
-          (unwind-protect
-               (progn
-                 (with-open-file (s tmp :direction :output
-                                    :if-exists :supersede :if-does-not-exist :create)
-                   (with-standard-io-syntax (prin1 data s) (terpri s)))
-                 (dotnet:static "System.IO.File" "Move" tmp dest t))   ; overwrite=t
-            ;; Move 成功時は tmp は消えている。失敗で残ったら掃除。
-            (when (dotnet:static "System.IO.File" "Exists" tmp)
-              (ignore-errors (dotnet:static "System.IO.File" "Delete" tmp))))))
-    (error (e) (log-err name e))))
+      (let* ((dir (dotnet:static "System.IO.Path" "GetDirectoryName" file))
+             (tmp (concatenate 'string file "."
+                               (princ-to-string (dotnet:static "System.Environment" "ProcessId"))
+                               ".tmp")))
+        (when (and dir (plusp (length dir)))
+          (dotnet:static "System.IO.Directory" "CreateDirectory" dir))
+        (unwind-protect
+             (progn
+               (with-open-file (s tmp :direction :output
+                                  :if-exists :supersede :if-does-not-exist :create)
+                 (with-standard-io-syntax (prin1 data s) (terpri s)))
+               (dotnet:static "System.IO.File" "Move" tmp file t))   ; overwrite=t
+          (when (dotnet:static "System.IO.File" "Exists" tmp)
+            (ignore-errors (dotnet:static "System.IO.File" "Delete" tmp)))))
+    (error (e) (log-err (format nil "write ~a" file) e))))
+
+(defun %read-state (name) (%read-sexp-file (%state-file name)))
+(defun %write-state (name data) (%atomic-write (%state-file name) data))
 
 ;;; 履歴
 (defparameter *history* nil "((path . page) ...) 最近順。")
@@ -2541,6 +2545,64 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
   (let ((box (viewer-status-box vw)))
     (when box (dotnet:invoke box "set_IsVisible" nil))))
 
+;;; 設定の import / export (#24): 設定一式を 1 ファイル (s式 plist) に書き出し/読み込み。
+;;; 対象: settings / keybinds(keymap) / gestures / menu / bookmarks。未知キーは無視、
+;;; 欠けセクションは現状維持。clip/history はパス依存で揮発的なので含めない。
+(defun %config-bundle ()
+  "現在の設定一式を 1 つの plist にまとめる (export 用)。先頭 :paalam-config がバージョン。"
+  (list :paalam-config 1
+        :settings (loop for e in *settings*
+                        append (list (car e) (symbol-value (cdr e))))
+        :keybinds *keybinds*
+        :gestures *gestures*
+        :menu     *command-menu*
+        :bookmarks *bookmarks*))
+
+(defun %apply-config-bundle (vw bundle)
+  "import した BUNDLE を反映・永続化する。未知キー無視・欠けセクションは現状維持。"
+  (when (and (consp bundle) (getf bundle :paalam-config))
+    (let ((s (getf bundle :settings)))
+      (when (consp s)
+        (loop for (k v) on s by #'cddr
+              for e = (assoc k *settings*)
+              when e do (setf (symbol-value (cdr e)) v))
+        (save-settings)))
+    (let ((kb (getf bundle :keybinds)))
+      (when kb (setf *keybinds* kb) (rebuild-keymap) (save-keybinds)))
+    (let ((g (getf bundle :gestures)))
+      (when g (setf *gestures* g) (save-gestures)))
+    (let ((m (getf bundle :menu)))
+      (when m (setf *command-menu* m) (save-menu) (%rebuild-menus vw)))
+    (let ((b (getf bundle :bookmarks)))
+      (when b (setf *bookmarks* b) (save-bookmarks)))
+    ;; ビューワへ反映: テーマ/背景/補間 + 本を開き直してキャッシュ等を作り直す。
+    (%apply-theme)
+    (%reopen vw)
+    (%apply-background vw)
+    (%apply-interpolation vw)
+    t))
+
+(defun %export-config (vw)
+  (dotnet:static "Paalam.DialogHelper" "PickSaveConfig" (viewer-window vw) "paalam-config.lisp"
+                 (dotnet:make-delegate "System.Action`1[System.String]"
+                   (lambda (path)
+                     (%atomic-write path (%config-bundle))
+                     (%ui-post (lambda () (%status vw (format nil "設定をエクスポート → ~a" path))))))))
+
+(defun %import-config (vw &optional after)
+  "設定ファイルを選んで反映する。AFTER があれば反映後に呼ぶ (設定窓を閉じる等)。"
+  (dotnet:static "Paalam.DialogHelper" "PickOpenConfig" (viewer-window vw)
+                 (dotnet:make-delegate "System.Action`1[System.String]"
+                   (lambda (path)
+                     (let ((bundle (%read-sexp-file path)))
+                       (%ui-post
+                        (lambda ()
+                          (cond ((and (consp bundle) (getf bundle :paalam-config))
+                                 (%apply-config-bundle vw bundle)
+                                 (%status vw "設定をインポートしました")
+                                 (when after (funcall after)))
+                                (t (%status vw "paalam の設定ファイルではありません"))))))))))
+
 (defun %open-settings (vw)
   ;; 左に折りたたみツリー (カテゴリ)、右に該当ページ。選択で右を差し替える master/detail。
   ;; OK/キャンセルは全ページ共通 (コントロールは非表示でも値を保持するので OK で読める)。
@@ -2753,24 +2815,42 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
                  (page (list (%s-header "キー割当 (キー → 機能。1キー1機能・複数可。数字1-9はcount予約)")
                              scr addbtn reset-btn))))
              (panel-assoc (assoc-page))
+             (panel-io
+               (let ((row (dotnet:new "Avalonia.Controls.StackPanel"))
+                     (desc (dotnet:new "Avalonia.Controls.TextBlock")))
+                 (dotnet:invoke row "set_Orientation"
+                                (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
+                 (let ((rc (dotnet:invoke row "get_Children")))
+                   (dotnet:invoke rc "Add" (%s-button "エクスポート…" (lambda () (%export-config vw))))
+                   (dotnet:invoke rc "Add"
+                     (%s-button "インポート…"
+                                (lambda () (%import-config vw (lambda () (dotnet:invoke swin "Close")))))))
+                 (dotnet:invoke desc "set_Text"
+                   "設定すべて (レイアウト・画質・先読みの各設定 / キー割当 / メニュー構成 / マウスジェスチャ / しおり) を 1 ファイルに書き出し / 読み込み。環境間の持ち運び・共有・退避用。インポートは即時反映し、この設定窓を閉じます (未知項目は無視・欠けは現状維持)。")
+                 (dotnet:invoke desc "set_TextWrapping" (dotnet:static "Avalonia.Media.TextWrapping" "Wrap"))
+                 (dotnet:invoke desc "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 0d0 0d0 10d0))
+                 (page (list (%s-header "設定の入出力") desc row))))
              (pages (append (list (cons "レイアウト" panel-layout)
                                   (cons "画質"      panel-quality)
                                   (cons "先読み"    panel-perf)
-                                  (cons "キー割当"  panel-keys))
+                                  (cons "キー割当"  panel-keys)
+                                  (cons "入出力"    panel-io))
                             (when win-p (list (cons "関連付け" panel-assoc)))))
              (tree (dotnet:new "Avalonia.Controls.TreeView"))
              (leaf-layout  (tvi "レイアウト"))
              (leaf-quality (tvi "画質"))
              (leaf-perf    (tvi "先読み"))
              (leaf-keys    (tvi "キー割当"))
+             (leaf-io      (tvi "入出力"))
              (leaf-assoc   (tvi "関連付け"))
              (g-view (tvi "表示" (list leaf-layout leaf-quality)))
              (g-perf (tvi "性能" (list leaf-perf)))
              (g-op   (tvi "操作" (list leaf-keys)))
-             (g-system (tvi "システム" (list leaf-assoc)))
-             (leaves (list (cons "レイアウト" leaf-layout) (cons "画質" leaf-quality)
-                           (cons "先読み" leaf-perf) (cons "キー割当" leaf-keys)
-                           (cons "関連付け" leaf-assoc)))
+             (g-system (tvi "システム" (if win-p (list leaf-io leaf-assoc) (list leaf-io))))
+             (leaves (append (list (cons "レイアウト" leaf-layout) (cons "画質" leaf-quality)
+                                   (cons "先読み" leaf-perf) (cons "キー割当" leaf-keys)
+                                   (cons "入出力" leaf-io))
+                             (when win-p (list (cons "関連付け" leaf-assoc)))))
              (sbox (dotnet:new "Avalonia.Controls.TextBox"))   ; 設定検索ボックス (#27)
              ;; name のページへ移動 (ツリー選択経由 → SelectionChanged が content を差し替え)。
              (nav (lambda (name)
@@ -2818,7 +2898,7 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
           (dotnet:invoke items "Add" g-view)
           (dotnet:invoke items "Add" g-perf)
           (dotnet:invoke items "Add" g-op)
-          (when win-p (dotnet:invoke items "Add" g-system)))   ; 関連付けは Windows のみ
+          (dotnet:invoke items "Add" g-system))   ; システム: 入出力 (+ 関連付けは Windows のみ)
         (dotnet:add-event tree "SelectionChanged"
           (lambda (s e) (declare (ignore s e))
             (let ((item (dotnet:invoke tree "get_SelectedItem")))
