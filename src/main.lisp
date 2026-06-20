@@ -508,7 +508,86 @@ string-equal 相当 (大小無視) で重複判定。新しい順を保ち *hist
                              *clip*)))
     (setf *clip* (append *clip* (list (cons source page))))
     (save-clip)))
-(defun clip-clear () (setf *clip* nil) (clrhash *thumb-cache*) (save-clip))
+(defun clip-clear () (setf *clip* nil) (clrhash *thumb-cache*) (%clip-cache-clear) (save-clip))
+
+;;; クリップのローカルキャッシュ (#35 ①)。クリップしたページの原本バイトを state 配下
+;;; clip-cache/ に1回だけコピーし、掃き出しは NAS を再読みせずローカルから詰める。
+;;; マニフェスト *clip-cache*: (source . page) -> (相対ファイル名 ページ名)。clip-cache.lisp に永続化。
+;;; 既存 clip.lisp (キャッシュ無し) は掃き出し時に source 読みへフォールバックするので互換。
+(defparameter *clip-cache* (make-hash-table :test 'equal))
+(defun %clip-cache-dir () (%state-file "clip-cache/"))
+(defun %fnv1a-hex (string)
+  "FNV-1a 64bit を 16 進に (キャッシュのファイル名用; .NET crypto 非依存。衝突は実用上無視可)。"
+  (let ((h 14695981039346656037))
+    (loop for ch across string
+          do (setf h (logand (* (logxor h (char-code ch)) 1099511628211) #xFFFFFFFFFFFFFFFF)))
+    (format nil "~16,'0x" h)))
+(defun load-clip-cache ()
+  (clrhash *clip-cache*)
+  (let ((d (%read-state "clip-cache.lisp")))
+    (when (listp d)
+      (dolist (e d) (when (and (consp e) (consp (car e)))
+                      (setf (gethash (car e) *clip-cache*) (cdr e)))))))
+(defun save-clip-cache ()
+  (let (al) (maphash (lambda (k v) (push (cons k v) al)) *clip-cache*)
+       (%write-state "clip-cache.lisp" al)))
+(defun %clip-cached (source page)
+  "キャッシュ済みなら (values 絶対パス ページ名)。無ければ nil。"
+  (let ((v (gethash (cons source page) *clip-cache*)))
+    (when (consp v)
+      (let ((p (concatenate 'string (%clip-cache-dir) (first v))))
+        (when (dotnet:static "System.IO.File" "Exists" p)
+          (values p (second v)))))))
+(defun %clip-cache-drop (item)
+  "ITEM = (source . page) のキャッシュファイルとマニフェスト項目を消す (素材削除時)。"
+  (let ((v (gethash item *clip-cache*)))
+    (when (consp v)
+      (ignore-errors
+        (let ((p (concatenate 'string (%clip-cache-dir) (first v))))
+          (when (dotnet:static "System.IO.File" "Exists" p)
+            (dotnet:static "System.IO.File" "Delete" p))))
+      (remhash item *clip-cache*)
+      (save-clip-cache))))
+(defun %clip-cache-clear ()
+  "全キャッシュを破棄 (clip-clear 時)。"
+  (ignore-errors
+    (when (dotnet:static "System.IO.Directory" "Exists" (%clip-cache-dir))
+      (dotnet:static "System.IO.Directory" "Delete" (%clip-cache-dir) t)))
+  (clrhash *clip-cache*)
+  (save-clip-cache))
+(defun %clip-cache-warm ()
+  "未キャッシュのクリップ項目を背景でローカルコピー。source ごとにまとめて 1 回ずつ open
+するので NAS の再 open を最小化する。冪等 (既にあるものはスキップ)。"
+  (make-thread
+   (lambda ()
+     (handler-case
+         (let ((by-source (make-hash-table :test 'equal)) (changed nil))
+           (dolist (item *clip*)
+             (unless (gethash item *clip-cache*)
+               (push (cdr item) (gethash (car item) by-source))))
+           (maphash
+            (lambda (source pages)
+              (handler-case
+                  (let ((book (open-book source)))
+                    (unwind-protect
+                         (dolist (page pages)
+                           (handler-case
+                               (multiple-value-bind (bytes ext) (book-page-bytes book page)
+                                 (let* ((name (concatenate 'string
+                                                           (%fnv1a-hex (format nil "~a#~d" source page)) "." ext))
+                                        (path (concatenate 'string (%clip-cache-dir) name)))
+                                   (dotnet:static "System.IO.Directory" "CreateDirectory" (%clip-cache-dir))
+                                   (dotnet:static "System.IO.File" "WriteAllBytes" path bytes)
+                                   (setf (gethash (cons source page) *clip-cache*)
+                                         (list name (book-page-name book page))
+                                         changed t)))
+                             (error (e) (log-err "clip-cache-page" e))))
+                      (ignore-errors (book-close book))))
+                (error (e) (log-err "clip-cache-source" e))))
+            by-source)
+           (when changed (save-clip-cache)))
+       (error (e) (log-err "clip-cache-warm" e))))
+   :name "paalam-clip-cache"))
 
 (defun %sanitize (s)
   (map 'string (lambda (c) (if (or (alphanumericp c) (member c '(#\- #\_ #\.))) c #\_))
@@ -530,17 +609,24 @@ string-equal 相当 (大小無視) で重複判定。新しい順を保ち *hist
              (dolist (item clip)
                (incf seq)
                (handler-case
-                   (let* ((src (car item)) (page (cdr item))
-                          (book (or (gethash src books)
-                                    (setf (gethash src books) (open-book src)))))
-                     (multiple-value-bind (bytes ext) (book-page-bytes book page)
-                       (let* ((nm (format nil "~4,'0d_~a.~a" seq
-                                          (%sanitize (pathname-name (book-page-name book page))) ext))
-                              (entry (dotnet:invoke zip "CreateEntry" nm))
-                              (es (dotnet:invoke entry "Open")))
-                         (unwind-protect
-                              (dotnet:invoke es "Write" bytes 0 (dotnet:invoke bytes "get_Length"))
-                           (dotnet:invoke es "Dispose")))))
+                   (let ((src (car item)) (page (cdr item)))
+                     ;; #35 ①: ローカルキャッシュがあれば NAS を再読みせずそれを詰める。
+                     ;; 無ければ従来どおり source を開き直して読む (既存 clip.lisp 互換)。
+                     (multiple-value-bind (cpath cname) (%clip-cached src page)
+                       (multiple-value-bind (bytes ext name)
+                           (if cpath
+                               (values (dotnet:static "System.IO.File" "ReadAllBytes" cpath)
+                                       (%name-ext cpath) cname)
+                               (let ((book (or (gethash src books)
+                                               (setf (gethash src books) (open-book src)))))
+                                 (multiple-value-bind (b e) (book-page-bytes book page)
+                                   (values b e (book-page-name book page)))))
+                         (let* ((nm (format nil "~4,'0d_~a.~a" seq (%sanitize (pathname-name name)) ext))
+                                (entry (dotnet:invoke zip "CreateEntry" nm))
+                                (es (dotnet:invoke entry "Open")))
+                           (unwind-protect
+                                (dotnet:invoke es "Write" bytes 0 (dotnet:invoke bytes "get_Length"))
+                             (dotnet:invoke es "Dispose"))))))
                  (error (e) (log-err "export-clip-item" e)))))
         (when zip (ignore-errors (dotnet:invoke zip "Dispose")))
         (ignore-errors (dotnet:invoke fs "Dispose"))
@@ -551,8 +637,10 @@ string-equal 相当 (大小無視) で重複判定。新しい順を保ち *hist
 ;;; スレッドで非同期ロードして後から差し込む (NAS でも UI を固めない)。
 
 (defun %clip-remove-at (vw idx)
-  "idx 番目の素材を取り除いてペイン更新。"
-  (setf *clip* (loop for e in *clip* for i from 0 unless (= i idx) collect e))
+  "idx 番目の素材を取り除いてペイン更新。ローカルキャッシュ (#35 ①) も掃除。"
+  (let ((item (nth idx *clip*)))
+    (setf *clip* (loop for e in *clip* for i from 0 unless (= i idx) collect e))
+    (when item (%clip-cache-drop item)))
   (save-clip)
   (%update-title vw)
   (%rebuild-clip-pane vw))
@@ -739,6 +827,7 @@ string-equal 相当 (大小無視) で重複判定。新しい順を保ち *hist
                  (dotimes (p (book-page-count book)) (clip-add path p))
               (ignore-errors (book-close book)))))
     (error (e) (log-err "clip-drop" e)))
+  (%clip-cache-warm)                   ; #35 ①: 追加分を背景でローカルコピー
   (%update-title vw)
   (when (dotnet:invoke (viewer-clip-pane vw) "get_IsVisible") (%rebuild-clip-pane vw)))
 
@@ -1766,6 +1855,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
   (let ((sp (viewer-spreads vw)))
     (when (plusp (length sp))
       (dolist (p (aref sp (viewer-sindex vw))) (clip-add (viewer-source vw) p))))
+  (%clip-cache-warm)                   ; #35 ①: 追加分を背景でローカルコピー
   (%update-title vw)
   (when (dotnet:invoke (viewer-clip-pane vw) "get_IsVisible") (%rebuild-clip-pane vw)))
 
@@ -3714,6 +3804,8 @@ lifetime.Shutdown する (起動確認の自動終了)。本番起動 (Finder/la
   (load-history)
   (load-bookmarks)
   (load-clip)
+  (load-clip-cache)                    ; #35 ①: クリップのローカルキャッシュ目録
+  (%clip-cache-warm)                   ; 既存クリップで未キャッシュ分を背景で埋める
   (load-gestures)
   (setf *target-path* target)
   (let* ((b    (dotnet:static-generic "Avalonia.AppBuilder" "Configure" (list "Paalam.App")))
