@@ -841,6 +841,77 @@ Avalonia の Bitmap で decode→CreateScaledBitmap→PNG Save (サムネ #6 と
         (dotnet:invoke (dotnet:invoke (viewer-clip-stack vw) "get_Children") "Remove" line)))
     (when img (ignore-errors (dotnet:invoke img "set_Opacity" 1d0)))))
 
+;;; クリップ全体を 1 冊の仮想本として閲覧する (#35 ⑤ プレビュー)。クリップの各 (source . page)
+;;; をページに持つ book プロトコル実装。読み込みは①のローカルキャッシュ優先 (NAS 再読み回避)、
+;;; 無ければ source を開いて読む (source ハンドルは lazy にキャッシュ・ロックで保護)。
+(defclass clip-book ()
+  ((items   :initarg :items   :accessor cb-items)        ; (source . page) の vector
+   (sources :initform (make-hash-table :test 'equal) :accessor cb-sources)  ; source -> 開いた book
+   (lock    :initform (make-lock "clip-book") :accessor cb-lock)))
+(defun make-clip-book (items) (make-instance 'clip-book :items (coerce items 'vector)))
+(defmethod book-page-count ((b clip-book)) (length (cb-items b)))
+(defmethod book-page-name ((b clip-book) i)
+  (let ((it (aref (cb-items b) i)))
+    (format nil "~a:~d" (file-namestring (car it)) (1+ (cdr it)))))
+(defmethod book-parallel-safe-p ((b clip-book)) t)   ; 1 ハンドル共有 + 内部ロック
+(defun %cb-source (b source)
+  "source の book を開いて (なければ) 返す。cb-lock 下で呼ぶこと。"
+  (or (gethash source (cb-sources b))
+      (setf (gethash source (cb-sources b)) (open-book source))))
+(defun %decode-bytes (bytes)
+  "byte[] を Avalonia Bitmap にデコード (MemoryStream は #294 回避で Write)。"
+  (let ((ms (dotnet:new "System.IO.MemoryStream")))
+    (unwind-protect
+         (progn (dotnet:invoke ms "Write" bytes 0 (dotnet:invoke bytes "get_Length"))
+                (dotnet:invoke ms "set_Position" 0)
+                (dotnet:new "Avalonia.Media.Imaging.Bitmap" ms))
+      (dotnet:invoke ms "Dispose"))))
+(defmethod book-load-image ((b clip-book) i)
+  (let* ((it (aref (cb-items b) i))
+         (cpath (%clip-cached (car it) (cdr it))))
+    (if cpath
+        ;; ローカルキャッシュ (①) からデコード: ロック不要で並列に効く。
+        (%decode-bytes (dotnet:static "System.IO.File" "ReadAllBytes" cpath))
+        ;; フォールバック: source を開いて読む (ハンドル共有なのでロック)。
+        (with-lock-held ((cb-lock b))
+          (book-load-image (%cb-source b (car it)) (cdr it))))))
+(defmethod book-page-bytes ((b clip-book) i)
+  (let* ((it (aref (cb-items b) i))
+         (cpath (%clip-cached (car it) (cdr it))))
+    (if cpath
+        (values (dotnet:static "System.IO.File" "ReadAllBytes" cpath) (%name-ext cpath))
+        (with-lock-held ((cb-lock b)) (book-page-bytes (%cb-source b (car it)) (cdr it))))))
+(defmethod book-close ((b clip-book))
+  (with-lock-held ((cb-lock b))
+    (maphash (lambda (k v) (declare (ignore k)) (ignore-errors (book-close v))) (cb-sources b))
+    (clrhash (cb-sources b))))
+
+(defun %open-clip-as-book (vw)
+  "現在のクリップ全体を 1 冊の本として主ビューアで開く (#35 ⑤)。空なら何もしない。"
+  (let ((items (copy-list *clip*)))
+    (if (null items)
+        (%status vw "クリップが空です")
+        (handler-case
+            (let ((book (make-clip-book items))
+                  (old-loader (viewer-loader vw)) (old-book (viewer-book vw)))
+              (ignore-errors (loader-quiesce old-loader))
+              (setf *page-direction* (%book-direction book)
+                    (viewer-source vw) nil          ; パス無し (履歴/再オープン対象外)
+                    (viewer-rotation vw) 0
+                    (viewer-search-matches vw) nil (viewer-search-index vw) 0)
+              (%slideshow-stop vw)
+              (setf (viewer-book vw) book
+                    (viewer-loader vw) (open-loader (lambda () (make-clip-book items))
+                                                    (lambda (i) (%ui-post (lambda () (%on-page-loaded vw i)))))
+                    (viewer-spreads vw) (compute-spreads (book-page-count book))
+                    (viewer-sindex vw) 0)
+              (%update-title vw)
+              (show-spread vw)
+              (%thumb-pane-refresh vw)
+              (%defer-free old-loader old-book)
+              (%focus-viewport vw))         ; ボタンにフォーカスを残さない (Space 等を食われる)
+          (error (e) (log-err "open-clip-as-book" e))))))
+
 (defun %rebuild-clip-pane (vw)
   "clip-stack を作り直す。キャッシュ済みサムネは即表示、未キャッシュのみ背景で
 ロードして %thumb-cache に貯めつつ差し込む (二度目以降は source 再取得なし)。"
@@ -1396,13 +1467,14 @@ NAS の帯域/レイテンシを隠せる (設定ファイルで調整可)。")
               (error (e) (%dbg "LOAD-ERR ~a : ~a" index e)))
           (with-lock-held ((loader-lock ld)) (remhash index (loader-inflight ld))))))))
 
-(defun open-loader (path on-loaded)
-  "PATH を *loader-threads* スレッドで並列ロードするローダーを起動。
-並列安全な book は 1 ハンドル共有、そうでなければスレッド毎に別ハンドルを開く。"
+(defun open-loader (book-factory on-loaded)
+  "BOOK-FACTORY (0 引数で新しい book ハンドルを返す) を *loader-threads* スレッドで並列ロード。
+並列安全な book は 1 ハンドル共有、そうでなければスレッド毎に別ハンドルを開く (#35 ⑤ で
+clip-book も乗せるため path ではなく factory を取る)。"
   (let* ((n (max 1 *loader-threads*))
-         (first (open-book path))
+         (first (funcall book-factory))
          (nh (if (book-parallel-safe-p first) 1 n))   ; ハンドル数
-         (books (coerce (cons first (loop repeat (1- nh) collect (open-book path))) 'vector))
+         (books (coerce (cons first (loop repeat (1- nh) collect (funcall book-factory))) 'vector))
          (ld (make-loader :books books :on-loaded on-loaded)))
     (setf (loader-workers ld)
           (loop for i from 0 below n
@@ -1492,7 +1564,9 @@ NAS の帯域/レイテンシを隠せる (設定ファイルで調整可)。")
            (gesture-fired nil))         ; 直近の右リリースでジェスチャ発火 → ContextMenu 抑止 (#29)
 
 (defun %reopen (vw)
-  "source を開き直して book/loader/spreads を差し替える (再帰トグル等)。現在ページは維持。"
+  "source を開き直して book/loader/spreads を差し替える (再帰トグル等)。現在ページは維持。
+source が nil の時 (空の窓 / クリッププレビュー中) は何もしない (#35 ⑤)。"
+  (unless (viewer-source vw) (return-from %reopen))
   (let ((keep (%cur-page vw))
         (old-loader (viewer-loader vw)) (old-book (viewer-book vw)))
     (multiple-value-bind (book start) (open-book (viewer-source vw))
@@ -1504,7 +1578,7 @@ NAS の帯域/レイテンシを隠せる (設定ファイルで調整可)。")
       (setf (viewer-rotation vw) 0)              ; 回転もリセット
       (setf (viewer-book vw) book
             (viewer-loader vw) (open-loader
-                                (viewer-source vw)
+                                (let ((p (viewer-source vw))) (lambda () (open-book p)))
                                 (lambda (index)
                                   (%ui-post (lambda () (%on-page-loaded vw index)))))
             (viewer-spreads vw) (compute-spreads (book-page-count book))
@@ -1528,7 +1602,7 @@ UI スレッドで呼ぶこと。"
             (setf (viewer-source vw) path
                   (viewer-book vw) book
                   (viewer-loader vw) (open-loader
-                                      path
+                                      (let ((p path)) (lambda () (open-book p)))
                                       (lambda (i) (%ui-post (lambda () (%on-page-loaded vw i)))))
                   (viewer-spreads vw) spreads
                   (viewer-sindex vw) (spread-index-of spreads page))
@@ -3746,6 +3820,7 @@ TARGET を引数化したので open-in-new-window から任意パスで別ウ�
              (tstack (dotnet:new "Avalonia.Controls.StackPanel"))
              (pane  (dotnet:new "Avalonia.Controls.DockPanel"))
              (ebtn  (dotnet:new "Avalonia.Controls.Button"))
+             (pbtn  (dotnet:new "Avalonia.Controls.Button"))   ; プレビュー (クリップを本として開く; #35 ⑤)
              (scr   (dotnet:new "Avalonia.Controls.ScrollViewer"))
              (stack (dotnet:new "Avalonia.Controls.StackPanel"))
              (overlay (dotnet:new "Avalonia.Controls.Border")))   ; DnD ドロップ可否ハイライト枠 (#20)
@@ -3795,17 +3870,23 @@ TARGET を引数化したので open-in-new-window から任意パスで別ウ�
         (dotnet:invoke overlay "set_IsVisible" nil)
         (dotnet:static "Avalonia.Controls.Grid" "SetColumn" overlay 0)
         (dotnet:static "Avalonia.Controls.Grid" "SetColumnSpan" overlay 4)
-        (dotnet:invoke ebtn "set_Content" "掃き出し (zip)")
-        (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" ebtn
-                       (dotnet:static "Avalonia.Controls.Dock" "Top"))
+        (dotnet:invoke ebtn "set_Content" "掃き出し")
         (dotnet:add-event ebtn "Click" (lambda (s e) (declare (ignore s e)) (%pane-export vw)))
+        (dotnet:invoke pbtn "set_Content" "プレビュー")
+        (dotnet:add-event pbtn "Click" (lambda (s e) (declare (ignore s e)) (%open-clip-as-book vw)))
         (dotnet:invoke scr "set_Content" stack)
         (let ((pc (dotnet:invoke pane "get_Children"))
-              (cbar (%build-clip-bar vw)))          ; クリップ選択バー (#35 ③)
+              (cbar (%build-clip-bar vw))           ; クリップ選択バー (#35 ③)
+              (actions (dotnet:new "Avalonia.Controls.StackPanel")))   ; [プレビュー][掃き出し] (#35 ⑤)
+          (dotnet:invoke actions "set_Orientation" (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
+          (let ((ac (dotnet:invoke actions "get_Children")))
+            (dotnet:invoke ac "Add" pbtn) (dotnet:invoke ac "Add" ebtn))
           (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" cbar
                          (dotnet:static "Avalonia.Controls.Dock" "Top"))
+          (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" actions
+                         (dotnet:static "Avalonia.Controls.Dock" "Top"))
           (dotnet:invoke pc "Add" cbar)
-          (dotnet:invoke pc "Add" ebtn)
+          (dotnet:invoke pc "Add" actions)
           (dotnet:invoke pc "Add" scr))
         (let ((rc (dotnet:invoke root "get_Children")))
           (dotnet:invoke rc "Add" btree)
@@ -3880,7 +3961,7 @@ TARGET を引数化したので open-in-new-window から任意パスで別ウ�
                    (lambda (on) (dotnet:invoke (viewer-dnd-overlay vw) "set_IsVisible" (and on t))))
       ;; 先読みローダーを起動 (vw を closure で参照するので vw 作成後)。
       (setf (viewer-loader vw)
-            (open-loader path
+            (open-loader (let ((p path)) (lambda () (open-book p)))
                          (lambda (index)
                            (%ui-post (lambda () (%on-page-loaded vw index))))))
       (show-spread vw)
