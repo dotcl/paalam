@@ -1235,7 +1235,9 @@ NAS の帯域/レイテンシを隠せる (設定ファイルで調整可)。")
            (page-offsets nil)                            ; 現在見開きの page→(xoff yoff) (ハイライト配置用)
            (toc-entries nil) (toc-filtered nil)          ; 目次 (depth page title) 全件 / 絞り込み後 (#23)
            status-box status-text                        ; ウィンドウ内ステータス表示 (全画面でも見える; #23)
-           menu)                        ; メニューバー (#21; 全画面時に隠す)
+           menu                         ; メニューバー (#21; 全画面時に隠す)
+           (gesturing nil) (gseq "") (glx 0d0) (gly 0d0)  ; マウスジェスチャ: 右ドラッグ中/方向列/直近点 (#29)
+           (gesture-fired nil))         ; 直近の右リリースでジェスチャ発火 → ContextMenu 抑止 (#29)
 
 (defun %reopen (vw)
   "source を開き直して book/loader/spreads を差し替える (再帰トグル等)。現在ページは維持。"
@@ -1542,14 +1544,83 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
                                 "get_Properties")
                  "get_IsLeftButtonPressed"))
 
+(defun %right-pressed-p (vw e)
+  "今この瞬間、右ボタンが押されているか (PointerPoint.Properties)。"
+  (dotnet:invoke (dotnet:invoke (dotnet:invoke e "GetCurrentPoint" (viewer-viewport vw))
+                                "get_Properties")
+                 "get_IsRightButtonPressed"))
+
+;;; マウスジェスチャ (#29): 右ボタンドラッグの方向列 (U/D/L/R, 例 "DL") → コマンド。
+;;; 純粋な右クリック (移動なし) は従来どおりコンテキストメニュー。発火時のみ ContextMenu 抑止。
+(defparameter *gesture-threshold* 28d0 "方向を1つ確定する最小移動量 (px)。")
+(defparameter *default-gestures*
+  '(("L" . :reading-fwd) ("R" . :reading-bwd)
+    ("U" . :first-spread) ("D" . :last-spread))
+  "出荷時のマウスジェスチャ (右ドラッグ方向列 → コマンド id)。左右は読み進む/戻る
+(綴じ方向に追従)、上下は先頭/末尾。")
+(defparameter *gestures* (copy-tree *default-gestures*)
+  "現在のマウスジェスチャ割当 ((方向列 . command-id) ...)。gestures.lisp に永続化。")
+(defun load-gestures ()
+  (let ((d (%read-state "gestures.lisp"))) (when (and (listp d) d) (setf *gestures* d))))
+(defun save-gestures () (%write-state "gestures.lisp" *gestures*))
+
+(defun %gesture-start (vw e)
+  (multiple-value-bind (x y) (%pos-xy e (viewer-viewport vw))
+    (setf (viewer-gesturing vw) t (viewer-gseq vw) ""
+          (viewer-glx vw) x (viewer-gly vw) y
+          (viewer-gesture-fired vw) nil)))
+
+(defun %gesture-step (seq lx ly x y)
+  "方向列 SEQ と直近点 (LX,LY) に点 (X,Y) を取り込む。閾値以上動いていれば方向
+(U/D/L/R) を判定し、直前と違えば追記する。(values seq lx ly moved-p) を返す
+(moved-p=t のとき lx,ly は x,y に更新)。ビューワ本体と編集UIの記録ボックスで共用。"
+  (let ((dx (- x lx)) (dy (- y ly)))
+    (if (>= (max (abs dx) (abs dy)) *gesture-threshold*)
+        (let* ((dir (if (> (abs dx) (abs dy))
+                        (if (> dx 0d0) "R" "L")
+                        (if (> dy 0d0) "D" "U")))
+               (seq2 (if (or (zerop (length seq))
+                             (not (char= (char seq (1- (length seq))) (char dir 0))))
+                         (concatenate 'string seq dir) seq)))
+          (values seq2 x y t))
+        (values seq lx ly nil))))
+
+(defun %gesture-move (vw e)
+  (multiple-value-bind (x y) (%pos-xy e (viewer-viewport vw))
+    (multiple-value-bind (seq lx ly moved)
+        (%gesture-step (viewer-gseq vw) (viewer-glx vw) (viewer-gly vw) x y)
+      (when moved
+        ;; 動いた時点で「ジェスチャ発火」を立てておく (リリースより先に ContextMenu の
+        ;; Opening が走っても確実に抑止できるように; #29)。
+        (setf (viewer-gseq vw) seq (viewer-glx vw) lx (viewer-gly vw) ly
+              (viewer-gesture-fired vw) t)))))
+
+(defun %gesture-end (vw)
+  "右ドラッグ終了。方向列があればコマンド実行し、コンテキストメニューを抑止する。"
+  (when (viewer-gesturing vw)
+    (setf (viewer-gesturing vw) nil)
+    (let ((seq (viewer-gseq vw)))
+      (when (plusp (length seq))
+        (setf (viewer-gesture-fired vw) t)   ; ContextRequested 抑止フラグ
+        (%status vw (format nil "ジェスチャ: ~a" seq))
+        (let ((id (cdr (assoc seq *gestures* :test #'string-equal))))
+          (when id (%run-command vw id)))))))
+
 (defun %on-press (vw e)
   ;; パン開始は左ボタンのみ。メニュー等の押下で誤ってドラッグ状態にしない。
   ;; ルーペ中はパンしない (移動はカーソル追従が担う)。
-  (when (and (not (viewer-loupe vw)) (%left-pressed-p vw e))
-    (multiple-value-bind (x y) (%pos-xy e (viewer-viewport vw))
-      (setf (viewer-dragging vw) t (viewer-lx vw) x (viewer-ly vw) y))))
+  (cond
+    ((and (not (viewer-loupe vw)) (%left-pressed-p vw e))
+     (multiple-value-bind (x y) (%pos-xy e (viewer-viewport vw))
+       (setf (viewer-dragging vw) t (viewer-lx vw) x (viewer-ly vw) y)))
+    ((%right-pressed-p vw e)            ; 右ドラッグ = ジェスチャ開始 (#29)
+     (%gesture-start vw e))))
 
 (defun %on-move (vw e)
+  (when (viewer-gesturing vw)           ; ジェスチャ中は方向を蓄積 (#29)
+    (if (%right-pressed-p vw e)
+        (progn (%gesture-move vw e) (return-from %on-move))
+        (%gesture-end vw)))             ; release 取りこぼしの自己修復
   (when (viewer-loupe vw) (%loupe-follow vw e) (return-from %on-move))
   (when (viewer-dragging vw)
     ;; release を取りこぼして dragging が居残っても、ボタンが離れていれば自己修復で停止
@@ -1562,7 +1633,9 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
           (apply-transform vw))
         (setf (viewer-dragging vw) nil))))
 
-(defun %on-release (vw e) (declare (ignore e)) (setf (viewer-dragging vw) nil))
+(defun %on-release (vw e) (declare (ignore e))
+  (%gesture-end vw)                     ; 右ドラッグ終了でジェスチャ確定 (#29)
+  (setf (viewer-dragging vw) nil))
 
 (defun %fullscreen-p (vw)
   (string= (dotnet:invoke (dotnet:invoke (viewer-window vw) "get_WindowState") "ToString")
@@ -1676,6 +1749,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
    (make-command :open-folder   "開く (フォルダ)…" '()        (lambda (vw) (%open-folder-dialog vw (viewer-window vw))))
    (make-command :settings      "設定…"            '()        (lambda (vw) (%open-settings vw)))
    (make-command :edit-menu     "メニュー編集…"    '()        '%open-menu-editor)
+   (make-command :edit-gestures "マウスジェスチャ編集…" '()    '%open-gesture-editor)
    (make-command :quit          "終了"             '("Q")     '%quit)
    (make-command :next-spread   "次の見開き"       '("PageDown" "Next" "Space" "J") '%next-spread)
    (make-command :prev-spread   "前の見開き"       '("PageUp" "Prior" "Back" "K")   '%prev-spread)
@@ -1715,7 +1789,7 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
 ;;; メニューが変わる (手書きの %build-menu との二重管理を解消)。未掲載のコマンド
 ;;; (reading-fwd/bwd, escape 等の内部操作) はメニューに出さない。
 (defparameter *command-menu*
-  '((:file "ファイル" :open-file :open-folder :settings :edit-menu :quit)
+  '((:file "ファイル" :open-file :open-folder :settings :edit-menu :edit-gestures :quit)
     (:view "表示"    :fullscreen :fit :fit-mode :rotate-left :rotate-right :loupe :slideshow
                      :spread :direction :recursive
                      :browse-pane :thumb-pane :clip-pane)
@@ -2759,9 +2833,17 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
     menu))
 
 (defun %build-context-menu (vw)
-  "ビューポート右クリック用。メニューと同じ *command-menu* 定義から作る (#26)。"
+  "ビューポート右クリック用。メニューと同じ *command-menu* 定義から作る (#26)。
+ジェスチャ発火直後 (右ドラッグでコマンド実行) は Opening を Cancel して開かない (#29)。
+ContextMenu は set_ContextMenu 時に自前で ContextRequested を購読するため、
+外側で ContextRequested を Handled にしても止まらない → Opening.Cancel で止める。"
   (let ((cm (dotnet:new "Avalonia.Controls.ContextMenu")))
     (%add-menu-groups vw cm)
+    (dotnet:add-event cm "Opening"
+                      (lambda (s e) (declare (ignore s))
+                        (when (viewer-gesture-fired vw)
+                          (dotnet:invoke e "set_Cancel" t)
+                          (setf (viewer-gesture-fired vw) nil))))
     cm))
 
 (defun %rebuild-menus (vw)
@@ -2792,6 +2874,113 @@ ITEM は呼び側で除去済み前提 (重複は作らない)。"
   (mapcar (lambda (g) (list (first g) (second g) (copy-list (cddr g)))) menu))
 (defun %menu-denorm (menu) ; 逆変換
   (mapcar (lambda (g) (list* (first g) (second g) (third g))) menu))
+
+;;; マウスジェスチャ編集 (#29)。記録ボックスでドラッグ→方向列、コマンドを選んで
+;;; 追加/更新。gestures.lisp に即保存 (*gestures* はジェスチャ時に直接参照される)。
+(defun %gesture-label (id)
+  (let ((c (%command id))) (if c (command-label c) (format nil "~a" id))))
+
+(defun %open-gesture-editor (vw)
+  "マウスジェスチャ割当の編集ウィンドウ (#29)。記録ボックスでドラッグして方向列を取り、
+コマンドを選んで「追加/更新」。既存はリストから削除、既定に戻すも可。"
+  (let* ((owner (viewer-window vw))
+         (w    (dotnet:new "Avalonia.Controls.Window"))
+         (cap  (dotnet:new "Avalonia.Controls.Border"))
+         (cap-text  (dotnet:new "Avalonia.Controls.TextBlock"))
+         (lst  (dotnet:new "Avalonia.Controls.StackPanel"))
+         (choices (mapcar (lambda (c) (cons (command-label c) (command-id c))) *commands*))
+         (combo (%s-choice-combo choices (command-id (first *commands*))))
+         (capbox (list "" 0d0 0d0 nil)))   ; (seq lx ly active)
+    (labels
+        ((cap-show ()
+           (dotnet:invoke cap-text "set_Text"
+                          (let ((s (first capbox)))
+                            (if (plusp (length s)) (format nil "記録: ~a" s)
+                                "ここでドラッグして方向を記録 (U↑ D↓ L← R→)"))))
+         (refresh ()
+           (let ((items (dotnet:invoke lst "get_Children")))
+             (dotnet:invoke items "Clear")
+             (dolist (g *gestures*)
+               (let* ((seq (car g)) (id (cdr g))
+                      (row (dotnet:new "Avalonia.Controls.DockPanel"))
+                      (lbl (dotnet:new "Avalonia.Controls.TextBlock"))
+                      (del (%s-button "削除" (let ((s seq)) (lambda () (del-gesture s))))))
+                 (dotnet:invoke lbl "set_Text" (format nil "~a  →  ~a" seq (%gesture-label id)))
+                 (dotnet:invoke lbl "set_VerticalAlignment"
+                                (dotnet:static "Avalonia.Layout.VerticalAlignment" "Center"))
+                 (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" del
+                                (dotnet:static "Avalonia.Controls.Dock" "Right"))
+                 (let ((c (dotnet:invoke row "get_Children")))
+                   (dotnet:invoke c "Add" del) (dotnet:invoke c "Add" lbl))
+                 (dotnet:invoke row "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 2d0 0d0 2d0))
+                 (dotnet:invoke items "Add" row)))))
+         (del-gesture (seq)
+           (setf *gestures* (remove seq *gestures* :key #'car :test #'string-equal))
+           (save-gestures) (refresh))
+         (add-gesture ()
+           (let ((seq (first capbox)) (id (%s-combo-value combo choices)))
+             (when (and (plusp (length seq)) id)
+               ;; 同じ方向列の既存割当は置き換え (先頭に積む)。
+               (setf *gestures* (cons (cons seq id)
+                                      (remove seq *gestures* :key #'car :test #'string-equal)))
+               (save-gestures) (refresh))))
+         (reset-default ()
+           (setf *gestures* (copy-tree *default-gestures*)) (save-gestures) (refresh)))
+      (dotnet:invoke cap "set_Height" 90d0)
+      (dotnet:invoke cap "set_Background" (dotnet:static "Avalonia.Media.Brushes" "DimGray"))
+      (dotnet:invoke cap-text "set_HorizontalAlignment"
+                     (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Center"))
+      (dotnet:invoke cap-text "set_VerticalAlignment"
+                     (dotnet:static "Avalonia.Layout.VerticalAlignment" "Center"))
+      (dotnet:invoke cap "set_Child" cap-text)
+      (cap-show)
+      (dotnet:add-event cap "PointerPressed"
+                        (lambda (s e) (declare (ignore s))
+                          (multiple-value-bind (x y) (%pos-xy e cap)
+                            (setf (first capbox) "" (second capbox) x (third capbox) y
+                                  (fourth capbox) t)
+                            (cap-show))))
+      (dotnet:add-event cap "PointerMoved"
+                        (lambda (s e) (declare (ignore s))
+                          (when (fourth capbox)
+                            (multiple-value-bind (x y) (%pos-xy e cap)
+                              (multiple-value-bind (seq lx ly moved)
+                                  (%gesture-step (first capbox) (second capbox) (third capbox) x y)
+                                (when moved
+                                  (setf (first capbox) seq (second capbox) lx (third capbox) ly)
+                                  (cap-show)))))))
+      (dotnet:add-event cap "PointerReleased"
+                        (lambda (s e) (declare (ignore s e))
+                          (setf (fourth capbox) nil) (cap-show)))
+      (refresh)
+      (let* ((root (dotnet:new "Avalonia.Controls.StackPanel"))
+             (addrow (dotnet:new "Avalonia.Controls.StackPanel"))
+             (btns (dotnet:new "Avalonia.Controls.StackPanel")))
+        (dotnet:invoke addrow "set_Orientation" (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
+        (dotnet:invoke addrow "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 8d0 0d0 0d0))
+        (let ((c (dotnet:invoke addrow "get_Children")))
+          (dotnet:invoke c "Add" combo)
+          (dotnet:invoke c "Add" (%s-button "追加/更新" (lambda () (add-gesture)))))
+        (dotnet:invoke btns "set_Orientation" (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
+        (dotnet:invoke btns "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 12d0 0d0 0d0))
+        (let ((c (dotnet:invoke btns "get_Children")))
+          (dotnet:invoke c "Add" (%s-button "既定に戻す" (lambda () (reset-default))))
+          (dotnet:invoke c "Add" (%s-button "閉じる" (lambda () (dotnet:invoke w "Close")))))
+        (dotnet:invoke root "set_Margin" (dotnet:new "Avalonia.Thickness" 12d0))
+        (let ((c (dotnet:invoke root "get_Children")))
+          (dotnet:invoke c "Add" (%s-header "マウスジェスチャ (右ドラッグの方向列 → コマンド)"))
+          (dotnet:invoke c "Add" cap)
+          (dotnet:invoke c "Add" addrow)
+          (dotnet:invoke c "Add" (%s-header "現在の割当"))
+          (dotnet:invoke c "Add" lst)
+          (dotnet:invoke c "Add" btns))
+        (dotnet:invoke w "set_Content" root))
+      (dotnet:invoke w "set_Title" "マウスジェスチャ編集")
+      (dotnet:invoke w "set_Width" 400d0)
+      (dotnet:invoke w "set_SizeToContent" (dotnet:static "Avalonia.Controls.SizeToContent" "Height"))
+      (dotnet:invoke w "set_WindowStartupLocation"
+                     (dotnet:static "Avalonia.Controls.WindowStartupLocation" "CenterOwner"))
+      (dotnet:invoke w "ShowDialog" owner))))
 
 (defun %open-menu-editor (vw)
   "メニュー構成の編集ウィンドウ (#32: NeeView 流 TreeView + ドラッグ&ドロップ + 右クリック)。
@@ -3101,7 +3290,7 @@ TARGET を引数化したので open-in-new-window から任意パスで別ウ�
                                            (dotnet:static "Avalonia.Media.Brushes"
                                                           (if on "SteelBlue" "DimGray")))))
         ;; メニューバー (#21): Window.Content を DockPanel [Menu(Top) | root] に包む。
-        (dotnet:invoke vport "set_ContextMenu" (%build-context-menu vw))   ; 右クリックメニュー (#26)
+        (dotnet:invoke vport "set_ContextMenu" (%build-context-menu vw))   ; 右クリックメニュー (#26; ジェスチャ抑止込み #29)
         (let ((dock (dotnet:new "Avalonia.Controls.DockPanel"))
               (menu (%build-menu vw win)))
           (setf (viewer-menu vw) menu)
@@ -3232,6 +3421,7 @@ lifetime.Shutdown する (起動確認の自動終了)。本番起動 (Finder/la
   (load-history)
   (load-bookmarks)
   (load-clip)
+  (load-gestures)
   (setf *target-path* target)
   (let* ((b    (dotnet:static-generic "Avalonia.AppBuilder" "Configure" (list "Paalam.App")))
          (b    (dotnet:static "Avalonia.AppBuilderDesktopExtensions" "UsePlatformDetect" b))
