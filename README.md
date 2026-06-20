@@ -88,6 +88,22 @@ NuGet 参照のみ（dotcl repo へのソース依存なし）:
 - `Avalonia` / `Avalonia.Desktop` / `Avalonia.Themes.Fluent`
 - `SharpCompress`（書庫）/ `PDFtoImage`（PDF）
 
+## Windows インストーラ
+
+```powershell
+# Inno Setup 6 が必要: winget install --id JRSoftware.InnoSetup
+make win-installer                                  # x64 + arm64 両方
+powershell -File packaging\windows\build.ps1 -Arch x64   # 片方だけ
+```
+
+`dist\paalam-setup-<arch>.exe` が生成されます。**per-user インストール**
+（`%LOCALAPPDATA%\Programs\paalam`、管理者権限不要）で、スタートメニューの
+ショートカットとアンインストーラが付きます。中身は self-contained publish の
+出力なので、.NET ランタイムが入っていないマシンでも起動できます。
+
+ファイル関連付けはインストーラでは行いません（アプリ内の per-user 関連付けに
+任せる方針）。スクリプト本体は `packaging/windows/`（`paalam.iss` + `build.ps1`）。
+
 ## macOS の .app バンドル
 
 ```sh

@@ -4,6 +4,7 @@
 #   make run                dotnet run (引数は ARGS で渡す: make run ARGS=~/manga.zip)
 #   make publish            framework-dependent publish (RID 自動判定)
 #   make app                macOS: dist/paalam.app を作る (framework-dependent)
+#   make win-installer      Windows: dist/paalam-setup-<arch>.exe を作る (Inno Setup)
 #   make clean              bin/ obj/ dist/ を消す
 #
 # RID はホストから自動判定。明示するなら: make publish RID=linux-x64
@@ -29,7 +30,7 @@ endif
 
 PUBLISH_DIR := dist/publish-$(RID)
 
-.PHONY: build run publish app clean
+.PHONY: build run publish app win-installer clean
 
 build:
 	dotnet build -c $(CONFIG)
@@ -55,6 +56,11 @@ ifneq ($(UNAME_S),Darwin)
 endif
 	$(MAKE) publish SELF_CONTAINED=true
 	PUBLISH_DIR="$(PUBLISH_DIR)" RID="$(RID)" packaging/macos/make-app.sh
+
+# Windows のインストーラ (Inno Setup)。Windows 専用。
+# self-contained publish → ISCC を packaging/windows/build.ps1 が両 RID 分まわす。
+win-installer:
+	powershell -ExecutionPolicy Bypass -File packaging/windows/build.ps1 $(if $(ARCH),-Arch $(ARCH))
 
 clean:
 	rm -rf bin obj dist
