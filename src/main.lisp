@@ -912,6 +912,45 @@ Avalonia の Bitmap で decode→CreateScaledBitmap→PNG Save (サムネ #6 と
               (%focus-viewport vw))         ; ボタンにフォーカスを残さない (Space 等を食われる)
           (error (e) (log-err "open-clip-as-book" e))))))
 
+;;; クリップ編集の vi カーソル (#35 ④ Phase 1)。clip-stack に focus している間だけ
+;;; j/k 移動・x 削除・Esc 復帰が効く (キーは Handled=t で窓の %on-key に漏らさない)。
+(defun %clip-cursor-highlight (vw)
+  "各セル (Border ラップ) の枠を、カーソル位置だけ強調し、カーソルを表示範囲へスクロール。"
+  (let* ((children (dotnet:invoke (viewer-clip-stack vw) "get_Children"))
+         (n (dotnet:invoke children "get_Count"))
+         (cur (viewer-clip-cursor vw)))
+    (dotimes (i n)
+      (ignore-errors
+        (dotnet:invoke (dotnet:invoke children "get_Item" i) "set_BorderBrush"
+                       (dotnet:static "Avalonia.Media.Brushes"
+                                      (if (= i cur) "DeepSkyBlue" "Transparent")))))
+    ;; カーソルが画面外へ出ないよう ScrollViewer.Offset を直接動かして追従 (#35 ④)。
+    (let ((scr (viewer-clip-scroll vw)))
+      (when (and scr (plusp n) (< cur n))
+        (ignore-errors
+          (let* ((b   (dotnet:invoke (dotnet:invoke children "get_Item" cur) "get_Bounds"))
+                 (cy  (dotnet:invoke b "get_Y"))
+                 (ch  (dotnet:invoke b "get_Height"))
+                 (vh  (dotnet:invoke (dotnet:invoke scr "get_Viewport") "get_Height"))
+                 (off (dotnet:invoke scr "get_Offset"))
+                 (oy  (dotnet:invoke off "get_Y"))
+                 (ny  (cond ((< cy oy) cy)                              ; 上にはみ出し → 上へ
+                            ((> (+ cy ch) (+ oy vh)) (max 0d0 (- (+ cy ch) vh)))  ; 下 → 下端合わせ
+                            (t oy))))
+            (when (/= ny oy)
+              (dotnet:invoke scr "set_Offset" (dotnet:new "Avalonia.Vector" 0d0 ny)))))))))
+(defun %clip-cursor-move (vw d)
+  (let ((n (length *clip*)))
+    (when (plusp n)
+      (setf (viewer-clip-cursor vw) (max 0 (min (1- n) (+ (viewer-clip-cursor vw) d))))
+      (%clip-cursor-highlight vw))))
+(defun %clip-cursor-delete (vw)
+  (let ((n (length *clip*)) (cur (viewer-clip-cursor vw)))
+    (when (and (plusp n) (< cur n))
+      (%clip-remove-at vw cur)              ; ペインを再構築する
+      (setf (viewer-clip-cursor vw) (max 0 (min cur (1- (max 1 (length *clip*))))))
+      (%clip-cursor-highlight vw))))
+
 (defun %rebuild-clip-pane (vw)
   "clip-stack を作り直す。キャッシュ済みサムネは即表示、未キャッシュのみ背景で
 ロードして %thumb-cache に貯めつつ差し込む (二度目以降は source 再取得なし)。"
@@ -924,6 +963,7 @@ Avalonia の Bitmap で decode→CreateScaledBitmap→PNG Save (サムネ #6 と
       (let ((img  (dotnet:new "Avalonia.Controls.Image"))
             (cell (dotnet:new "Avalonia.Controls.Grid"))   ; img + × を重ねる
             (xbtn (dotnet:new "Avalonia.Controls.Button"))
+            (hl   (dotnet:new "Avalonia.Controls.Border")) ; カーソル枠 (#35 ④)
             (idx i)
             (cached (%thumb-get (car item) (cdr item))))
         (dotnet:invoke img "set_Width" 200d0)
@@ -935,6 +975,9 @@ Avalonia の Bitmap で decode→CreateScaledBitmap→PNG Save (サムネ #6 と
             (dotnet:invoke e "set_Handled" t)   ; ウィンドウのパンを起こさない
             (when (dotnet:invoke (dotnet:invoke (dotnet:invoke e "GetCurrentPoint" img)
                                                 "get_Properties") "get_IsLeftButtonPressed")
+              (setf (viewer-clip-cursor vw) idx)                ; #35 ④ カーソルをここへ
+              (ignore-errors (dotnet:invoke stack "Focus"))     ; 編集コンテキスト (stack focus) へ
+              (%clip-cursor-highlight vw)
               (setf (viewer-reorder-from vw) idx (viewer-reorder-img vw) img)
               (dotnet:invoke img "set_Opacity" 0.4d0)   ; 掴んでる感
               (%ensure-reorder-line vw)
@@ -975,7 +1018,13 @@ Avalonia の Bitmap で decode→CreateScaledBitmap→PNG Save (サムネ #6 と
         (if cached
             (dotnet:invoke img "set_Source" cached)
             (push (cons img item) pending))
-        (dotnet:invoke children "Add" cell)))
+        (dotnet:invoke hl "set_BorderThickness" (dotnet:new "Avalonia.Thickness" 2d0))  ; #35 ④ カーソル枠
+        (dotnet:invoke hl "set_Child" cell)
+        (dotnet:invoke children "Add" hl)))
+    ;; カーソルを範囲内へ収め、枠ハイライトを反映 (#35 ④)。
+    (let ((n (length snapshot)))
+      (setf (viewer-clip-cursor vw) (max 0 (min (viewer-clip-cursor vw) (max 0 (1- n))))))
+    (%clip-cursor-highlight vw)
     (when pending
       (setf pending (nreverse pending))
       (make-thread
@@ -1022,7 +1071,15 @@ Avalonia の Bitmap で decode→CreateScaledBitmap→PNG Save (サムネ #6 と
   (let* ((pane (viewer-clip-pane vw))
          (vis (dotnet:invoke pane "get_IsVisible")))
     (dotnet:invoke pane "set_IsVisible" (not vis))
-    (unless vis (%rebuild-clip-pane vw))))
+    (cond ((not vis)                       ; これから表示 → 再構築してすぐ編集できるよう focus (#35 ④)
+           (%rebuild-clip-pane vw)
+           ;; 初回はペインのレイアウト完了前に Focus すると効かないので少し遅延させる。
+           (%defer (lambda ()
+                     (ignore-errors (dotnet:invoke (viewer-clip-stack vw) "Focus"))
+                     (%clip-cursor-highlight vw))
+                   120))
+          (t                               ; これから非表示 → ビューポートへ戻す
+           (%focus-viewport vw)))))
 
 (defun %clip-drop (vw path)
   "ペインにドロップされた path を素材に追加 (画像=親フォルダ+そのページ、
@@ -1544,6 +1601,8 @@ clip-book も乗せるため path ではなく factory を取る)。"
            (dragging nil) (lx 0d0) (ly 0d0)
            clip-pane clip-stack         ; 素材ペイン (#18 Phase 2)
            clip-combo                   ; クリップ選択コンボ (#35 ③)
+           clip-scroll                  ; 素材ペインの ScrollViewer (カーソル追従用; #35 ④)
+           (clip-cursor 0)              ; クリップ編集の vi カーソル位置 (#35 ④)
            thumb-pane thumb-stack       ; ページサムネ本棚 (#6 A)
            browse-pane browse-tree      ; フォルダツリー (#6 B)
            (reorder-from nil)           ; ドラッグ並べ替え中の元 index (Phase 3)
@@ -3875,6 +3934,22 @@ TARGET を引数化したので open-in-new-window から任意パスで別ウ�
         (dotnet:invoke pbtn "set_Content" "プレビュー")
         (dotnet:add-event pbtn "Click" (lambda (s e) (declare (ignore s e)) (%open-clip-as-book vw)))
         (dotnet:invoke scr "set_Content" stack)
+        (setf (viewer-clip-scroll vw) scr)   ; カーソル追従スクロール用 (#35 ④)
+        ;; クリップ編集の vi キー (#35 ④ Phase 1)。stack に focus 中だけ効く局所ハンドラ。
+        ;; Handled=t で窓の %on-key (P=ペイン/D=方向 等) に漏らさない (キー衝突回避)。
+        (dotnet:invoke stack "set_Focusable" t)
+        (dotnet:add-event stack "KeyDown"
+          (lambda (s e) (declare (ignore s))
+            (let ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString")))
+              (cond
+                ((member kn '("J" "Down") :test #'string=)
+                 (dotnet:invoke e "set_Handled" t) (%clip-cursor-move vw 1))
+                ((member kn '("K" "Up") :test #'string=)
+                 (dotnet:invoke e "set_Handled" t) (%clip-cursor-move vw -1))
+                ((member kn '("X" "Delete") :test #'string=)
+                 (dotnet:invoke e "set_Handled" t) (%clip-cursor-delete vw))
+                ((string= kn "Escape")
+                 (dotnet:invoke e "set_Handled" t) (%focus-viewport vw))))))
         (let ((pc (dotnet:invoke pane "get_Children"))
               (cbar (%build-clip-bar vw))           ; クリップ選択バー (#35 ③)
               (actions (dotnet:new "Avalonia.Controls.StackPanel")))   ; [プレビュー][掃き出し] (#35 ⑤)
