@@ -2514,20 +2514,6 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
   (let ((box (viewer-status-box vw)))
     (when box (dotnet:invoke box "set_IsVisible" nil))))
 
-(defparameter *settings-search-index*
-  ;; (項目ラベル . ページ名)。検索ボックスで横断ヒット→ページへジャンプ (#27)。
-  ;; ページの %s-row ラベルと一致させること (ラベルを変えたらここも更新)。
-  '(("綴じ方向 (画像/書庫)" . "レイアウト") ("綴じ方向 (PDF)" . "レイアウト")
-    ("見開き" . "レイアウト") ("表紙を単独表示" . "レイアウト")
-    ("サブフォルダも再帰収集" . "レイアウト") ("フィット" . "レイアウト")
-    ("背景色" . "画質") ("拡大補間" . "画質") ("PDF 解像度 (DPI)" . "画質")
-    ("キャッシュ上限 (MB)" . "先読み") ("キャッシュ最大ページ数" . "先読み")
-    ("先読み見開き数" . "先読み") ("ローダースレッド数" . "先読み")
-    ("スライドショー間隔 (秒)" . "先読み")
-    ("キー割当" . "キー割当") ("ショートカット" . "キー割当") ("キーバインド" . "キー割当")
-    ("関連付け" . "関連付け") ("拡張子" . "関連付け") ("ファイル関連付け" . "関連付け"))
-  "設定の全文検索インデックス (#27)。")
-
 (defun %open-settings (vw)
   ;; 左に折りたたみツリー (カテゴリ)、右に該当ページ。選択で右を差し替える master/detail。
   ;; OK/キャンセルは全ページ共通 (コントロールは非表示でも値を保持するので OK で読める)。
@@ -2557,7 +2543,12 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
          (content  (dotnet:new "Avalonia.Controls.ContentControl"))
          (win-p (dotnet:static "System.OperatingSystem" "IsWindows"))  ; 関連付けは Windows のみ (#11)
          (assoc-status (dotnet:new "Avalonia.Controls.TextBlock"))
-         (cur (list "レイアウト")))   ; 現在のページ名 (検索クリア時の復帰先; #27)
+         (cur (list "レイアウト"))   ; 現在のページ名 (検索クリア時の復帰先; #27)
+         ;; 検索インデックス (項目ラベル . ページ名)。ページ構築 (spage) が各行を登録するので
+         ;; 二重管理にならない。種類が特殊で %s-row を使わないページ (キー割当/関連付け) の
+         ;; 別名だけ種として置く (ページ名そのものは do-search が pages から直接引く)。
+         (sidx (list (list (cons "ショートカット" "キー割当") (cons "キーバインド" "キー割当")
+                           (cons "拡張子" "関連付け") (cons "ファイル関連付け" "関連付け")))))
     (labels
         ((add-binding (k)
            ;; 数字 1-9 は count プレフィックス予約で割当てても発火しないので弾く (#23)。0 は可。
@@ -2609,6 +2600,14 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
              (let ((ch (dotnet:invoke p "get_Children")))
                (dolist (r rows) (dotnet:invoke ch "Add" r)))
              p))
+         (spage (name pairs)
+           "NAME 見出し + (ラベル . コントロール) の行を並べた設定ページ。各ラベルを
+検索インデックス sidx に登録するので、ページ定義そのものが検索の出どころになる (#27)。"
+           (page (cons (%s-header name)
+                       (mapcar (lambda (pr)
+                                 (push (cons (car pr) name) (car sidx))
+                                 (%s-row (car pr) (cdr pr)))
+                               pairs))))
          (tvi (header &optional children)
            "TreeViewItem を作る (children があれば展開済みの親ノード)。"
            (let ((it (dotnet:new "Avalonia.Controls.TreeViewItem")))
@@ -2688,25 +2687,25 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
                                     (nreverse acc)))
                             (refresh))))
              (panel-layout
-               (page (list (%s-header "レイアウト")
-                           (%s-row "綴じ方向 (画像/書庫)" dir-img-combo)
-                           (%s-row "綴じ方向 (PDF)" dir-pdf-combo)
-                           (%s-row "見開き" cb-spread)
-                           (%s-row "表紙を単独表示" cb-fps)
-                           (%s-row "サブフォルダも再帰収集" cb-rec)
-                           (%s-row "フィット" fit-combo))))
+               (spage "レイアウト"
+                      (list (cons "綴じ方向 (画像/書庫)" dir-img-combo)
+                            (cons "綴じ方向 (PDF)" dir-pdf-combo)
+                            (cons "見開き" cb-spread)
+                            (cons "表紙を単独表示" cb-fps)
+                            (cons "サブフォルダも再帰収集" cb-rec)
+                            (cons "フィット" fit-combo))))
              (panel-quality
-               (page (list (%s-header "画質")
-                           (%s-row "背景色" bg-combo)
-                           (%s-row "拡大補間" interp-combo)
-                           (%s-row "PDF 解像度 (DPI)" tb-dpi))))
+               (spage "画質"
+                      (list (cons "背景色" bg-combo)
+                            (cons "拡大補間" interp-combo)
+                            (cons "PDF 解像度 (DPI)" tb-dpi))))
              (panel-perf
-               (page (list (%s-header "先読み")
-                           (%s-row "キャッシュ上限 (MB)" tb-mem)
-                           (%s-row "キャッシュ最大ページ数" tb-cache)
-                           (%s-row "先読み見開き数" tb-pf)
-                           (%s-row "ローダースレッド数" tb-th)
-                           (%s-row "スライドショー間隔 (秒)" tb-slide))))
+               (spage "先読み"
+                      (list (cons "キャッシュ上限 (MB)" tb-mem)
+                            (cons "キャッシュ最大ページ数" tb-cache)
+                            (cons "先読み見開き数" tb-pf)
+                            (cons "ローダースレッド数" tb-th)
+                            (cons "スライドショー間隔 (秒)" tb-slide))))
              (panel-keys
                (progn
                  (dotnet:invoke scr "set_MaxHeight" 360d0)
@@ -2747,9 +2746,15 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
                                       (cdr (assoc (car cur) pages :test #'equal)))
                        (let ((res (dotnet:new "Avalonia.Controls.StackPanel"))
                              (hits (remove-duplicates
-                                    (loop for (label . page) in *settings-search-index*
-                                          when (search qq (string-downcase label))
-                                          collect (cons label page))
+                                    (append
+                                     ;; ページ名そのもの (レイアウト/画質/…) もヒット対象。
+                                     (loop for (nm . pg) in pages
+                                           when (search qq (string-downcase nm))
+                                           collect (cons nm nm))
+                                     ;; 各ページが登録した項目ラベル + 特殊ページの別名。
+                                     (loop for (label . page) in (car sidx)
+                                           when (search qq (string-downcase label))
+                                           collect (cons label page)))
                                     :test #'equal :from-end t)))
                          (dotnet:invoke res "set_Margin" (dotnet:new "Avalonia.Thickness" 16d0))
                          (if hits
