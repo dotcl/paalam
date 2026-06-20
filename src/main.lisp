@@ -333,6 +333,9 @@
   "ウィンドウ背景 (= フィット時の余白/レターボックス) のブラシ名。Avalonia.Media.Brushes の名前 (#2)。")
 (defparameter *interpolation* :high
   "拡大時の補間品質。:high=HighQuality (なめらか), :low=LowQuality (くっきり寄り) (#2)。")
+(defparameter *theme* :system
+  "UI テーマ (メニュー/ダイアログ等 FluentTheme 部の配色)。:system=OS のライト/ダークに
+追従 (ThemeVariant.Default)、:light / :dark で固定 (#27)。画像表示の背景は別途 *background-color*。")
 
 ;;; --- 設定の永続化 (s式 plist / OS の app data) ---------------------
 (defparameter *settings*
@@ -344,6 +347,7 @@
     (:fit-mode          . *fit-mode*)
     (:background-color  . *background-color*)
     (:interpolation     . *interpolation*)
+    (:theme             . *theme*)
     (:pdf-dpi           . *pdf-dpi*)
     (:cache-memory-mb   . *cache-memory-mb*)
     (:cache-size        . *cache-size*)
@@ -1044,6 +1048,12 @@ TARGET がツリーに出ない種別 (素の画像等) なら、辿れた最後
   "並列ローダースレッド数。各スレッドが自前の書庫ハンドルで同時に読むので、
 NAS の帯域/レイテンシを隠せる (設定ファイルで調整可)。")
 
+;; 出荷時の設定値スナップショット (全設定変数を定義し終えた今・load-settings の前に取る)。
+;; 設定ウィンドウのページ毎「既定に戻す」用 (#27)。*settings* のキー → 既定値。
+(defparameter *setting-defaults*
+  (mapcar (lambda (e) (cons (car e) (symbol-value (cdr e)))) *settings*)
+  "出荷時の (設定キー . 既定値)。各ページ「既定に戻す」が参照する。")
+
 (defstruct loader
   books                               ; 書庫ハンドルの vector (ワーカーが分担)
   (cache (make-hash-table))           ; index -> Avalonia Bitmap
@@ -1304,6 +1314,19 @@ UI スレッドで呼ぶこと。"
   (ignore-errors
     (dotnet:invoke (viewer-viewport vw) "set_Background"
                    (dotnet:static "Avalonia.Media.Brushes" *background-color*))))
+
+(defun %theme-variant (kw)
+  "テーマ keyword → Avalonia.Styling.ThemeVariant 静的値。:system=Default (OS 追従)。"
+  (dotnet:static "Avalonia.Styling.ThemeVariant"
+                 (case kw (:light "Light") (:dark "Dark") (t "Default"))))
+
+(defun %apply-theme ()
+  "*theme* を Application.RequestedThemeVariant に反映 (全ウィンドウのクロムに効く; #27)。
+:system は Default = OS のライト/ダーク追従。"
+  (ignore-errors
+    (let ((app (dotnet:static "Avalonia.Application" "Current")))
+      (when app
+        (dotnet:invoke app "set_RequestedThemeVariant" (%theme-variant *theme*))))))
 
 (defun %apply-interpolation (vw)
   "拡大補間品質を左右画像に設定 (#2)。:none=ニアレスト(ドット絵向け)/:low/:high。"
@@ -2019,6 +2042,8 @@ indeterminate が要るなら (dotnet:null)。"
 (defparameter *bg-choices*     '(("黒" . "Black") ("濃い灰" . "DimGray") ("灰" . "Gray") ("白" . "White")))
 (defparameter *interp-choices*
   '(("高品質 (なめらか)" . :high) ("低品質" . :low) ("なし (ドット絵/最近傍)" . :none)))
+(defparameter *theme-choices*
+  '(("システム追従 (OS のライト/ダーク)" . :system) ("ライト" . :light) ("ダーク" . :dark)))
 
 (defun %s-choice-combo (choices current &optional (test #'eql))
   "(ラベル . 値) の CHOICES から ComboBox を作り、CURRENT の項目を選択。"
@@ -2096,7 +2121,7 @@ indeterminate が要るなら (dotnet:null)。"
 
 (defun %settings-apply (vw cb-spread cb-fps cb-rec tb-cache tb-pf tb-th
                         fit-combo bg-combo interp-combo tb-dpi tb-mem tb-slide
-                        dir-img-combo dir-pdf-combo)
+                        dir-img-combo dir-pdf-combo theme-combo)
   "コントロールの現在値をグローバルへ反映し永続化、変更内容に応じて再描画する。"
   (let ((old-spread *spread*) (old-fps *first-page-single*)
         (old-rec *recursive*) (old-threads *loader-threads*) (old-dpi *pdf-dpi*))
@@ -2110,6 +2135,7 @@ indeterminate が要るなら (dotnet:null)。"
           *fit-mode*          (%s-combo-value fit-combo *fit-choices*)
           *background-color*  (%s-combo-value bg-combo *bg-choices*)
           *interpolation*     (%s-combo-value interp-combo *interp-choices*)
+          *theme*             (%s-combo-value theme-combo *theme-choices*)
           *pdf-dpi*           (%parse-int (dotnet:invoke tb-dpi "get_Text") *pdf-dpi* 36)
           *cache-memory-mb*   (%parse-int (dotnet:invoke tb-mem "get_Text") *cache-memory-mb* 16)
           *slideshow-interval* (%parse-int (dotnet:invoke tb-slide "get_Text") *slideshow-interval* 1)
@@ -2117,6 +2143,7 @@ indeterminate が要るなら (dotnet:null)。"
           *prefetch-ahead*    (%parse-int (dotnet:invoke tb-pf "get_Text") *prefetch-ahead* 0)
           *loader-threads*    (%parse-int (dotnet:invoke tb-th "get_Text") *loader-threads* 1))
     (save-settings)
+    (%apply-theme)               ; UI テーマ (システム追従/ライト/ダーク; #27)
     (%apply-background vw)       ; 背景色 (#2)
     (%apply-interpolation vw)    ; 補間品質 (#2)
     ;; 反映の重さ順: recursive/スレッド数/PDF DPI は本を開き直す (キャッシュを再生成)、
@@ -2532,6 +2559,7 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
          (fit-combo    (%s-choice-combo *fit-choices* *fit-mode*))
          (bg-combo     (%s-choice-combo *bg-choices* *background-color* #'string=))
          (interp-combo (%s-choice-combo *interp-choices* *interpolation*))
+         (theme-combo  (%s-choice-combo *theme-choices* *theme*))
          (tb-dpi    (%s-textbox *pdf-dpi*))
          ;; キー割当の作業用コピー。(car kbox) が作業リスト。クロージャからは
          ;; (setf (car kbox) ..) で place を書き換える (let* 変数の再束縛は dotcl が不正 IL)。
@@ -2600,14 +2628,25 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
              (let ((ch (dotnet:invoke p "get_Children")))
                (dolist (r rows) (dotnet:invoke ch "Add" r)))
              p))
-         (spage (name pairs)
-           "NAME 見出し + (ラベル . コントロール) の行を並べた設定ページ。各ラベルを
-検索インデックス sidx に登録するので、ページ定義そのものが検索の出どころになる (#27)。"
-           (page (cons (%s-header name)
-                       (mapcar (lambda (pr)
-                                 (push (cons (car pr) name) (car sidx))
-                                 (%s-row (car pr) (cdr pr)))
-                               pairs))))
+         (sd (key) (cdr (assoc key *setting-defaults*)))
+         (reset-check (cb key) (lambda () (%set-check cb (sd key))))
+         (reset-combo (combo choices key &optional (test #'eql))
+           (lambda () (dotnet:invoke combo "set_SelectedIndex"
+                                     (or (position (sd key) choices :key #'cdr :test test) 0))))
+         (reset-text (tb key) (lambda () (dotnet:invoke tb "set_Text" (format nil "~a" (sd key)))))
+         (spage (name rows)
+           "NAME 見出し + (ラベル コントロール 既定化thunk) の行を並べた設定ページ。各ラベルを
+検索インデックス sidx に登録 (ページ定義が検索の出どころ; #27)、末尾に「このページを既定に
+戻す」(各 thunk を呼びコントロールを出荷時値へ; グローバルは OK まで触らない; #27)。"
+           (let ((resets (mapcar #'third rows)))
+             (page (append
+                    (cons (%s-header name)
+                          (mapcar (lambda (r)
+                                    (push (cons (first r) name) (car sidx))
+                                    (%s-row (first r) (second r)))
+                                  rows))
+                    (list (%s-button "このページを既定に戻す"
+                                     (lambda () (dolist (f resets) (funcall f)))))))))
          (tvi (header &optional children)
            "TreeViewItem を作る (children があれば展開済みの親ノード)。"
            (let ((it (dotnet:new "Avalonia.Controls.TreeViewItem")))
@@ -2688,24 +2727,25 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
                             (refresh))))
              (panel-layout
                (spage "レイアウト"
-                      (list (cons "綴じ方向 (画像/書庫)" dir-img-combo)
-                            (cons "綴じ方向 (PDF)" dir-pdf-combo)
-                            (cons "見開き" cb-spread)
-                            (cons "表紙を単独表示" cb-fps)
-                            (cons "サブフォルダも再帰収集" cb-rec)
-                            (cons "フィット" fit-combo))))
+                      (list (list "綴じ方向 (画像/書庫)" dir-img-combo (reset-combo dir-img-combo *dir-choices* :image-direction))
+                            (list "綴じ方向 (PDF)" dir-pdf-combo (reset-combo dir-pdf-combo *dir-choices* :pdf-direction))
+                            (list "見開き" cb-spread (reset-check cb-spread :spread))
+                            (list "表紙を単独表示" cb-fps (reset-check cb-fps :first-page-single))
+                            (list "サブフォルダも再帰収集" cb-rec (reset-check cb-rec :recursive))
+                            (list "フィット" fit-combo (reset-combo fit-combo *fit-choices* :fit-mode)))))
              (panel-quality
                (spage "画質"
-                      (list (cons "背景色" bg-combo)
-                            (cons "拡大補間" interp-combo)
-                            (cons "PDF 解像度 (DPI)" tb-dpi))))
+                      (list (list "テーマ" theme-combo (reset-combo theme-combo *theme-choices* :theme))
+                            (list "背景色" bg-combo (reset-combo bg-combo *bg-choices* :background-color #'string=))
+                            (list "拡大補間" interp-combo (reset-combo interp-combo *interp-choices* :interpolation))
+                            (list "PDF 解像度 (DPI)" tb-dpi (reset-text tb-dpi :pdf-dpi)))))
              (panel-perf
                (spage "先読み"
-                      (list (cons "キャッシュ上限 (MB)" tb-mem)
-                            (cons "キャッシュ最大ページ数" tb-cache)
-                            (cons "先読み見開き数" tb-pf)
-                            (cons "ローダースレッド数" tb-th)
-                            (cons "スライドショー間隔 (秒)" tb-slide))))
+                      (list (list "キャッシュ上限 (MB)" tb-mem (reset-text tb-mem :cache-memory-mb))
+                            (list "キャッシュ最大ページ数" tb-cache (reset-text tb-cache :cache-size))
+                            (list "先読み見開き数" tb-pf (reset-text tb-pf :prefetch-ahead))
+                            (list "ローダースレッド数" tb-th (reset-text tb-th :loader-threads))
+                            (list "スライドショー間隔 (秒)" tb-slide (reset-text tb-slide :slideshow-interval)))))
              (panel-keys
                (progn
                  (dotnet:invoke scr "set_MaxHeight" 360d0)
@@ -2818,7 +2858,7 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
               (lambda ()
                 (%settings-apply vw cb-spread cb-fps cb-rec tb-cache tb-pf tb-th
                                  fit-combo bg-combo interp-combo tb-dpi tb-mem tb-slide
-                                 dir-img-combo dir-pdf-combo)
+                                 dir-img-combo dir-pdf-combo theme-combo)
                 ;; キー指向の作業リストを機能ごとにまとめ直して確定 (削除は空リストで反映)。
                 (setf *keybinds*
                       (mapcar (lambda (c)
@@ -3459,7 +3499,8 @@ lifetime.Shutdown する (起動確認の自動終了)。本番起動 (Finder/la
     (handler-case
         (let ((styles (dotnet:invoke self "get_Styles"))
               (theme (dotnet:new "Avalonia.Themes.Fluent.FluentTheme")))
-          (dotnet:invoke styles "Add" theme))
+          (dotnet:invoke styles "Add" theme)
+          (%apply-theme))              ; OS 追従 or 固定テーマを反映 (#27)
       (error (e) (log-err "ctor" e))))
   (:methods
     ("OnFrameworkInitializationCompleted" () :returns Void :override t
