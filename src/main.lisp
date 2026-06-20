@@ -636,7 +636,10 @@ string-equal 相当 (大小無視) で重複判定。新しい順を保ち *hist
 レイアウト (高さ) が潰れ「選んだら二度と選べない」状態になる。Items 更新は新規/リネーム/削除側で。"
   (when (and (>= index 0) (< index (length *clips*)) (/= index *current-clip*))
     (%clip-sync)
-    (setf *current-clip* index *clip* (cdr (clip-current-cell)))
+    (setf *current-clip* index *clip* (cdr (clip-current-cell))
+          ;; 新クリップではカーソル/選択/pending をリセット (index は内容依存; #35 ④)
+          (viewer-clip-cursor vw) 0 (viewer-clip-selected vw) nil
+          (viewer-clip-pending vw) nil (viewer-clip-count vw) nil)
     (save-clip) (%clip-cache-warm) (%update-title vw)
     (%clip-pane-refresh-if-visible vw)))
 (defun %clip-new (vw name)
@@ -912,18 +915,26 @@ Avalonia の Bitmap で decode→CreateScaledBitmap→PNG Save (サムネ #6 と
               (%focus-viewport vw))         ; ボタンにフォーカスを残さない (Space 等を食われる)
           (error (e) (log-err "open-clip-as-book" e))))))
 
-;;; クリップ編集の vi カーソル (#35 ④ Phase 1)。clip-stack に focus している間だけ
-;;; j/k 移動・x 削除・Esc 復帰が効く (キーは Handled=t で窓の %on-key に漏らさない)。
+;;; クリップ編集の vi 操作 (#35 ④)。clip-stack に focus している間だけ効く
+;;; (キーは Handled=t で窓の %on-key に漏らさない)。Phase 1=カーソル/移動/削除/追従、
+;;; Phase 2=dd/yy→レジスタ→p/P (並べ替え・クリップ間移動)・Space 複数選択・count。
+(defparameter *clip-register* nil
+  "cut/yank のレジスタ ((source . page) ...)。クリップ間で共有 → p で別クリップへ移植可。")
+
 (defun %clip-cursor-highlight (vw)
-  "各セル (Border ラップ) の枠を、カーソル位置だけ強調し、カーソルを表示範囲へスクロール。"
+  "各セルの枠でカーソル(青)/選択(金)/両方(橙)を表示し、カーソルを表示範囲へスクロール。"
   (let* ((children (dotnet:invoke (viewer-clip-stack vw) "get_Children"))
          (n (dotnet:invoke children "get_Count"))
-         (cur (viewer-clip-cursor vw)))
+         (cur (viewer-clip-cursor vw))
+         (sel (viewer-clip-selected vw)))
     (dotimes (i n)
       (ignore-errors
         (dotnet:invoke (dotnet:invoke children "get_Item" i) "set_BorderBrush"
                        (dotnet:static "Avalonia.Media.Brushes"
-                                      (if (= i cur) "DeepSkyBlue" "Transparent")))))
+                                      (cond ((and (= i cur) (member i sel)) "Orange")
+                                            ((= i cur) "DeepSkyBlue")
+                                            ((member i sel) "Gold")
+                                            (t "Transparent"))))))
     ;; カーソルが画面外へ出ないよう ScrollViewer.Offset を直接動かして追従 (#35 ④)。
     (let ((scr (viewer-clip-scroll vw)))
       (when (and scr (plusp n) (< cur n))
@@ -934,22 +945,68 @@ Avalonia の Bitmap で decode→CreateScaledBitmap→PNG Save (サムネ #6 と
                  (vh  (dotnet:invoke (dotnet:invoke scr "get_Viewport") "get_Height"))
                  (off (dotnet:invoke scr "get_Offset"))
                  (oy  (dotnet:invoke off "get_Y"))
-                 (ny  (cond ((< cy oy) cy)                              ; 上にはみ出し → 上へ
-                            ((> (+ cy ch) (+ oy vh)) (max 0d0 (- (+ cy ch) vh)))  ; 下 → 下端合わせ
+                 (ny  (cond ((< cy oy) cy)
+                            ((> (+ cy ch) (+ oy vh)) (max 0d0 (- (+ cy ch) vh)))
                             (t oy))))
             (when (/= ny oy)
               (dotnet:invoke scr "set_Offset" (dotnet:new "Avalonia.Vector" 0d0 ny)))))))))
+
 (defun %clip-cursor-move (vw d)
   (let ((n (length *clip*)))
     (when (plusp n)
       (setf (viewer-clip-cursor vw) (max 0 (min (1- n) (+ (viewer-clip-cursor vw) d))))
       (%clip-cursor-highlight vw))))
-(defun %clip-cursor-delete (vw)
-  (let ((n (length *clip*)) (cur (viewer-clip-cursor vw)))
-    (when (and (plusp n) (< cur n))
-      (%clip-remove-at vw cur)              ; ペインを再構築する
-      (setf (viewer-clip-cursor vw) (max 0 (min cur (1- (max 1 (length *clip*))))))
+
+(defun %clip-item= (a b)
+  (and (string-equal (car a) (car b)) (eql (cdr a) (cdr b))))
+(defun %clip-target-indices (vw count)
+  "操作対象 index 群 (昇順)。選択があればそれ、無ければカーソルから count 個 (既定1)。"
+  (let ((sel (viewer-clip-selected vw)))
+    (if sel
+        (sort (remove-duplicates (copy-list sel)) #'<)
+        (let ((cur (viewer-clip-cursor vw)) (n (length *clip*)))
+          (loop for i from cur below (min n (+ cur (max 1 (or count 1)))) collect i)))))
+(defun %clip-cut (vw count)
+  "対象を取り除いてレジスタへ (cut)。キャッシュは残す (p で移植する可能性があるため)。"
+  (let ((idxs (%clip-target-indices vw count)))
+    (when idxs
+      (setf *clip-register* (mapcar (lambda (i) (nth i *clip*)) idxs)
+            ;; 注: LOOP の `it` は when/unless のテスト値を指す予約語なので変数名に使わない。
+            *clip* (loop for x in *clip* for i from 0 unless (member i idxs) collect x)
+            (viewer-clip-selected vw) nil
+            (viewer-clip-cursor vw) (max 0 (min (first idxs) (max 0 (1- (length *clip*))))))
+      (save-clip)
+      (%status vw (format nil "~d 項目を切り取り" (length idxs)))
+      (%rebuild-clip-pane vw))))
+(defun %clip-yank (vw count)
+  "対象をレジスタへコピー (yank、消さない)。"
+  (let ((idxs (%clip-target-indices vw count)))
+    (when idxs
+      (setf *clip-register* (mapcar (lambda (i) (nth i *clip*)) idxs)
+            (viewer-clip-selected vw) nil)
+      (%status vw (format nil "~d 項目をコピー" (length idxs)))
       (%clip-cursor-highlight vw))))
+(defun %clip-paste (vw before)
+  "レジスタを現在のクリップのカーソル位置へ挿入 (before=t で手前)。既出は skip。
+別クリップへ切替えてから p すれば「ページをクリップ間で移動」になる。"
+  (when *clip-register*
+    (let* ((cur (viewer-clip-cursor vw))
+           (pos (min (length *clip*) (if before cur (1+ cur))))
+           (fresh (remove-if (lambda (it) (member it *clip* :test #'%clip-item=)) *clip-register*)))
+      (when fresh
+        (setf *clip* (append (subseq *clip* 0 pos) fresh (subseq *clip* pos))
+              (viewer-clip-cursor vw) pos)
+        (save-clip)
+        (%clip-cache-warm)               ; 移植先 source 分のローカルキャッシュを確実化
+        (%status vw (format nil "~d 項目を貼り付け" (length fresh)))
+        (%rebuild-clip-pane vw)))))
+(defun %clip-toggle-select (vw)
+  (let ((cur (viewer-clip-cursor vw)))
+    (setf (viewer-clip-selected vw)
+          (if (member cur (viewer-clip-selected vw))
+              (remove cur (viewer-clip-selected vw))
+              (cons cur (viewer-clip-selected vw))))
+    (%clip-cursor-highlight vw)))
 
 (defun %rebuild-clip-pane (vw)
   "clip-stack を作り直す。キャッシュ済みサムネは即表示、未キャッシュのみ背景で
@@ -1068,18 +1125,19 @@ Avalonia の Bitmap で decode→CreateScaledBitmap→PNG Save (サムネ #6 と
                                            (lambda (out) (%do-export vw out)))))))
 
 (defun %toggle-clip-pane (vw)
+  ;; #35 ④: P = トグル。開く時はそのまま編集できるようクリップへ focus、閉じる時はビューへ。
+  ;; クリップ編集中に view を覗くだけなら Esc (閉じずに view へ)。閉じる専用キーの洗練と
+  ;; キーのカスタマイズは follow-up (今は p=ペーストが P を食うので focus 判定の閉じは置かない)。
   (let* ((pane (viewer-clip-pane vw))
-         (vis (dotnet:invoke pane "get_IsVisible")))
+         (vis  (dotnet:invoke pane "get_IsVisible")))
     (dotnet:invoke pane "set_IsVisible" (not vis))
-    (cond ((not vis)                       ; これから表示 → 再構築してすぐ編集できるよう focus (#35 ④)
+    (cond ((not vis)                       ; これから表示 → 再構築してクリップへ focus
            (%rebuild-clip-pane vw)
-           ;; 初回はペインのレイアウト完了前に Focus すると効かないので少し遅延させる。
            (%defer (lambda ()
                      (ignore-errors (dotnet:invoke (viewer-clip-stack vw) "Focus"))
                      (%clip-cursor-highlight vw))
                    120))
-          (t                               ; これから非表示 → ビューポートへ戻す
-           (%focus-viewport vw)))))
+          (t (%focus-viewport vw)))))      ; これから非表示 → ビューへ戻す
 
 (defun %clip-drop (vw path)
   "ペインにドロップされた path を素材に追加 (画像=親フォルダ+そのページ、
@@ -1603,6 +1661,9 @@ clip-book も乗せるため path ではなく factory を取る)。"
            clip-combo                   ; クリップ選択コンボ (#35 ③)
            clip-scroll                  ; 素材ペインの ScrollViewer (カーソル追従用; #35 ④)
            (clip-cursor 0)              ; クリップ編集の vi カーソル位置 (#35 ④)
+           (clip-selected nil)          ; 複数選択 (index のリスト; #35 ④ Phase 2)
+           (clip-pending nil)           ; vi 多キー待ち (:d=dd / :y=yy; #35 ④ Phase 2)
+           (clip-count nil)             ; vi count プレフィックス (#35 ④ Phase 2)
            thumb-pane thumb-stack       ; ページサムネ本棚 (#6 A)
            browse-pane browse-tree      ; フォルダツリー (#6 B)
            (reorder-from nil)           ; ドラッグ並べ替え中の元 index (Phase 3)
@@ -3940,16 +4001,37 @@ TARGET を引数化したので open-in-new-window から任意パスで別ウ�
         (dotnet:invoke stack "set_Focusable" t)
         (dotnet:add-event stack "KeyDown"
           (lambda (s e) (declare (ignore s))
-            (let ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString")))
-              (cond
-                ((member kn '("J" "Down") :test #'string=)
-                 (dotnet:invoke e "set_Handled" t) (%clip-cursor-move vw 1))
-                ((member kn '("K" "Up") :test #'string=)
-                 (dotnet:invoke e "set_Handled" t) (%clip-cursor-move vw -1))
-                ((member kn '("X" "Delete") :test #'string=)
-                 (dotnet:invoke e "set_Handled" t) (%clip-cursor-delete vw))
-                ((string= kn "Escape")
-                 (dotnet:invoke e "set_Handled" t) (%focus-viewport vw))))))
+            (let* ((kn   (dotnet:invoke (dotnet:invoke e "get_Key") "ToString"))
+                   (d    (%digit-key kn))
+                   (cnt  (viewer-clip-count vw))
+                   (pend (viewer-clip-pending vw)))
+              (flet ((h () (dotnet:invoke e "set_Handled" t))
+                     (clear () (setf (viewer-clip-count vw) nil (viewer-clip-pending vw) nil)))
+                (cond
+                  ;; count 蓄積 (1-9 開始 / 継続中の 0)
+                  ((and d (or (> d 0) cnt))
+                   (h) (setf (viewer-clip-pending vw) nil
+                             (viewer-clip-count vw) (+ (* 10 (or cnt 0)) d)))
+                  ((member kn '("J" "Down") :test #'string=) (h) (%clip-cursor-move vw (or cnt 1)) (clear))
+                  ((member kn '("K" "Up")   :test #'string=) (h) (%clip-cursor-move vw (- (or cnt 1))) (clear))
+                  ;; dd = 切り取り (二連)。count は 1 連目で保持。
+                  ((string= kn "D") (h) (if (eq pend :d) (progn (%clip-cut vw cnt) (clear))
+                                           (setf (viewer-clip-pending vw) :d)))
+                  ;; yy = コピー (二連)
+                  ((string= kn "Y") (h) (if (eq pend :y) (progn (%clip-yank vw cnt) (clear))
+                                           (setf (viewer-clip-pending vw) :y)))
+                  ;; x = 切り取り (単発/count/選択)
+                  ((member kn '("X" "Delete") :test #'string=) (h) (%clip-cut vw cnt) (clear))
+                  ;; p=後ろ / P(Shift)=手前 に貼り付け (別クリップへ移植可)
+                  ((string= kn "P") (h) (%clip-paste vw (%shift? e)) (clear))
+                  ;; Space = 選択トグル
+                  ((string= kn "Space") (h) (%clip-toggle-select vw) (clear))
+                  ((string= kn "Escape")
+                   (h) (if (or (viewer-clip-selected vw) pend cnt)
+                           (progn (setf (viewer-clip-selected vw) nil) (clear) (%clip-cursor-highlight vw))
+                           (%focus-viewport vw)))
+                  ;; 未知キーは状態だけリセットして素通し (F11 等のグローバルを活かす)
+                  (t (clear)))))))
         (let ((pc (dotnet:invoke pane "get_Children"))
               (cbar (%build-clip-bar vw))           ; クリップ選択バー (#35 ③)
               (actions (dotnet:new "Avalonia.Controls.StackPanel")))   ; [プレビュー][掃き出し] (#35 ⑤)
