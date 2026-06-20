@@ -2060,6 +2060,47 @@ indeterminate が要るなら (dotnet:null)。"
 (defun %s-combo-value (combo choices)
   (cdr (nth (max 0 (dotnet:invoke combo "get_SelectedIndex")) choices)))
 
+(defun %prompt-text (owner title initial on-ok)
+  "1 行テキスト入力のモーダル。OK/Enter で (funcall on-ok 入力文字列) を呼んでから閉じる。
+空白のみは無視。Esc/キャンセルで閉じる。コールバック方式 (ShowDialog の戻り値は使わない)。"
+  (let* ((w    (dotnet:new "Avalonia.Controls.Window"))
+         (tb   (dotnet:new "Avalonia.Controls.TextBox"))
+         (root (dotnet:new "Avalonia.Controls.StackPanel"))
+         (btns (dotnet:new "Avalonia.Controls.StackPanel")))
+    (labels ((commit ()
+               (let ((s (string-trim '(#\Space #\Tab) (or (dotnet:invoke tb "get_Text") ""))))
+                 (dotnet:invoke w "Close")
+                 (when (plusp (length s)) (funcall on-ok s)))))
+      (dotnet:invoke tb "set_Text" (or initial ""))
+      (dotnet:invoke tb "set_Width" 240d0)
+      (dotnet:add-event tb "KeyDown"
+        (lambda (s e) (declare (ignore s))
+          (let ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString")))
+            (cond ((or (string= kn "Return") (string= kn "Enter"))
+                   (dotnet:invoke e "set_Handled" t) (commit))
+                  ((string= kn "Escape")
+                   (dotnet:invoke e "set_Handled" t) (dotnet:invoke w "Close"))))))
+      (dotnet:invoke btns "set_Orientation" (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
+      (dotnet:invoke btns "set_HorizontalAlignment" (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Right"))
+      (dotnet:invoke btns "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 12d0 0d0 0d0))
+      (let ((c (dotnet:invoke btns "get_Children")))
+        (dotnet:invoke c "Add" (%s-button "キャンセル" (lambda () (dotnet:invoke w "Close"))))
+        (dotnet:invoke c "Add" (%s-button "OK" (lambda () (commit)))))
+      (dotnet:invoke root "set_Margin" (dotnet:new "Avalonia.Thickness" 12d0))
+      (let ((c (dotnet:invoke root "get_Children")))
+        (dotnet:invoke c "Add" tb)
+        (dotnet:invoke c "Add" btns))
+      (dotnet:invoke w "set_Content" root)
+      (dotnet:invoke w "set_Title" title)
+      (dotnet:invoke w "set_SizeToContent" (dotnet:static "Avalonia.Controls.SizeToContent" "WidthAndHeight"))
+      (dotnet:invoke w "set_WindowStartupLocation"
+                     (dotnet:static "Avalonia.Controls.WindowStartupLocation" "CenterOwner"))
+      ;; 表示直後に入力欄へフォーカス&全選択 (Focus のオーバーロード差異は握り潰す)。
+      (dotnet:add-event w "Opened"
+        (lambda (s e) (declare (ignore s e))
+          (ignore-errors (dotnet:invoke tb "Focus") (dotnet:invoke tb "SelectAll"))))
+      (dotnet:invoke w "ShowDialog" owner))))
+
 ;;; ファイル関連付け (#11, Windows): per-user (HKCU) なので管理者権限不要。ProgID を登録し
 ;;; 対応拡張子の OpenWithProgids に追加 (「プログラムから開く」に出る)。既定化は OS 仕様で
 ;;; 自動不可なので、登録後に「既定のアプリ」設定へ誘導する。レジストリ書き込みは Lisp から
@@ -3001,16 +3042,41 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
          (header (if k (format nil "~a (~a)" (command-label c) k) (command-label c))))
     (%menu-add parent (%menu-item vw header (lambda () (%run-command vw id))))))
 
+;;; メニュー内セパレータ (#32)。区切りは一意な cons (:sep) で表す (識別子衝突を避け、
+;;; 並べ替え/削除を eql 同一性で扱えるようにするため)。menu.lisp には (:SEP) で round-trip。
+(defun %make-menu-sep () (list :sep))
+(defun %menu-sep-p (x) (and (consp x) (eq (car x) :sep)))
+(defun %fresh-gkey (menu)
+  "MENU (グループ列; 各要素の first が gkey) に無い新しいグループキーワードを返す。"
+  (loop for i from 1
+        for k = (intern (format nil "GROUP-~d" i) :keyword)
+        unless (find k menu :key #'first) return k))
+(defun %menu-render-entries (ids)
+  "IDS (コマンド id とセパレータの混在) を描画用に整える: 実在コマンドとセパレータだけにし、
+先頭/末尾/連続したセパレータは落とす。返り値はコマンド id と :sep マーカーの並び。"
+  (let ((out '()) (pending nil) (seen nil))
+    (dolist (id ids)
+      (cond ((%menu-sep-p id) (when seen (setf pending t)))
+            ((%command id)
+             (when pending (push :sep out) (setf pending nil))
+             (push id out) (setf seen t))))
+    (nreverse out)))
+
 (defun %add-menu-groups (vw container)
   "CONTAINER (Menu / ContextMenu) に *command-menu* の順でグループ submenu を追加し、
-各グループに該当コマンドを %menu-cmd で並べる (メニュー/コンテキスト共通; #26)。"
+各グループに該当コマンドとセパレータを並べる (メニュー/コンテキスト共通; #26/#32)。"
   (let ((items (dotnet:invoke container "get_Items")))
     (dolist (g *command-menu*)
       (destructuring-bind (gkey title &rest ids) g
         (declare (ignore gkey))
-        (let ((sub (%menu-item vw title)) (any nil))
-          (dolist (id ids) (when (%command id) (%menu-cmd vw sub id) (setf any t)))
-          (when any (dotnet:invoke items "Add" sub)))))))
+        (let ((entries (%menu-render-entries ids)))
+          (when entries        ; 実コマンドが 1 つ以上ある時のみグループを出す
+            (let ((sub (%menu-item vw title)))
+              (dolist (e entries)
+                (if (eq e :sep)
+                    (%menu-add sub (dotnet:new "Avalonia.Controls.Separator"))
+                    (%menu-cmd vw sub e)))
+              (dotnet:invoke items "Add" sub))))))))
 
 (defun %build-menu (vw win)
   (declare (ignore win))   ; 開く系コマンドは (viewer-window vw) を owner に使う
@@ -3204,6 +3270,30 @@ menu.lisp に保存し即反映。"
                                    (t g)))
                            (groups)))
              (refresh)))
+         ;; --- グループ自体の操作 (#32: 追加/リネーム/削除/並べ替え + 区切り) ---
+         (move-group (gk dir)            ; グループの順序を上(-1)/下(+1)へ
+           (let* ((gs (groups)) (g (find gk gs :key #'first)))
+             (when g (setf (car mbox) (%shift-in-list gs g dir)) (refresh))))
+         (add-group ()                   ; 名前を聞いて末尾に空グループを足す
+           (%prompt-text w "新規グループ名" ""
+                         (lambda (name)
+                           (setf (car mbox)
+                                 (append (groups) (list (list (%fresh-gkey (groups)) name nil))))
+                           (refresh))))
+         (rename-group (gk)
+           (let ((g (find gk (groups) :key #'first)))
+             (when g
+               (%prompt-text w "グループ名を変更" (second g)
+                             (lambda (name)
+                               (setf (car mbox)
+                                     (mapcar (lambda (x) (if (eq (first x) gk)
+                                                             (list (first x) name (third x)) x))
+                                             (groups)))
+                               (refresh))))))
+         (delete-group (gk)
+           (setf (car mbox) (remove gk (groups) :key #'first)) (refresh))
+         (add-sep (gk)                   ; グループ末尾に区切り線を足す
+           (upd gk (lambda (ids) (append ids (list (%make-menu-sep))))))
          ;; --- ドラッグ&ドロップ並べ替え (#32, Avalonia intra-app DnD) ---
          (drop-on-cmd (tgt-gk tgt-id)   ; コマンド行に落とす = その直前へ
            (let ((src (car dstate)))
@@ -3283,12 +3373,22 @@ menu.lisp に保存し即反映。"
                  (mksub "別グループへ"
                         (mapcar (lambda (g) (mkmi (second g) (lambda () (move-to-group gk id (first g)))))
                                 (remove gk (groups) :key #'first))))))
+         (sep-ctx (gk id)               ; 区切り行の右クリック (上へ/下へ/削除)
+           (ctx (list
+                 (mkmi "上へ" (lambda () (move-cmd gk id -1)))
+                 (mkmi "下へ" (lambda () (move-cmd gk id 1)))
+                 (mkmi "削除" (lambda () (remove-cmd gk id))))))
          (grp-ctx (gk)
            (let ((cur (third (find gk (groups) :key #'first))))
              (ctx (list
                    (mksub "コマンドを追加"
                           (mapcar (lambda (c) (mkmi (command-label c) (lambda () (add-cmd gk (command-id c)))))
-                                  (remove-if (lambda (c) (member (command-id c) cur)) *commands*)))))))
+                                  (remove-if (lambda (c) (member (command-id c) cur)) *commands*)))
+                   (mkmi "区切り線を追加" (lambda () (add-sep gk)))
+                   (mkmi "グループを上へ" (lambda () (move-group gk -1)))
+                   (mkmi "グループを下へ" (lambda () (move-group gk 1)))
+                   (mkmi "グループ名を変更…" (lambda () (rename-group gk)))
+                   (mkmi "グループを削除" (lambda () (delete-group gk)))))))
          (refresh ()
            (let ((items (dotnet:invoke tree "get_Items")))
              (dotnet:invoke items "Clear")
@@ -3301,9 +3401,12 @@ menu.lisp に保存し即反映。"
                  (setup-drop gi (let ((k gk)) (lambda () (drop-on-grp k))))  ; グループ末尾へ
                  (let ((gci (dotnet:invoke gi "get_Items")))
                    (dolist (id (third g))
-                     (let ((ci (dotnet:new "Avalonia.Controls.TreeViewItem")) (c (%command id)))
-                       (dotnet:invoke ci "set_Header" (if c (command-label c) (format nil "~a" id)))
-                       (dotnet:invoke ci "set_ContextMenu" (cmd-ctx gk id))
+                     (let ((ci (dotnet:new "Avalonia.Controls.TreeViewItem")) (sep (%menu-sep-p id)))
+                       (dotnet:invoke ci "set_Header"
+                                      (if sep "──── 区切り ────"
+                                          (let ((c (%command id)))
+                                            (if c (command-label c) (format nil "~a" id)))))
+                       (dotnet:invoke ci "set_ContextMenu" (if sep (sep-ctx gk id) (cmd-ctx gk id)))
                        (setup-drag ci gk id)
                        (setup-drop ci (let ((k gk) (i id)) (lambda () (drop-on-cmd k i))))
                        (dotnet:invoke gci "Add" ci))))
@@ -3314,6 +3417,7 @@ menu.lisp に保存し即反映。"
       (let* ((root (dotnet:new "Avalonia.Controls.StackPanel"))
              (hint (dotnet:new "Avalonia.Controls.TextBlock"))
              (btns (dotnet:new "Avalonia.Controls.StackPanel"))
+             (addgrp-btn (%s-button "グループ追加" (lambda () (add-group))))
              (reset-btn (%s-button "既定に戻す"
                           (lambda () (setf (car mbox) (%menu-norm *default-command-menu*)) (refresh))))
              (cancel-btn (%s-button "キャンセル" (lambda () (dotnet:invoke w "Close"))))
@@ -3321,12 +3425,14 @@ menu.lisp に保存し即反映。"
                        (lambda ()
                          (setf *command-menu* (%menu-denorm (groups)))
                          (save-menu) (%rebuild-menus vw) (dotnet:invoke w "Close")))))
-        (dotnet:invoke hint "set_Text" "ドラッグで並べ替え (コマンド上=直前へ / グループ見出し=末尾へ)。右クリックで上へ/下へ/削除/別グループへ・追加")
+        (dotnet:invoke hint "set_Text" "ドラッグで並べ替え (コマンド上=直前へ / グループ見出し=末尾へ)。右クリック → コマンド: 上へ/下へ/削除/別グループへ、グループ: コマンド・区切り追加/グループ上下/名前変更/削除")
+        (dotnet:invoke hint "set_TextWrapping" (dotnet:static "Avalonia.Media.TextWrapping" "Wrap"))
         (dotnet:invoke hint "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 0d0 0d0 8d0))
         (dotnet:invoke btns "set_Orientation" (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
         (dotnet:invoke btns "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 12d0 0d0 0d0))
         (let ((c (dotnet:invoke btns "get_Children")))
-          (dotnet:invoke c "Add" reset-btn) (dotnet:invoke c "Add" cancel-btn) (dotnet:invoke c "Add" ok-btn))
+          (dotnet:invoke c "Add" addgrp-btn) (dotnet:invoke c "Add" reset-btn)
+          (dotnet:invoke c "Add" cancel-btn) (dotnet:invoke c "Add" ok-btn))
         (dotnet:invoke root "set_Margin" (dotnet:new "Avalonia.Thickness" 12d0))
         (let ((c (dotnet:invoke root "get_Children")))
           (dotnet:invoke c "Add" hint) (dotnet:invoke c "Add" tree) (dotnet:invoke c "Add" btns))
