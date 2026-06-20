@@ -627,19 +627,25 @@ string-equal 相当 (大小無視) で重複判定。新しい順を保ち *hist
       (dolist (k dead) (%clip-cache-drop k)))))
 
 ;;; 名前付き複数クリップの切替/作成/リネーム/削除 (#35 ③)。素材ペインのバーから操作。
+(defun %clip-pane-refresh-if-visible (vw)
+  (when (and (viewer-clip-pane vw) (dotnet:invoke (viewer-clip-pane vw) "get_IsVisible"))
+    (%rebuild-clip-pane vw)))
 (defun %clip-switch (vw index)
-  "INDEX のクリップへ切替え。現在分を退避し、新カレントを *clip* に展開。"
+  "INDEX のクリップへ切替え (データ + ペイン/タイトルのみ)。**コンボの Items は作り直さない**:
+これはコンボの SelectionChanged から呼ばれるので、ここで Clear+Add すると再入してコンボの
+レイアウト (高さ) が潰れ「選んだら二度と選べない」状態になる。Items 更新は新規/リネーム/削除側で。"
   (when (and (>= index 0) (< index (length *clips*)) (/= index *current-clip*))
     (%clip-sync)
     (setf *current-clip* index *clip* (cdr (clip-current-cell)))
-    (save-clip) (%clip-cache-warm) (%update-title vw) (%refresh-clip-selector vw)
-    (when (and (viewer-clip-pane vw) (dotnet:invoke (viewer-clip-pane vw) "get_IsVisible"))
-      (%rebuild-clip-pane vw))))
+    (save-clip) (%clip-cache-warm) (%update-title vw)
+    (%clip-pane-refresh-if-visible vw)))
 (defun %clip-new (vw name)
-  "NAME の空クリップを足して切替え。"
+  "NAME の空クリップを足して切替え (Items を作り直す)。"
   (%clip-sync)
-  (setf *clips* (append *clips* (list (cons name nil))))
-  (%clip-switch vw (1- (length *clips*))))
+  (setf *clips* (append *clips* (list (cons name nil)))
+        *current-clip* (1- (length *clips*)) *clip* (cdr (clip-current-cell)))
+  (save-clip) (%clip-cache-warm) (%update-title vw)
+  (%refresh-clip-selector vw) (%clip-pane-refresh-if-visible vw))
 (defun %clip-rename (vw name)
   (setf (car (clip-current-cell)) name)
   (save-clip) (%update-title vw) (%refresh-clip-selector vw))
@@ -649,10 +655,8 @@ string-equal 相当 (大小無視) で重複判定。新しい順を保ち *hist
     (setf *clips* (loop for c in *clips* for i from 0 unless (= i *current-clip*) collect c)
           *current-clip* (max 0 (min *current-clip* (1- (length *clips*))))
           *clip* (cdr (clip-current-cell)))
-    (%clip-cache-gc) (save-clip) (%clip-cache-warm)
-    (%update-title vw) (%refresh-clip-selector vw)
-    (when (and (viewer-clip-pane vw) (dotnet:invoke (viewer-clip-pane vw) "get_IsVisible"))
-      (%rebuild-clip-pane vw))))
+    (%clip-cache-gc) (save-clip) (%clip-cache-warm) (%update-title vw)
+    (%refresh-clip-selector vw) (%clip-pane-refresh-if-visible vw)))
 (defun %refresh-clip-selector (vw)
   "クリップ選択コンボを *clips* で作り直し、カレントを選択 (選択変更ハンドラは差分時のみ切替)。"
   (let ((combo (viewer-clip-combo vw)))
@@ -675,6 +679,7 @@ string-equal 相当 (大小無視) で重複判定。新しい順を保ち *hist
           (btns  (dotnet:new "Avalonia.Controls.StackPanel")))
       (setf (viewer-clip-combo vw) combo)
       (dotnet:invoke combo "set_HorizontalAlignment" (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Stretch"))
+      (dotnet:invoke combo "set_MinWidth" 150d0)   ; Stretch が効かない時用の最小幅 (ペイン 220px)
       (dotnet:add-event combo "SelectionChanged"
         (lambda (s e) (declare (ignore s e))
           (let ((i (dotnet:invoke combo "get_SelectedIndex")))
@@ -689,6 +694,8 @@ string-equal 相当 (大小無視) で重複判定。新しい順を保ち *hist
         (dotnet:invoke c "Add" (sb "削除" (lambda () (%clip-delete vw)))))
       (dotnet:invoke bar "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 0d0 0d0 4d0))
       (let ((c (dotnet:invoke bar "get_Children")))
+        ;; このペインが「素材クリップ」であることを示す見出し (#35 ③)。
+        (dotnet:invoke c "Add" (%s-header "素材クリップ (ページの一時カゴ → 掃き出し)"))
         (dotnet:invoke c "Add" combo) (dotnet:invoke c "Add" btns))
       (%refresh-clip-selector vw)
       bar)))
