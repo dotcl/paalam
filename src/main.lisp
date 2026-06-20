@@ -497,15 +497,37 @@ string-equal 相当 (大小無視) で重複判定。新しい順を保ち *hist
   (sort (loop for e in *bookmarks* when (string-equal (car e) path) collect (cdr e)) #'<))
 
 ;;; 素材クリップ (#18 Phase 1): ((source . page) ...) 追加順。zip 掃き出し用。
-(defparameter *clip* nil)
+;;; #35 ③: 名前付き複数クリップ。*clips* がレジストリ、*clip* はカレントの中身
+;;; (既存コードは *clip* をそのまま使い、save-clip がカレントへ書き戻す最小チャーン設計)。
+(defparameter *clip* nil "カレントクリップの中身 ((source . page) ...)。*clips* のカレント要素と同期。")
+(defparameter *clips* (list (cons "既定" nil))
+  "名前付きクリップのレジストリ ((名前 . items) ...)。#35 ③")
+(defparameter *current-clip* 0 "*clips* 内のカレントインデックス。")
+(defun clip-current-cell () (nth (max 0 (min *current-clip* (1- (length *clips*)))) *clips*))
+(defun clip-current-name () (car (clip-current-cell)))
+(defun %clip-sync () "カレント *clip* を *clips* のカレント要素へ書き戻す。"
+  (setf (cdr (clip-current-cell)) *clip*))
 ;; サムネのメモリキャッシュ (source.page -> Bitmap)。ペインを開くたびに source から
 ;; 再取得しないため (NAS で効く)。loader の cache とは別物 (loader は evict で Dispose
 ;; するので共有しない)。
 (defparameter *thumb-cache* (make-hash-table :test 'equal))
 (defun %thumb-get (src page) (gethash (cons src page) *thumb-cache*))
 (defun %thumb-put (src page bmp) (setf (gethash (cons src page) *thumb-cache*) bmp))
-(defun load-clip () (setf *clip* (%read-state "clip.lisp")))
-(defun save-clip () (%write-state "clip.lisp" *clip*))
+(defun save-clip ()
+  "レジストリ全体 + カレント index を clips.lisp に保存 (カレント *clip* を先に同期; #35 ③)。"
+  (%clip-sync)
+  (%write-state "clips.lisp" (cons *current-clip* *clips*)))
+(defun load-clip ()
+  "clips.lisp 優先。無ければ旧 clip.lisp を既定クリップへ移行する (#35 ③)。"
+  (let ((d (%read-state "clips.lisp")))
+    (if (and (consp d) (integerp (car d)) (consp (cdr d)) (every #'consp (cdr d)))
+        (setf *current-clip* (car d) *clips* (cdr d))
+        (let ((old (%read-state "clip.lisp")))           ; 旧単一クリップ → 既定クリップ
+          (setf *clips* (list (cons "既定" (and (listp old) old)))
+                *current-clip* 0))))
+  (unless (and (consp *clips*) (every #'consp *clips*)) (setf *clips* (list (cons "既定" nil))))
+  (setf *current-clip* (max 0 (min *current-clip* (1- (length *clips*))))
+        *clip* (cdr (clip-current-cell))))
 (defun clip-add (source page)
   "素材に (source . page) を追加 (重複はスキップ)。"
   (when (and source
@@ -513,7 +535,9 @@ string-equal 相当 (大小無視) で重複判定。新しい順を保ち *hist
                              *clip*)))
     (setf *clip* (append *clip* (list (cons source page))))
     (save-clip)))
-(defun clip-clear () (setf *clip* nil) (clrhash *thumb-cache*) (%clip-cache-clear) (save-clip))
+(defun clip-clear ()
+  ;; カレントクリップを空に。参照されなくなったキャッシュのみ掃除 (他クリップ分は残す; #35 ③)。
+  (setf *clip* nil) (clrhash *thumb-cache*) (save-clip) (%clip-cache-gc))
 
 ;;; クリップのローカルキャッシュ (#35 ①)。クリップしたページの原本バイトを state 配下
 ;;; clip-cache/ に1回だけコピーし、掃き出しは NAS を再読みせずローカルから詰める。
@@ -593,6 +617,81 @@ string-equal 相当 (大小無視) で重複判定。新しい順を保ち *hist
            (when changed (save-clip-cache)))
        (error (e) (log-err "clip-cache-warm" e))))
    :name "paalam-clip-cache"))
+
+(defun %clip-cache-gc ()
+  "どのクリップ (*clips*) からも参照されない (source.page) のキャッシュを掃除 (#35 ③)。"
+  (let ((live (make-hash-table :test 'equal)))
+    (dolist (c *clips*) (dolist (it (cdr c)) (setf (gethash it live) t)))
+    (let (dead)
+      (maphash (lambda (k v) (declare (ignore v)) (unless (gethash k live) (push k dead))) *clip-cache*)
+      (dolist (k dead) (%clip-cache-drop k)))))
+
+;;; 名前付き複数クリップの切替/作成/リネーム/削除 (#35 ③)。素材ペインのバーから操作。
+(defun %clip-switch (vw index)
+  "INDEX のクリップへ切替え。現在分を退避し、新カレントを *clip* に展開。"
+  (when (and (>= index 0) (< index (length *clips*)) (/= index *current-clip*))
+    (%clip-sync)
+    (setf *current-clip* index *clip* (cdr (clip-current-cell)))
+    (save-clip) (%clip-cache-warm) (%update-title vw) (%refresh-clip-selector vw)
+    (when (and (viewer-clip-pane vw) (dotnet:invoke (viewer-clip-pane vw) "get_IsVisible"))
+      (%rebuild-clip-pane vw))))
+(defun %clip-new (vw name)
+  "NAME の空クリップを足して切替え。"
+  (%clip-sync)
+  (setf *clips* (append *clips* (list (cons name nil))))
+  (%clip-switch vw (1- (length *clips*))))
+(defun %clip-rename (vw name)
+  (setf (car (clip-current-cell)) name)
+  (save-clip) (%update-title vw) (%refresh-clip-selector vw))
+(defun %clip-delete (vw)
+  "カレントクリップを削除 (最後の1個は消さない)。参照されなくなったキャッシュも掃除。"
+  (when (> (length *clips*) 1)
+    (setf *clips* (loop for c in *clips* for i from 0 unless (= i *current-clip*) collect c)
+          *current-clip* (max 0 (min *current-clip* (1- (length *clips*))))
+          *clip* (cdr (clip-current-cell)))
+    (%clip-cache-gc) (save-clip) (%clip-cache-warm)
+    (%update-title vw) (%refresh-clip-selector vw)
+    (when (and (viewer-clip-pane vw) (dotnet:invoke (viewer-clip-pane vw) "get_IsVisible"))
+      (%rebuild-clip-pane vw))))
+(defun %refresh-clip-selector (vw)
+  "クリップ選択コンボを *clips* で作り直し、カレントを選択 (選択変更ハンドラは差分時のみ切替)。"
+  (let ((combo (viewer-clip-combo vw)))
+    (when combo
+      (let ((items (dotnet:invoke combo "get_Items")))
+        (dotnet:invoke items "Clear")
+        (dolist (c *clips*) (dotnet:invoke items "Add" (car c)))
+        (dotnet:invoke combo "set_SelectedIndex" *current-clip*)))))
+(defun %build-clip-bar (vw)
+  "素材ペイン上部のクリップ選択バー (コンボ + ＋/名前/削除)。viewer-clip-combo に保持。"
+  (flet ((sb (label thunk)
+           (let ((b (dotnet:new "Avalonia.Controls.Button")))
+             (dotnet:invoke b "set_Content" label)
+             (dotnet:invoke b "set_Padding" (dotnet:new "Avalonia.Thickness" 6d0 2d0 6d0 2d0))
+             (dotnet:invoke b "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 0d0 4d0 0d0))
+             (dotnet:add-event b "Click" (lambda (s e) (declare (ignore s e)) (funcall thunk)))
+             b)))
+    (let ((bar   (dotnet:new "Avalonia.Controls.StackPanel"))
+          (combo (dotnet:new "Avalonia.Controls.ComboBox"))
+          (btns  (dotnet:new "Avalonia.Controls.StackPanel")))
+      (setf (viewer-clip-combo vw) combo)
+      (dotnet:invoke combo "set_HorizontalAlignment" (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Stretch"))
+      (dotnet:add-event combo "SelectionChanged"
+        (lambda (s e) (declare (ignore s e))
+          (let ((i (dotnet:invoke combo "get_SelectedIndex")))
+            (when (and (>= i 0) (/= i *current-clip*)) (%clip-switch vw i)))))
+      (dotnet:invoke btns "set_Orientation" (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
+      (dotnet:invoke btns "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 4d0 0d0 0d0))
+      (let ((c (dotnet:invoke btns "get_Children")))
+        (dotnet:invoke c "Add" (sb "＋" (lambda () (%prompt-text (viewer-window vw) "新規クリップ名" ""
+                                                                 (lambda (n) (%clip-new vw n))))))
+        (dotnet:invoke c "Add" (sb "名前" (lambda () (%prompt-text (viewer-window vw) "クリップ名を変更" (clip-current-name)
+                                                                   (lambda (n) (%clip-rename vw n))))))
+        (dotnet:invoke c "Add" (sb "削除" (lambda () (%clip-delete vw)))))
+      (dotnet:invoke bar "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 0d0 0d0 4d0))
+      (let ((c (dotnet:invoke bar "get_Children")))
+        (dotnet:invoke c "Add" combo) (dotnet:invoke c "Add" btns))
+      (%refresh-clip-selector vw)
+      bar)))
 
 (defun %sanitize (s)
   (map 'string (lambda (c) (if (or (alphanumericp c) (member c '(#\- #\_ #\.))) c #\_))
@@ -1365,6 +1464,7 @@ NAS の帯域/レイテンシを隠せる (設定ファイルで調整可)。")
            (loupe-cx 0d0) (loupe-cy 0d0)                ; ルーペの現在中心 (矢印キー移動用; #28)
            (dragging nil) (lx 0d0) (ly 0d0)
            clip-pane clip-stack         ; 素材ペイン (#18 Phase 2)
+           clip-combo                   ; クリップ選択コンボ (#35 ③)
            thumb-pane thumb-stack       ; ページサムネ本棚 (#6 A)
            browse-pane browse-tree      ; フォルダツリー (#6 B)
            (reorder-from nil)           ; ドラッグ並べ替え中の元 index (Phase 3)
@@ -1551,7 +1651,9 @@ whole=中央寄せ、width/height=左上アンカー (はみ出しは pan でス
   (let* ((book (viewer-book vw)) (n (book-page-count book))
          (path (viewer-source vw))
          (star (if (some (lambda (p) (bookmarked-p path p)) pages) "★ " ""))
-         (clip (if *clip* (format nil " [素材~d]" (length *clip*)) ""))
+         ;; #35 ③: カレントクリップ名と枚数 (複数クリップ or 非空のとき)。
+         (clip (if (or *clip* (> (length *clips*) 1))
+                   (format nil " [素材 ~a:~d]" (clip-current-name) (length *clip*)) ""))
          (fit  (%fit-label)))
     (if (= (length pages) 1)
         (format nil "~apaalam — ~a (~d/~d)~a~a"
@@ -3691,7 +3793,11 @@ TARGET を引数化したので open-in-new-window から任意パスで別ウ�
                        (dotnet:static "Avalonia.Controls.Dock" "Top"))
         (dotnet:add-event ebtn "Click" (lambda (s e) (declare (ignore s e)) (%pane-export vw)))
         (dotnet:invoke scr "set_Content" stack)
-        (let ((pc (dotnet:invoke pane "get_Children")))
+        (let ((pc (dotnet:invoke pane "get_Children"))
+              (cbar (%build-clip-bar vw)))          ; クリップ選択バー (#35 ③)
+          (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" cbar
+                         (dotnet:static "Avalonia.Controls.Dock" "Top"))
+          (dotnet:invoke pc "Add" cbar)
           (dotnet:invoke pc "Add" ebtn)
           (dotnet:invoke pc "Add" scr))
         (let ((rc (dotnet:invoke root "get_Children")))
