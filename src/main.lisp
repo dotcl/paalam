@@ -338,9 +338,14 @@
 追従 (ThemeVariant.Default)、:light / :dark で固定 (#27)。画像表示の背景は別途 *background-color*。")
 
 ;;; --- 設定の永続化 (s式 plist / OS の app data) ---------------------
+(defparameter *export-width* :original
+  "掃き出し時の最大幅 (#35 ②)。:original=原寸 (変換なし) / 整数=その幅を超えるページだけ
+縮小して PNG 出力。原寸以下のページは無変換で素通し (上げない・再エンコードしない)。")
+
 (defparameter *settings*
   '((:image-direction   . *image-direction*)
     (:pdf-direction     . *pdf-direction*)
+    (:export-width      . *export-width*)
     (:spread            . *spread*)
     (:first-page-single . *first-page-single*)
     (:recursive         . *recursive*)
@@ -593,6 +598,41 @@ string-equal 相当 (大小無視) で重複判定。新しい順を保ち *hist
   (map 'string (lambda (c) (if (or (alphanumericp c) (member c '(#\- #\_ #\.))) c #\_))
        (or s "x")))
 
+(defun %export-resize-bytes (bytes ext)
+  "*export-width* が整数なら、幅がそれを超えるページだけ縮小して PNG の bytes を返す (#35 ②)。
+原寸以下 / :original は無変換で (values bytes ext)。失敗時も原寸で返す (掃き出しは止めない)。
+Avalonia の Bitmap で decode→CreateScaledBitmap→PNG Save (サムネ #6 と同系の経路)。"
+  (let ((target *export-width*))
+    (if (and (integerp target) (plusp target))
+        (handler-case
+            (let ((ms (dotnet:new "System.IO.MemoryStream")) (bmp nil) (scaled nil))
+              (unwind-protect
+                   (progn
+                     ;; MemoryStream(byte[]) ctor は overload バグ (#294) を踏むので Write で渡す。
+                     (dotnet:invoke ms "Write" bytes 0 (dotnet:invoke bytes "get_Length"))
+                     (dotnet:invoke ms "set_Position" 0)
+                     (setf bmp (dotnet:new "Avalonia.Media.Imaging.Bitmap" ms))
+                     (let* ((px (dotnet:invoke bmp "get_PixelSize"))
+                            (w  (dotnet:invoke px "get_Width")))
+                       (if (<= w target)
+                           (values bytes ext)        ; 原寸以下は無変換で素通し
+                           (let* ((h   (dotnet:invoke px "get_Height"))
+                                  (th  (max 1 (round (* h target) w)))
+                                  (out (dotnet:new "System.IO.MemoryStream")))
+                             (setf scaled
+                                   (dotnet:invoke bmp "CreateScaledBitmap"
+                                     (dotnet:new "Avalonia.PixelSize" target th)
+                                     (dotnet:static "Avalonia.Media.Imaging.BitmapInterpolationMode" "HighQuality")))
+                             (unwind-protect
+                                  (progn (dotnet:invoke scaled "Save" out)
+                                         (values (dotnet:invoke out "ToArray") "png"))
+                               (dotnet:invoke out "Dispose"))))))
+                (ignore-errors (when scaled (dotnet:invoke scaled "Dispose")))
+                (ignore-errors (when bmp (dotnet:invoke bmp "Dispose")))
+                (dotnet:invoke ms "Dispose")))
+          (error (e) (log-err "export-resize" e) (values bytes ext)))
+        (values bytes ext))))
+
 (defun %write-clip-zip (out clip)
   "CLIP の各ページを連番リネームして zip OUT に書き出す (各 source は開き直して読む)。
 背景スレッドから呼んで UI を固めない。OUT を返す。"
@@ -621,12 +661,14 @@ string-equal 相当 (大小無視) で重複判定。新しい順を保ち *hist
                                                (setf (gethash src books) (open-book src)))))
                                  (multiple-value-bind (b e) (book-page-bytes book page)
                                    (values b e (book-page-name book page)))))
-                         (let* ((nm (format nil "~4,'0d_~a.~a" seq (%sanitize (pathname-name name)) ext))
-                                (entry (dotnet:invoke zip "CreateEntry" nm))
-                                (es (dotnet:invoke entry "Open")))
-                           (unwind-protect
-                                (dotnet:invoke es "Write" bytes 0 (dotnet:invoke bytes "get_Length"))
-                             (dotnet:invoke es "Dispose"))))))
+                         ;; #35 ②: 設定された最大幅を超えるページは縮小 (PNG 化) して詰める。
+                         (multiple-value-bind (wbytes wext) (%export-resize-bytes bytes ext)
+                           (let* ((nm (format nil "~4,'0d_~a.~a" seq (%sanitize (pathname-name name)) wext))
+                                  (entry (dotnet:invoke zip "CreateEntry" nm))
+                                  (es (dotnet:invoke entry "Open")))
+                             (unwind-protect
+                                  (dotnet:invoke es "Write" wbytes 0 (dotnet:invoke wbytes "get_Length"))
+                               (dotnet:invoke es "Dispose")))))))
                  (error (e) (log-err "export-clip-item" e)))))
         (when zip (ignore-errors (dotnet:invoke zip "Dispose")))
         (ignore-errors (dotnet:invoke fs "Dispose"))
@@ -2138,6 +2180,9 @@ indeterminate が要るなら (dotnet:null)。"
   '(("高品質 (なめらか)" . :high) ("低品質" . :low) ("なし (ドット絵/最近傍)" . :none)))
 (defparameter *theme-choices*
   '(("システム追従 (OS のライト/ダーク)" . :system) ("ライト" . :light) ("ダーク" . :dark)))
+(defparameter *export-width-choices*
+  '(("原寸 (変換なし)" . :original) ("最大 1080px" . 1080) ("最大 1600px" . 1600) ("最大 2048px" . 2048))
+  "掃き出し最大幅の選択肢 (#35 ②)。")
 
 (defun %s-choice-combo (choices current &optional (test #'eql))
   "(ラベル . 値) の CHOICES から ComboBox を作り、CURRENT の項目を選択。"
@@ -2256,7 +2301,7 @@ indeterminate が要るなら (dotnet:null)。"
 
 (defun %settings-apply (vw cb-spread cb-fps cb-rec tb-cache tb-pf tb-th
                         fit-combo bg-combo interp-combo tb-dpi tb-mem tb-slide
-                        dir-img-combo dir-pdf-combo theme-combo)
+                        dir-img-combo dir-pdf-combo theme-combo exp-w-combo)
   "コントロールの現在値をグローバルへ反映し永続化、変更内容に応じて再描画する。"
   (let ((old-spread *spread*) (old-fps *first-page-single*)
         (old-rec *recursive*) (old-threads *loader-threads*) (old-dpi *pdf-dpi*))
@@ -2271,6 +2316,7 @@ indeterminate が要るなら (dotnet:null)。"
           *background-color*  (%s-combo-value bg-combo *bg-choices*)
           *interpolation*     (%s-combo-value interp-combo *interp-choices*)
           *theme*             (%s-combo-value theme-combo *theme-choices*)
+          *export-width*      (%s-combo-value exp-w-combo *export-width-choices*)   ; #35 ②
           *pdf-dpi*           (%parse-int (dotnet:invoke tb-dpi "get_Text") *pdf-dpi* 36)
           *cache-memory-mb*   (%parse-int (dotnet:invoke tb-mem "get_Text") *cache-memory-mb* 16)
           *slideshow-interval* (%parse-int (dotnet:invoke tb-slide "get_Text") *slideshow-interval* 1)
@@ -2753,6 +2799,7 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
          (bg-combo     (%s-choice-combo *bg-choices* *background-color* #'string=))
          (interp-combo (%s-choice-combo *interp-choices* *interpolation*))
          (theme-combo  (%s-choice-combo *theme-choices* *theme*))
+         (exp-w-combo  (%s-choice-combo *export-width-choices* *export-width*))   ; 掃き出し最大幅 (#35 ②)
          (tb-dpi    (%s-textbox *pdf-dpi*))
          ;; キー割当の作業用コピー。(car kbox) が作業リスト。クロージャからは
          ;; (setf (car kbox) ..) で place を書き換える (let* 変数の再束縛は dotcl が不正 IL)。
@@ -2931,7 +2978,8 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
                       (list (list "テーマ" theme-combo (reset-combo theme-combo *theme-choices* :theme))
                             (list "背景色" bg-combo (reset-combo bg-combo *bg-choices* :background-color #'string=))
                             (list "拡大補間" interp-combo (reset-combo interp-combo *interp-choices* :interpolation))
-                            (list "PDF 解像度 (DPI)" tb-dpi (reset-text tb-dpi :pdf-dpi)))))
+                            (list "PDF 解像度 (DPI)" tb-dpi (reset-text tb-dpi :pdf-dpi))
+                            (list "掃き出し最大幅" exp-w-combo (reset-combo exp-w-combo *export-width-choices* :export-width)))))
              (panel-perf
                (spage "先読み"
                       (list (list "キャッシュ上限 (MB)" tb-mem (reset-text tb-mem :cache-memory-mb))
@@ -3069,7 +3117,7 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
               (lambda ()
                 (%settings-apply vw cb-spread cb-fps cb-rec tb-cache tb-pf tb-th
                                  fit-combo bg-combo interp-combo tb-dpi tb-mem tb-slide
-                                 dir-img-combo dir-pdf-combo theme-combo)
+                                 dir-img-combo dir-pdf-combo theme-combo exp-w-combo)
                 ;; キー指向の作業リストを機能ごとにまとめ直して確定 (削除は空リストで反映)。
                 (setf *keybinds*
                       (mapcar (lambda (c)
