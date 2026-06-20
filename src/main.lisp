@@ -2514,6 +2514,20 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
   (let ((box (viewer-status-box vw)))
     (when box (dotnet:invoke box "set_IsVisible" nil))))
 
+(defparameter *settings-search-index*
+  ;; (項目ラベル . ページ名)。検索ボックスで横断ヒット→ページへジャンプ (#27)。
+  ;; ページの %s-row ラベルと一致させること (ラベルを変えたらここも更新)。
+  '(("綴じ方向 (画像/書庫)" . "レイアウト") ("綴じ方向 (PDF)" . "レイアウト")
+    ("見開き" . "レイアウト") ("表紙を単独表示" . "レイアウト")
+    ("サブフォルダも再帰収集" . "レイアウト") ("フィット" . "レイアウト")
+    ("背景色" . "画質") ("拡大補間" . "画質") ("PDF 解像度 (DPI)" . "画質")
+    ("キャッシュ上限 (MB)" . "先読み") ("キャッシュ最大ページ数" . "先読み")
+    ("先読み見開き数" . "先読み") ("ローダースレッド数" . "先読み")
+    ("スライドショー間隔 (秒)" . "先読み")
+    ("キー割当" . "キー割当") ("ショートカット" . "キー割当") ("キーバインド" . "キー割当")
+    ("関連付け" . "関連付け") ("拡張子" . "関連付け") ("ファイル関連付け" . "関連付け"))
+  "設定の全文検索インデックス (#27)。")
+
 (defun %open-settings (vw)
   ;; 左に折りたたみツリー (カテゴリ)、右に該当ページ。選択で右を差し替える master/detail。
   ;; OK/キャンセルは全ページ共通 (コントロールは非表示でも値を保持するので OK で読める)。
@@ -2542,7 +2556,8 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
          (kb-stack (dotnet:new "Avalonia.Controls.StackPanel"))
          (content  (dotnet:new "Avalonia.Controls.ContentControl"))
          (win-p (dotnet:static "System.OperatingSystem" "IsWindows"))  ; 関連付けは Windows のみ (#11)
-         (assoc-status (dotnet:new "Avalonia.Controls.TextBlock")))
+         (assoc-status (dotnet:new "Avalonia.Controls.TextBlock"))
+         (cur (list "レイアウト")))   ; 現在のページ名 (検索クリア時の復帰先; #27)
     (labels
         ((add-binding (k)
            ;; 数字 1-9 は count プレフィックス予約で割当てても発火しないので弾く (#23)。0 は可。
@@ -2714,6 +2729,42 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
              (g-perf (tvi "性能" (list leaf-perf)))
              (g-op   (tvi "操作" (list leaf-keys)))
              (g-system (tvi "システム" (list leaf-assoc)))
+             (leaves (list (cons "レイアウト" leaf-layout) (cons "画質" leaf-quality)
+                           (cons "先読み" leaf-perf) (cons "キー割当" leaf-keys)
+                           (cons "関連付け" leaf-assoc)))
+             (sbox (dotnet:new "Avalonia.Controls.TextBox"))   ; 設定検索ボックス (#27)
+             ;; name のページへ移動 (ツリー選択経由 → SelectionChanged が content を差し替え)。
+             (nav (lambda (name)
+                    (dotnet:invoke sbox "set_Text" "")        ; 検索をクリアして
+                    (let ((lf (cdr (assoc name leaves :test #'equal))))
+                      (when lf (dotnet:invoke lf "set_IsSelected" t)))))
+             ;; 検索: 空ならカレントページ、非空ならヒット (ページ›項目) のボタン一覧を右に出す。
+             (do-search
+               (lambda (q)
+                 (let ((qq (string-downcase (string-trim '(#\Space #\Tab) (or q "")))))
+                   (if (zerop (length qq))
+                       (dotnet:invoke content "set_Content"
+                                      (cdr (assoc (car cur) pages :test #'equal)))
+                       (let ((res (dotnet:new "Avalonia.Controls.StackPanel"))
+                             (hits (remove-duplicates
+                                    (loop for (label . page) in *settings-search-index*
+                                          when (search qq (string-downcase label))
+                                          collect (cons label page))
+                                    :test #'equal :from-end t)))
+                         (dotnet:invoke res "set_Margin" (dotnet:new "Avalonia.Thickness" 16d0))
+                         (if hits
+                             (dolist (h hits)
+                               (let* ((label (car h)) (page (cdr h))
+                                      (btn (%s-button (format nil "~a 〉 ~a" page label)
+                                                      (let ((pg page)) (lambda () (funcall nav pg))))))
+                                 (dotnet:invoke btn "set_HorizontalAlignment"
+                                                (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Left"))
+                                 (dotnet:invoke btn "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 2d0))
+                                 (dotnet:invoke (dotnet:invoke res "get_Children") "Add" btn)))
+                             (let ((tb (dotnet:new "Avalonia.Controls.TextBlock")))
+                               (dotnet:invoke tb "set_Text" "該当なし")
+                               (dotnet:invoke (dotnet:invoke res "get_Children") "Add" tb)))
+                         (dotnet:invoke content "set_Content" res))))))
              (root (dotnet:new "Avalonia.Controls.DockPanel"))
              (grid (dotnet:new "Avalonia.Controls.Grid"))
              (btns (dotnet:new "Avalonia.Controls.StackPanel")))
@@ -2727,8 +2778,15 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
           (lambda (s e) (declare (ignore s e))
             (let ((item (dotnet:invoke tree "get_SelectedItem")))
               (when item
-                (let ((p (cdr (assoc (dotnet:invoke item "get_Header") pages :test #'equal))))
-                  (when p (dotnet:invoke content "set_Content" p)))))))
+                (let* ((name (dotnet:invoke item "get_Header"))
+                       (p (cdr (assoc name pages :test #'equal))))
+                  (when p (setf (car cur) name) (dotnet:invoke content "set_Content" p)))))))
+        ;; 検索ボックス: 入力で横断ヒットをページ›項目で右に出す (#27)。
+        (dotnet:invoke sbox "set_Watermark" "設定を検索…")
+        (dotnet:invoke sbox "set_Margin" (dotnet:new "Avalonia.Thickness" 12d0 12d0 12d0 0d0))
+        (dotnet:add-event sbox "TextChanged"
+          (lambda (s e) (declare (ignore s e))
+            (funcall do-search (dotnet:invoke sbox "get_Text"))))
         (dotnet:invoke content "set_Content" panel-layout)   ; 初期ページ
         (dotnet:invoke leaf-layout "set_IsSelected" t)
         ;; 2 列 grid: [tree(180) | content(*)]
@@ -2767,10 +2825,13 @@ pdf-book のみ (page-name 検索の他形式は矩形なし)。"
                 (rebuild-keymap)
                 (save-keybinds)
                 (dotnet:invoke swin "Close")))))
-        ;; root: [btns(下) | grid(残り)]
+        ;; root: [sbox(上) | btns(下) | grid(残り)]
+        (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" sbox
+                       (dotnet:static "Avalonia.Controls.Dock" "Top"))
         (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" btns
                        (dotnet:static "Avalonia.Controls.Dock" "Bottom"))
         (let ((rc (dotnet:invoke root "get_Children")))
+          (dotnet:invoke rc "Add" sbox)
           (dotnet:invoke rc "Add" btns)
           (dotnet:invoke rc "Add" grid))
         (dotnet:invoke swin "set_Title" "設定")
