@@ -415,19 +415,48 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
     (error (e) (log-err name e) nil)))
 
 (defun %write-state (name data)
+  ;; アトミック書き込み (#34): temp に書いて rename で置換する。複数インスタンス
+  ;; 同時起動でも、読み手が書き込み途中の中途半端なファイルを見ない (= partial read
+  ;; による parse 失敗→既定で上書き、を防ぐ)。temp 名に PID を入れて他インスタンスの
+  ;; temp と衝突させない。同一ディレクトリの File.Move(overwrite) は実質 atomic な rename。
   (handler-case
       (progn
         (dotnet:static "System.IO.Directory" "CreateDirectory" (%config-dir))
-        (with-open-file (s (%state-file name) :direction :output
-                           :if-exists :supersede :if-does-not-exist :create)
-          (with-standard-io-syntax (prin1 data s) (terpri s))))
+        (let* ((dest (%state-file name))
+               (tmp  (concatenate 'string dest "."
+                                  (princ-to-string (dotnet:static "System.Environment" "ProcessId"))
+                                  ".tmp")))
+          (unwind-protect
+               (progn
+                 (with-open-file (s tmp :direction :output
+                                    :if-exists :supersede :if-does-not-exist :create)
+                   (with-standard-io-syntax (prin1 data s) (terpri s)))
+                 (dotnet:static "System.IO.File" "Move" tmp dest t))   ; overwrite=t
+            ;; Move 成功時は tmp は消えている。失敗で残ったら掃除。
+            (when (dotnet:static "System.IO.File" "Exists" tmp)
+              (ignore-errors (dotnet:static "System.IO.File" "Delete" tmp))))))
     (error (e) (log-err name e))))
 
 ;;; 履歴
 (defparameter *history* nil "((path . page) ...) 最近順。")
 (defparameter *history-limit* 200)
 (defun load-history () (setf *history* (%read-state "history.lisp")))
-(defun save-history () (%write-state "history.lisp" *history*))
+(defun %merge-history (mine disk)
+  "自分の履歴を優先しつつ disk にしか無い path を残してマージ (#34)。複数インスタンス
+が別々の本を開閉しても、片方の履歴を last-writer-wins で消さないため。path は
+string-equal 相当 (大小無視) で重複判定。新しい順を保ち *history-limit* で切る。"
+  (let ((seen (make-hash-table :test 'equal)) (out '()))
+    (dolist (e (append mine disk))
+      (let ((k (string-downcase (car e))))
+        (unless (gethash k seen)
+          (setf (gethash k seen) t)
+          (push e out))))
+    (setf out (nreverse out))
+    (if (> (length out) *history-limit*) (subseq out 0 *history-limit*) out)))
+(defun save-history ()
+  ;; 書く直前にディスクの現状とマージ (他インスタンスの履歴を保全; #34)。
+  (setf *history* (%merge-history *history* (%read-state "history.lisp")))
+  (%write-state "history.lisp" *history*))
 (defun history-page (path) (cdr (assoc path *history* :test #'string-equal)))
 (defun history-update (path page)
   (when path
