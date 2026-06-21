@@ -204,6 +204,17 @@ Owner is the given viewer's window, else the first open window, else centered on
     (dotnet:invoke root "set_Spacing" 6d0)
     (dotnet:invoke root "set_Margin" (dotnet:new "Avalonia.Thickness" 16d0))
     (let ((c (dotnet:invoke root "get_Children")))
+      ;; app icon (the same app.ico used for the window / taskbar), shown at the top.
+      (ignore-errors
+        (let ((ico (concatenate 'string (dotnet:static "System.AppContext" "BaseDirectory") "app.ico")))
+          (when (dotnet:static "System.IO.File" "Exists" ico)
+            (let ((img (dotnet:new "Avalonia.Controls.Image")))
+              (dotnet:invoke img "set_Source" (dotnet:new "Avalonia.Media.Imaging.Bitmap" ico))
+              (dotnet:invoke img "set_Width" 64d0)
+              (dotnet:invoke img "set_Height" 64d0)
+              (dotnet:invoke img "set_HorizontalAlignment"
+                             (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Center"))
+              (dotnet:invoke c "Add" img)))))
       (dotnet:invoke c "Add" (%about-text "paalam" t 20))
       (dotnet:invoke c "Add" (%about-text (format nil "Version ~a" *version*)))
       (dotnet:invoke c "Add" (%about-text "A NeeView-style image viewer built with dotcl + Avalonia."))
