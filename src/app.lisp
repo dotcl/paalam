@@ -399,8 +399,10 @@ No-op on platforms without IActivatableLifetime."
   (setf *target-path* target)
   (let* ((b    (dotnet:static-generic "Avalonia.AppBuilder" "Configure" (list "Paalam.App")))
          (b    (dotnet:static "Avalonia.AppBuilderDesktopExtensions" "UsePlatformDetect" b))
-         ;; macOS: pin to Software rendering to avoid CVDisplayLink RenderTimer startup failure
-         ;; (-6661, Avalonia #14927) (a fix for -6661 reproduced by Finder launch / lid close, etc.).
+         ;; macOS: pin to Software rendering (no GPU Metal/OpenGl path). NOTE: this does NOT fix
+         ;; the -6661 CVDisplayLink crash (Avalonia #14927) — that timer is created regardless of
+         ;; rendering mode, and -6661 is environmental (e.g. launching while the screen is locked).
+         ;; Kept only because it is harmless here. See Paalam.MacRenderFix for the full note.
          (b    (if (dotnet:static "System.OperatingSystem" "IsMacOS")
                    (dotnet:static "Paalam.MacRenderFix" "UseSoftwareRendering" b)
                    b))

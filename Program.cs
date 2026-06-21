@@ -352,13 +352,18 @@ public static class DialogHelper
 // (File activation — macOS Finder "Open With" / Dock drop / file-association, #19 — was the
 //  Paalam.FileOpenHelper shim; now wired directly in Lisp via %enable-file-open in app.lisp.)
 
-// Workaround for the macOS RenderTimer/-6661 issue (Avalonia #14927). The CVDisplayLink-based
-// RenderTimer fails at CreateAvaloniaNative/RegisterTick early in startup (reproduces under
-// conditions like a closed lid, external-display-only, or races depending on the launch path).
-// The public API can't directly replace the RenderTimer, so pin it to Software rendering that
-// doesn't use the GPU path (Metal/OpenGl), avoiding CVDisplayLink/Metal initialization itself.
+// Pin macOS to Software rendering (no GPU Metal/OpenGl path).
+//
+// NOTE: this does NOT fix the macOS RenderTimer/-6661 crash (Avalonia #14927), despite the
+// original intent. In Avalonia 12 the CVDisplayLink-based RenderTimer is created unconditionally
+// in AvaloniaNativePlatform.DoInitialize, independent of RenderingMode, so Software mode cannot
+// avoid CVDisplayLink. The -6661 crash is environmental (e.g. launching while the screen is
+// locked / lid closed) and is unrelated to this option. We keep Software rendering only because
+// it is harmless here and avoids the GPU path; the real -6661 fix would need an IRenderTimer
+// fallback (not done). Call only on macOS (this option is a no-op elsewhere).
+//
 // The generic AppBuilder.With<T> and IList<enum> construction are awkward from Lisp's dotnet:
-// FFI, so build them on the C# side. Call only on macOS (an option that is ineffective on other OSes).
+// FFI, so build them on the C# side.
 public static class MacRenderFix
 {
     public static Avalonia.AppBuilder UseSoftwareRendering(Avalonia.AppBuilder builder)
