@@ -306,6 +306,49 @@ matters. Win/Linux use the in-window Help menu instead (see %add-help-menu)."
         (dotnet:static "Avalonia.Controls.NativeMenu" "SetMenu" app menu))
     (error (e) (log-err "mac-app-menu" e))))
 
+;;; File activation (#19): receive files arriving via macOS Finder "Open With" / Dock drop /
+;;; file-association launch. These come as Apple Events (not argv), surfaced by Avalonia as
+;;; IActivatableLifetime.Activated with ActivationKind.File. Wired directly in Lisp (formerly
+;;; the Paalam.FileOpenHelper C# shim): TryGetFeature(Type) is the non-generic overload, the
+;;; event arg is filtered by Kind, and Files items convert via StorageProviderExtensions
+;;; .TryGetLocalPath — same idioms as dnd.lisp.
+(defparameter *activation-kind-file* 10
+  "ActivationKind.File enum value (Avalonia.Controls.ApplicationLifetimes.ActivationKind).")
+
+(defun %activated-file-paths (e)
+  "Local paths from an ActivatedEventArgs e, only when Kind=File. Empty list otherwise."
+  (handler-case
+      (let ((kind (dotnet:static "System.Convert" "ToInt32" (dotnet:invoke e "get_Kind"))))
+        ;; enum compares awkwardly across the FFI; match by underlying int value.
+        (if (= kind *activation-kind-file*)
+            (let ((files (dotnet:invoke e "get_Files")) (paths '()))
+              (when files
+                (let ((en (dotnet:invoke files "GetEnumerator")))
+                  (loop while (dotnet:invoke en "MoveNext")
+                        do (let* ((item (dotnet:invoke en "get_Current"))
+                                  (p (and item (dotnet:static
+                                                "Avalonia.Platform.Storage.StorageProviderExtensions"
+                                                "TryGetLocalPath" item))))
+                             (when (and p (> (length p) 0)) (push p paths))))))
+              (nreverse paths))
+            '()))
+    (error (err) (log-err "activated-file-paths" err) nil)))
+
+(defun %enable-file-open (app on-file)
+  "Subscribe on-file=(lambda (path)) to file-activation events (macOS Open With / Dock / assoc).
+No-op on platforms without IActivatableLifetime."
+  (handler-case
+      (let* ((iface (dotnet:static "System.Type" "GetType"
+                                   "Avalonia.Controls.ApplicationLifetimes.IActivatableLifetime, Avalonia.Controls"))
+             (life  (and iface (dotnet:invoke app "TryGetFeature" iface))))
+        (when life
+          (dotnet:invoke life "add_Activated"
+                         (dotnet:make-delegate
+                          "System.EventHandler`1[[Avalonia.Controls.ApplicationLifetimes.ActivatedEventArgs, Avalonia.Controls]]"
+                          (lambda (s e) (declare (ignore s))
+                            (dolist (p (%activated-file-paths e)) (funcall on-file p)))))))
+    (error (e) (log-err "enable-file-open" e))))
+
 ;;; emit an Avalonia.Application subclass on the Lisp side.
 (dotnet:define-class "Paalam.App" ("Avalonia.Application")
   (:ctor ()
@@ -335,10 +378,7 @@ matters. Win/Linux use the in-window Help menu instead (see %add-help-menu)."
             (dotnet:invoke life "set_MainWindow" win)
             ;; receive files arriving via macOS Finder "Open" / Dock drop / file-association launch.
             ;; replace if there is a viewer; otherwise stack onto the target opened by the next build.
-            (dotnet:static "Paalam.FileOpenHelper" "Enable" self
-                           (dotnet:make-delegate "System.Action`1[System.String]"
-                             (lambda (p)
-                               (%ui-post (lambda () (%activate-open p))))))
+            (%enable-file-open self (lambda (p) (%ui-post (lambda () (%activate-open p)))))
             (%maybe-autoclose life))
         (error (e) (log-err "init" e))))))
 

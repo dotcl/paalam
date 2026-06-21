@@ -349,38 +349,8 @@ public static class DialogHelper
     }
 }
 
-// Receive files passed via macOS Finder "Open With" / drop onto the Dock / file-association
-// launch (#19). These come via Apple Events rather than argv, so subscribe to Avalonia's
-// IActivatableLifetime.Activated (ActivationKind.File).
-// The generic TryGetFeature<T> and the FileActivatedEventArgs cast are awkward in Lisp's
-// dotnet: FFI, so confine them to a C# shim and pass only string paths to Lisp.
-public static class FileOpenHelper
-{
-    // app: Avalonia.Application (Paalam.App). onFile: notify the local paths to open, one at a time.
-    public static void Enable(Avalonia.Application app, Action<string> onFile)
-    {
-        try
-        {
-            // Avalonia 12's TryGetFeature is the non-generic (takes a Type) version.
-            var life = app.TryGetFeature(
-                typeof(Avalonia.Controls.ApplicationLifetimes.IActivatableLifetime))
-                as Avalonia.Controls.ApplicationLifetimes.IActivatableLifetime;
-            if (life == null) return;   // unsupported platform
-            life.Activated += (s, e) =>
-            {
-                if (e is Avalonia.Controls.ApplicationLifetimes.FileActivatedEventArgs fa)
-                {
-                    foreach (var item in fa.Files)
-                    {
-                        var p = item.TryGetLocalPath();
-                        if (!string.IsNullOrEmpty(p)) onFile(p!);
-                    }
-                }
-            };
-        }
-        catch { /* silently skip in environments where the feature is absent */ }
-    }
-}
+// (File activation — macOS Finder "Open With" / Dock drop / file-association, #19 — was the
+//  Paalam.FileOpenHelper shim; now wired directly in Lisp via %enable-file-open in app.lisp.)
 
 // Workaround for the macOS RenderTimer/-6661 issue (Avalonia #14927). The CVDisplayLink-based
 // RenderTimer fails at CreateAvaloniaNative/RegisterTick early in startup (reproduces under
