@@ -1,14 +1,14 @@
-;;;; book.lisp — paalam (#39 main.lisp 分割): book プロトコル + 各 book + open-book
+;;;; book.lisp — paalam (#39 main.lisp split): book protocol + each book + open-book
 (in-package :paalam)
 
 ;;; ------------------------------------------------------------------
-;;; book プロトコル
+;;; book protocol
 ;;; ------------------------------------------------------------------
 
-(defgeneric book-page-count (book)        (:documentation "ページ数。"))
-(defgeneric book-page-name  (book index)  (:documentation "index ページの表示名。"))
-(defgeneric book-load-image (book index)  (:documentation "index ページの Avalonia Bitmap。"))
-(defgeneric book-close      (book)        (:documentation "リソース解放。"))
+(defgeneric book-page-count (book)        (:documentation "Number of pages."))
+(defgeneric book-page-name  (book index)  (:documentation "Display name of page index."))
+(defgeneric book-load-image (book index)  (:documentation "Avalonia Bitmap of page index."))
+(defgeneric book-close      (book)        (:documentation "Release resources."))
 
 ;;; directory-book ---------------------------------------------------
 
@@ -27,8 +27,8 @@
       (unless (gethash x seen) (setf (gethash x seen) t) (push x acc)))))
 
 (defun %dir-image-files (dir)
-  "dir 直下 (+ *recursive* ならサブフォルダも) の画像ファイル full path を自然順で。
-** は直下を含まないので *.ext と **/*.ext の和集合を取る。"
+  "Full paths of image files directly under dir (+ subfolders if *recursive*), in natural order.
+** does not include the top level, so take the union of *.ext and **/*.ext."
   (let ((dir (%ensure-trailing-slash dir))
         (globs (if *recursive* '("*." "**/*.") '("*.")))
         (out '()))
@@ -81,19 +81,19 @@
   (ignore-errors (dotnet:invoke (zb-archive b) "Dispose"))
   (ignore-errors (dotnet:invoke (zb-stream b) "Dispose")))
 
-;;; sharp-book (SharpCompress: rar/7z/tar 等) -----------------------
-;;; zip 以外の書庫を SharpCompress の IArchive 経由で読む。rar/7z/tar など
-;;; フォーマット検出は ArchiveFactory.Open が行うので backend は 1 つで済む。
+;;; sharp-book (SharpCompress: rar/7z/tar etc.) --------------------
+;;; Read archives other than zip via SharpCompress's IArchive. For rar/7z/tar etc.
+;;; format detection is done by ArchiveFactory.Open, so a single backend suffices.
 
 (defun %enum->list (enumerable)
-  "IEnumerable を Lisp リストへ (GetEnumerator/MoveNext/Current)。"
+  "Convert an IEnumerable into a Lisp list (GetEnumerator/MoveNext/Current)."
   (let ((en (dotnet:invoke enumerable "GetEnumerator")) (acc '()))
     (loop while (dotnet:invoke en "MoveNext")
           do (push (dotnet:invoke en "get_Current") acc))
     (nreverse acc)))
 
 (defun %basename (key)
-  "書庫エントリ名 (/ or \\ 区切り) の最終成分。"
+  "Last component of an archive entry name (/ or \\ separated)."
   (let ((p (max (or (position #\/ key :from-end t) -1)
                 (or (position #\\ key :from-end t) -1))))
     (if (>= p 0) (subseq key (1+ p)) key)))
@@ -112,7 +112,7 @@
     (sort (nreverse acc) #'natural< :key #'car)))
 
 (defun make-sharp-book (path)
-  ;; Open(string, ReaderOptions=null): 省略可引数を明示 nil で渡す (#292 回避)。
+  ;; Open(string, ReaderOptions=null): pass the optional argument explicitly as nil (#292 workaround).
   (let* ((archive (dotnet:static "SharpCompress.Archives.ArchiveFactory" "Open" path nil))
          (pairs (%sharp-image-entries archive)))
     (make-instance 'sharp-book
@@ -128,19 +128,19 @@
     (unwind-protect
          (progn (dotnet:invoke es "CopyTo" ms)
                 (dotnet:invoke ms "set_Position" 0)
-                ;; #294 修正済 (0.1.12): 直呼びで Bitmap(Stream) を選べる。
+                ;; #294 fixed (0.1.12): direct call can select Bitmap(Stream).
                 (dotnet:new "Avalonia.Media.Imaging.Bitmap" ms))
       (dotnet:invoke es "Dispose")
       (dotnet:invoke ms "Dispose"))))
 (defmethod book-close ((b sharp-book))
   (ignore-errors (dotnet:invoke (sb2-archive b) "Dispose")))
 
-;;; pdf-book (PDFtoImage/PDFium 経由) -------------------------------
-;;; 各ページを C# シム Paalam.PdfDoc でラスタライズして Avalonia Bitmap に。
+;;; pdf-book (via PDFtoImage/PDFium) --------------------------------
+;;; Rasterize each page with the C# shim Paalam.PdfDoc into an Avalonia Bitmap.
 
 (defparameter *pdf-dpi* 300
-  "PDF ページのラスタライズ解像度 (DPI)。150 固定だと 4K で拡大され粗いので可変に (#2)。
-高いほど精細だがメモリ/時間増。4K は 300〜400 程度が目安。変更時は本を開き直して再描画。")
+  "Rasterization resolution of PDF pages (DPI). A fixed 150 looks coarse when scaled up to 4K, so make it variable (#2).
+Higher is more detailed but uses more memory/time. For 4K, around 300-400 is a rough guide. After changing, reopen the book to redraw.")
 
 (defclass pdf-book ()
   ((doc   :initarg :doc   :reader pdfb-doc)
@@ -156,8 +156,8 @@
 (defmethod book-load-image ((b pdf-book) i) (dotnet:invoke (pdfb-doc b) "RenderPage" i *pdf-dpi*))
 (defmethod book-close      ((b pdf-book)) nil)
 
-;;; book-page-bytes: 素材掃き出し (#18) 用にページの生バイトと拡張子を返す。
-;;; (values byte[] extension)。dir/zip/sharp は格納形式そのまま、pdf は PNG 化。
+;;; book-page-bytes: return the raw bytes and extension of a page for clip export (#18).
+;;; (values byte[] extension). dir/zip/sharp keep the stored format as-is; pdf is converted to PNG.
 (defgeneric book-page-bytes (book index))
 
 (defun %name-ext (name) (string-downcase (or (pathname-type name) "dat")))
@@ -188,10 +188,10 @@
 ;;; open-book --------------------------------------------------------
 
 (defun open-book (path)
-  "PATH (ディレクトリ / アーカイブ / 画像ファイル) を本として開く。
-2 値 (book start-index) を返す。"
+  "Open PATH (directory / archive / image file) as a book.
+Returns two values (book start-index)."
   (cond
-    ;; 未指定 (path = nil): 空の本を開く (本未オープン状態の窓)。
+    ;; Unspecified (path = nil): open an empty book (window with no book opened).
     ((null path)
      (values (make-instance 'directory-book :paths #()) 0))
     ((dotnet:static "System.IO.Directory" "Exists" path)
@@ -213,6 +213,6 @@
                                       :key #'file-namestring :test #'string-equal)
                             0)))
             (values book start)))
-         (t (error "対応していないファイル形式: ~a" path)))))
-    (t (error "パスが見つかりません: ~a" path))))
+         (t (error "Unsupported file format: ~a" path)))))
+    (t (error "Path not found: ~a" path))))
 

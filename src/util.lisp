@@ -1,12 +1,12 @@
-;;;; util.lisp — paalam (#39 main.lisp 分割): ファイル名/画像ユーティリティ
+;;;; util.lisp — paalam (#39 main.lisp split): filename/image utilities
 (in-package :paalam)
 
 ;;; ------------------------------------------------------------------
-;;; ファイル名ユーティリティ
+;;; Filename utilities
 ;;; ------------------------------------------------------------------
 
 (defparameter *image-extensions* '("jpg" "jpeg" "png" "gif" "bmp" "tif" "tiff" "webp")
-  "対応画像拡張子 (小文字)。Avalonia/Skia は webp も読める。")
+  "Supported image extensions (lowercase). Avalonia/Skia can also read webp.")
 
 (defun image-ext-p (ext)
   (and ext (member (string-downcase ext) *image-extensions* :test #'string=) t))
@@ -16,7 +16,7 @@
     (and dot (image-ext-p (subseq name (1+ dot))))))
 
 (defun natural-key (s)
-  "自然順ソート用キー。数字列をゼロ詰めし英字は小文字化 (page2 < page10)。"
+  "Natural-sort key. Zero-pads digit runs and lowercases letters (page2 < page10)."
   (with-output-to-string (out)
     (let ((i 0) (n (length s)))
       (loop while (< i n) do
@@ -31,22 +31,22 @@
 (defun natural< (a b) (string< (natural-key a) (natural-key b)))
 
 ;;; ------------------------------------------------------------------
-;;; 画像ロード (Avalonia.Media.Imaging.Bitmap)
+;;; Image loading (Avalonia.Media.Imaging.Bitmap)
 ;;; ------------------------------------------------------------------
 
 (defun %load-file-bitmap (path)
   (dotnet:new "Avalonia.Media.Imaging.Bitmap" path))   ; Bitmap(string fileName)
 
 (defun %load-zip-bitmap (entry)
-  ;; ZipArchiveEntry.Open() は非 seekable なので MemoryStream に写してから渡す。
-  ;; Avalonia Bitmap(Stream) は ctor 内で復号するので、戻り後に stream を閉じてよい。
+  ;; ZipArchiveEntry.Open() is non-seekable, so copy it into a MemoryStream first.
+  ;; Avalonia Bitmap(Stream) decodes inside the ctor, so the stream may be closed afterward.
   (let ((es (dotnet:invoke entry "Open"))
         (ms (dotnet:new "System.IO.MemoryStream")))
     (unwind-protect
          (progn (dotnet:invoke es "CopyTo" ms)
                 (dotnet:invoke ms "set_Position" 0)
-                ;; #294 修正済 (DotCL.Runtime 0.1.12): dotnet:new が Bitmap(Stream) を
-                ;; 正しく選べるので C# シム不要 (直呼び)。
+                ;; #294 fixed (DotCL.Runtime 0.1.12): dotnet:new selects Bitmap(Stream)
+                ;; correctly, so no C# shim is needed (direct call).
                 (dotnet:new "Avalonia.Media.Imaging.Bitmap" ms))
       (dotnet:invoke es "Dispose")
       (dotnet:invoke ms "Dispose"))))

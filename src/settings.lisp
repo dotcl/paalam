@@ -1,42 +1,42 @@
-;;;; settings.lisp — paalam (#39 main.lisp 分割): 表示設定・永続化・履歴・ブックマーク
+;;;; settings.lisp — paalam (#39 main.lisp split): display settings / persist / history / bookmarks
 (in-package :paalam)
 
 ;;; ------------------------------------------------------------------
-;;; 表示設定・永続化・履歴・ブックマーク (viewer 本体は viewer.lisp)
+;;; Display settings / persist / history / bookmarks (viewer body in viewer.lisp)
 ;;; ------------------------------------------------------------------
 
-;;; --- 表示設定 (将来のカスタマイズ UI / 設定ファイルの対象) ---------
+;;; --- Display settings (target of future customization UI / settings file) ---------
 (defparameter *page-direction* :rtl
-  "現在の本の綴じ方向 (実行時の値)。:rtl=右開き/漫画 (← が次・→ が前)、:ltr=左開き。
-本を開くと種類で *image-direction* / *pdf-direction* から決まり、D キーでその場反転 (#33)。")
+  "Current book's binding direction (runtime value). :rtl=right-opening/manga (<- is next, -> is prev), :ltr=left-opening.
+When a book is opened it is decided by its type from *image-direction* / *pdf-direction*, and the D key flips it in place (#33).")
 (defparameter *image-direction* :rtl
-  "画像/書庫 (漫画) を開いた時の既定綴じ方向 (#33)。")
+  "Default binding direction when opening an image/archive (manga) (#33).")
 (defparameter *pdf-direction* :ltr
-  "PDF (論文/技術書) を開いた時の既定綴じ方向 (#33)。")
+  "Default binding direction when opening a PDF (paper/technical book) (#33).")
 (defun %book-direction (book)
-  "本の種類ごとの既定綴じ方向 (#33)。pdf=*pdf-direction* / 画像・書庫=*image-direction*。"
+  "Default binding direction per book type (#33). pdf=*pdf-direction* / image,archive=*image-direction*."
   (if (typep book 'pdf-book) *pdf-direction* *image-direction*))
 (defparameter *spread* t
-  "見開き表示。t = 2 ページ並べ、nil = 単ページ。")
+  "Spread display. t = lay out 2 pages, nil = single page.")
 (defparameter *first-page-single* t
-  "見開き時、先頭ページ (表紙) を単独表示する (漫画の慣習)。")
+  "In spread mode, show the first page (cover) alone (manga convention).")
 (defparameter *recursive* t
-  "フォルダを本として開くとき、サブフォルダの画像も再帰的に集める。")
+  "When opening a folder as a book, recursively gather images from subfolders too.")
 (defparameter *fit-mode* :whole
-  "フィットモード。:whole=全体(中央), :width=幅フィット(縦スクロール),
-:height=高フィット(横スクロール)。実効スケール = フィット基準 × user zoom (#15)。")
+  "Fit mode. :whole=whole(centered), :width=fit width(vertical scroll),
+:height=fit height(horizontal scroll). Effective scale = fit baseline x user zoom (#15).")
 (defparameter *background-color* "Black"
-  "ウィンドウ背景 (= フィット時の余白/レターボックス) のブラシ名。Avalonia.Media.Brushes の名前 (#2)。")
+  "Brush name for the window background (= margin/letterbox when fitting). A name from Avalonia.Media.Brushes (#2).")
 (defparameter *interpolation* :high
-  "拡大時の補間品質。:high=HighQuality (なめらか), :low=LowQuality (くっきり寄り) (#2)。")
+  "Interpolation quality when scaling up. :high=HighQuality (smooth), :low=LowQuality (sharper) (#2).")
 (defparameter *theme* :system
-  "UI テーマ (メニュー/ダイアログ等 FluentTheme 部の配色)。:system=OS のライト/ダークに
-追従 (ThemeVariant.Default)、:light / :dark で固定 (#27)。画像表示の背景は別途 *background-color*。")
+  "UI theme (color scheme of the FluentTheme parts such as menu/dialog). :system=follow the OS light/dark
+(ThemeVariant.Default), :light / :dark to fix (#27). The image display background is separate: *background-color*.")
 
-;;; --- 設定の永続化 (s式 plist / OS の app data) ---------------------
+;;; --- Persisting settings (s-expr plist / OS app data) ---------------------
 (defparameter *export-width* :original
-  "掃き出し時の最大幅 (#35 ②)。:original=原寸 (変換なし) / 整数=その幅を超えるページだけ
-縮小して PNG 出力。原寸以下のページは無変換で素通し (上げない・再エンコードしない)。")
+  "Max width on export (#35 ②). :original=original size (no conversion) / integer=only pages exceeding
+that width are shrunk and output as PNG. Pages at or below original size pass through unconverted (no upscaling, no re-encoding).")
 
 (defparameter *settings*
   '((:image-direction   . *image-direction*)
@@ -56,13 +56,13 @@
     (:slideshow-interval . *slideshow-interval*)
     (:loupe-scale       . *loupe-scale*)
     (:loader-threads    . *loader-threads*))
-  "保存対象の (設定キー . 特殊変数シンボル)。ここに足すだけで永続化対象になる。")
+  "(settings key . special-variable symbol) of save targets. Just adding here makes it a persistence target.")
 
 (defun %config-dir ()
-  "per-user 設定ディレクトリ + paalam/。
-Win=%APPDATA%, Linux=~/.config (XDG) は GetFolderPath(ApplicationData) が正しく返す。
-macOS だけ GetFolderPath が ~/.config を返す .NET の癖があるので
-Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtime #40353)。"
+  "per-user settings directory + paalam/.
+Win=%APPDATA%, Linux=~/.config (XDG): GetFolderPath(ApplicationData) returns them correctly.
+Only on macOS, GetFolderPath has a .NET quirk of returning ~/.config, so
+steer to the Mac-native ~/Library/Application Support (dotnet/runtime #40353)."
   (let ((base
           (if (dotnet:static "System.OperatingSystem" "IsMacOS")
               (concatenate 'string
@@ -76,7 +76,7 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
 (defun %config-file () (concatenate 'string (%config-dir) "settings.lisp"))
 
 (defun save-settings ()
-  "現在の設定値を s式 plist で書き出す。"
+  "Write out the current settings values as an s-expr plist."
   (handler-case
       (progn
         (dotnet:static "System.IO.Directory" "CreateDirectory" (%config-dir))
@@ -89,7 +89,7 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
     (error (e) (log-err "save-settings" e))))
 
 (defun load-settings ()
-  "設定ファイルがあれば読み込んで反映。無ければ/壊れていれば既定値で作り直す。"
+  "If a settings file exists, load and apply it. If missing/corrupt, recreate with default values."
   (let ((file (%config-file)))
     (handler-case
         (if (dotnet:static "System.IO.File" "Exists" file)
@@ -102,18 +102,18 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
             (save-settings))
       (error (e)
         (log-err "load-settings" e)
-        (ignore-errors (save-settings))))))   ; 壊れていたら既定で作り直す
+        (ignore-errors (save-settings))))))   ; if corrupt, recreate with defaults
 
-;;; --- 履歴 + ブックマーク (#7) -------------------------------------
-;;; 履歴: 本ごとに最後に見たページを覚え、再度開くとそこから再開。
-;;; ブックマーク: ページにしおり (B 切替, ★ 表示, [ ] で前後のしおりへ)。
-;;; どちらも s式で app data に永続化。横断ブラウズ UI は #6/#9。
+;;; --- History + bookmarks (#7) -------------------------------------
+;;; History: remember the last page viewed per book, and resume from there when reopened.
+;;; Bookmarks: bookmark a page (B toggle, ★ display, [ ] jump to prev/next bookmark).
+;;; Both persist to app data as s-exprs. The cross-cutting browse UI is #6/#9.
 
 (defun %state-file (name) (concatenate 'string (%config-dir) name))
 
 (defun %read-sexp-file (file)
-  "FILE があれば 1 個の s式を読んで返す (*read-eval* nil)。無ければ/壊れていれば nil。
-任意パス対応 (設定の import や状態ファイル読みの共通土台; #24/#34)。"
+  "If FILE exists, read and return one s-expr (*read-eval* nil). nil if missing/corrupt.
+Arbitrary-path capable (common base for settings import and state-file reads; #24/#34)."
   (handler-case
       (when (dotnet:static "System.IO.File" "Exists" file)
         (with-open-file (s file :direction :input)
@@ -121,11 +121,11 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
     (error (e) (log-err (format nil "read ~a" file) e) nil)))
 
 (defun %atomic-write (file data)
-  ;; アトミック書き込み (#34): temp に書いて rename で置換する。複数インスタンス
-  ;; 同時起動でも、読み手が書き込み途中の中途半端なファイルを見ない (= partial read
-  ;; による parse 失敗→既定で上書き、を防ぐ)。temp 名に PID を入れて他インスタンスの
-  ;; temp と衝突させない。同一ディレクトリの File.Move(overwrite) は実質 atomic な rename。
-  ;; 任意パス対応 (設定の export と状態ファイル書きの共通土台; #24/#34)。
+  ;; Atomic write (#34): write to temp and replace via rename. Even with multiple
+  ;; instances running at once, a reader never sees a half-written intermediate file (= prevents
+  ;; parse failure from a partial read -> overwrite with defaults). Put the PID in the temp name so it
+  ;; never collides with another instance's temp. File.Move(overwrite) within the same directory is effectively an atomic rename.
+  ;; Arbitrary-path capable (common base for settings export and state-file writes; #24/#34).
   (handler-case
       (let* ((dir (dotnet:static "System.IO.Path" "GetDirectoryName" file))
              (tmp (concatenate 'string file "."
@@ -146,14 +146,14 @@ Mac ネイティブの ~/Library/Application Support に寄せる (dotnet/runtim
 (defun %read-state (name) (%read-sexp-file (%state-file name)))
 (defun %write-state (name data) (%atomic-write (%state-file name) data))
 
-;;; 履歴
-(defparameter *history* nil "((path . page) ...) 最近順。")
+;;; History
+(defparameter *history* nil "((path . page) ...) most-recent first.")
 (defparameter *history-limit* 200)
 (defun load-history () (setf *history* (%read-state "history.lisp")))
 (defun %merge-history (mine disk)
-  "自分の履歴を優先しつつ disk にしか無い path を残してマージ (#34)。複数インスタンス
-が別々の本を開閉しても、片方の履歴を last-writer-wins で消さないため。path は
-string-equal 相当 (大小無視) で重複判定。新しい順を保ち *history-limit* で切る。"
+  "Merge giving priority to one's own history while keeping paths that exist only on disk (#34). So that
+even when multiple instances open/close different books, neither side's history is wiped out by last-writer-wins. Paths are
+deduplicated with string-equal semantics (case-insensitive). Keep newest-first order and truncate at *history-limit*."
   (let ((seen (make-hash-table :test 'equal)) (out '()))
     (dolist (e (append mine disk))
       (let ((k (string-downcase (car e))))
@@ -163,7 +163,7 @@ string-equal 相当 (大小無視) で重複判定。新しい順を保ち *hist
     (setf out (nreverse out))
     (if (> (length out) *history-limit*) (subseq out 0 *history-limit*) out)))
 (defun save-history ()
-  ;; 書く直前にディスクの現状とマージ (他インスタンスの履歴を保全; #34)。
+  ;; Merge with the current disk state right before writing (preserve other instances' history; #34).
   (setf *history* (%merge-history *history* (%read-state "history.lisp")))
   (%write-state "history.lisp" *history*))
 (defun history-page (path) (cdr (assoc path *history* :test #'string-equal)))
@@ -174,8 +174,8 @@ string-equal 相当 (大小無視) で重複判定。新しい順を保ち *hist
     (when (> (length *history*) *history-limit*)
       (setf *history* (subseq *history* 0 *history-limit*)))))
 
-;;; ブックマーク
-(defparameter *bookmarks* nil "((path . page) ...)。")
+;;; Bookmarks
+(defparameter *bookmarks* nil "((path . page) ...).")
 (defun load-bookmarks () (setf *bookmarks* (%read-state "bookmarks.lisp")))
 (defun save-bookmarks () (%write-state "bookmarks.lisp" *bookmarks*))
 (defun bookmarked-p (path page)
