@@ -87,6 +87,49 @@ About is deliberately outside *command-menu*, so it survives menu editing and is
     (%add-help-menu vw menu)
     menu))
 
+;;; macOS: the menu bar lives in the native top-of-screen bar, not inside the window.
+;;; Build a window-level NativeMenu from the same *command-menu* definition (one top-level
+;;; NativeMenuItem with a child NativeMenu per group). About stays in the app menu (#40),
+;;; so no Help group here.
+(defun %native-menu-item (header &optional click)
+  (let ((mi (dotnet:new "Avalonia.Controls.NativeMenuItem" header)))
+    (when click
+      (dotnet:add-event mi "Click" (lambda (s e) (declare (ignore s e)) (funcall click))))
+    mi))
+
+(defun %native-cmd-item (vw id)
+  "NativeMenuItem for command ID (label + representative key shown via gesture-less header)."
+  (let* ((c (%command id))
+         (k (%key-label (%command-primary-key id)))
+         (header (if k (format nil "~a (~a)" (command-label c) k) (command-label c))))
+    (%native-menu-item header (lambda () (%run-command vw id)))))
+
+(defun %build-native-menu (vw)
+  "Window-level NativeMenu mirroring *command-menu* (macOS top menu bar)."
+  (let* ((bar   (dotnet:new "Avalonia.Controls.NativeMenu"))
+         (items (dotnet:invoke bar "get_Items")))
+    (dolist (g *command-menu*)
+      (destructuring-bind (gkey title &rest ids) g
+        (declare (ignore gkey))
+        (let ((entries (%menu-render-entries ids)))
+          (when entries
+            (let* ((top (%native-menu-item title))
+                   (sub (dotnet:new "Avalonia.Controls.NativeMenu"))
+                   (sit (dotnet:invoke sub "get_Items")))
+              (dolist (e entries)
+                (dotnet:invoke sit "Add"
+                               (if (eq e :sep)
+                                   (dotnet:new "Avalonia.Controls.NativeMenuItemSeparator")
+                                   (%native-cmd-item vw e))))
+              (dotnet:invoke top "set_Menu" sub)
+              (dotnet:invoke items "Add" top))))))
+    bar))
+
+(defun %apply-native-menu (vw win)
+  "macOS: attach the window-level NativeMenu so the groups appear in the top menu bar (#40)."
+  (ignore-errors
+    (dotnet:static "Avalonia.Controls.NativeMenu" "SetMenu" win (%build-native-menu vw))))
+
 (defun %build-context-menu (vw)
   "For viewport right-click. Built from the same *command-menu* definition as the menu (#26).
 Right after a gesture fires (right-drag runs a command), Cancel Opening so it does not open (#29).
@@ -103,10 +146,13 @@ marking ContextRequested Handled from outside does not stop it -> stop it with O
 
 (defun %rebuild-menus (vw)
   "Rebuild the menu bar and context menu from *command-menu* (#26 apply edits immediately)."
-  (when (viewer-menu vw)
-    (dotnet:invoke (dotnet:invoke (viewer-menu vw) "get_Items") "Clear")
-    (%add-menu-groups vw (viewer-menu vw))
-    (%add-help-menu vw (viewer-menu vw)))
+  (cond
+    ;; macOS: no in-window menu; re-attach the window-level NativeMenu (top menu bar).
+    ((%macos-p) (%apply-native-menu vw (viewer-window vw)))
+    ((viewer-menu vw)
+     (dotnet:invoke (dotnet:invoke (viewer-menu vw) "get_Items") "Clear")
+     (%add-menu-groups vw (viewer-menu vw))
+     (%add-help-menu vw (viewer-menu vw))))
   (ignore-errors
     (dotnet:invoke (viewer-viewport vw) "set_ContextMenu" (%build-context-menu vw))))
 

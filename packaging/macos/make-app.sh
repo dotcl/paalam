@@ -13,7 +13,9 @@ cd "$(dirname "$0")/../.."   # リポジトリルートへ
 
 APP_NAME="paalam"
 BUNDLE_ID="com.snmsts.paalam"
-VERSION="0.1"
+# Single source of truth = src/paalam.asd :version (no hand-synced literal).
+VERSION="$(sed -n 's/.*:version[[:space:]]*"\([^"]*\)".*/\1/p' src/paalam.asd | head -1)"
+: "${VERSION:?could not read :version from src/paalam.asd}"
 DIST="dist"
 APP="$DIST/$APP_NAME.app"
 CONTENTS="$APP/Contents"

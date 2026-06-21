@@ -172,8 +172,13 @@ Whitespace-only input is ignored. Esc/Cancel closes. Callback style (the ShowDia
 
 ;;; About dialog. Shown from Help -> About (Win/Linux in-window menu) or the native
 ;;; application menu (macOS, see %setup-mac-app-menu). Also reachable from the command palette.
-(defparameter *version* "0.1"
-  "Version shown in the About dialog. Keep in sync with paalam.asd :version.")
+(defparameter *version*
+  ;; Single source of truth = paalam.asd :version. Read it at load/compile time so the
+  ;; string is baked into the .fasl; if the system isn't registered at runtime (distributed
+  ;; binary), fall back to the literal captured here. No more hand-syncing a literal.
+  (or (ignore-errors (asdf:component-version (asdf:find-system "paalam")))
+      "0.1")
+  "Version shown in the About dialog. Derived from paalam.asd :version.")
 (defparameter *repository-url* "https://github.com/snmsts/paalam")
 
 (defun %macos-p () (dotnet:static "System.OperatingSystem" "IsMacOS"))

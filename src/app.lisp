@@ -187,17 +187,24 @@ Avalonia Window (built on the calling thread). Two Images meet at the center of 
                             (dotnet:invoke pane "set_Background"
                                            (dotnet:static "Avalonia.Media.Brushes"
                                                           (if on "SteelBlue" "DimGray")))))
-        ;; menu bar (#21): wrap Window.Content in a DockPanel [Menu(Top) | root].
+        ;; menu bar (#21). macOS puts the menu in the native top-of-screen bar (window-level
+        ;; NativeMenu, #40), so the window content is just root. Win/Linux wrap it in a
+        ;; DockPanel [Menu(Top) | root] for an in-window menu bar.
         (dotnet:invoke vport "set_ContextMenu" (%build-context-menu vw))   ; right-click menu (#26; includes gesture suppression #29)
-        (let ((dock (dotnet:new "Avalonia.Controls.DockPanel"))
-              (menu (%build-menu vw win)))
-          (setf (viewer-menu vw) menu)
-          (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" menu
-                         (dotnet:static "Avalonia.Controls.Dock" "Top"))
-          (let ((dc (dotnet:invoke dock "get_Children")))
-            (dotnet:invoke dc "Add" menu)
-            (dotnet:invoke dc "Add" root))
-          (dotnet:invoke win "set_Content" dock)))
+        (if (%macos-p)
+            (progn
+              (setf (viewer-menu vw) nil)          ; no in-window menu; %rebuild-menus etc. guard on this
+              (%apply-native-menu vw win)
+              (dotnet:invoke win "set_Content" root))
+            (let ((dock (dotnet:new "Avalonia.Controls.DockPanel"))
+                  (menu (%build-menu vw win)))
+              (setf (viewer-menu vw) menu)
+              (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" menu
+                             (dotnet:static "Avalonia.Controls.Dock" "Top"))
+              (let ((dc (dotnet:invoke dock "get_Children")))
+                (dotnet:invoke dc "Add" menu)
+                (dotnet:invoke dc "Add" root))
+              (dotnet:invoke win "set_Content" dock))))
       (%apply-background vw)          ; background color (= margin/letterbox, #2)
       (%apply-interpolation vw)       ; upscale interpolation quality (#2)
       ;; window / taskbar icon (app.ico right under the output dir).
@@ -286,7 +293,9 @@ is left in the environment, it acts only when both *debug* and a \"positive inte
 (defun %setup-mac-app-menu (app)
   "macOS: add an About item to the native application menu (the bold app-name menu).
 A bare NativeMenuItem (no child menu) added to the app-level NativeMenu lands in the
-application menu on macOS. Win/Linux use the in-window Help menu instead (see %add-help-menu)."
+application menu; Avalonia auto-appends the standard Services/Hide/Quit after it.
+MUST be called from the App ctor (before framework init) — see the caller for why timing
+matters. Win/Linux use the in-window Help menu instead (see %add-help-menu)."
   (handler-case
       (let* ((about (dotnet:new "Avalonia.Controls.NativeMenuItem" "About paalam"))
              (menu  (dotnet:new "Avalonia.Controls.NativeMenu")))
@@ -307,14 +316,23 @@ application menu on macOS. Win/Linux use the in-window Help menu instead (see %a
               (theme (dotnet:new "Avalonia.Themes.Fluent.FluentTheme")))
           (dotnet:invoke styles "Add" theme)
           (%apply-theme))              ; apply OS-follow or fixed theme (#27)
-      (error (e) (log-err "ctor" e))))
+      (error (e) (log-err "ctor" e)))
+    ;; macOS: install the app NativeMenu (and app Name) in the ctor, BEFORE Avalonia's native
+    ;; app-menu exporter runs its first layout pass. That pass bakes a default "About Avalonia"
+    ;; menu whenever NativeMenu.GetMenu(app) is still null and never rebuilds afterwards in this
+    ;; lifecycle, so a later SetMenu in OnFrameworkInitializationCompleted is ignored. Setting it
+    ;; here means the exporter finds our menu on the first pass (#40 macOS verification).
+    (handler-case
+        (when (%macos-p)
+          (dotnet:invoke self "set_Name" "paalam")
+          (%setup-mac-app-menu self))
+      (error (e) (log-err "ctor-mac-menu" e))))
   (:methods
     ("OnFrameworkInitializationCompleted" () :returns Void :override t
       (handler-case
           (let ((life (dotnet:invoke self "get_ApplicationLifetime"))
                 (win  (build-main-window)))
             (dotnet:invoke life "set_MainWindow" win)
-            (when (%macos-p) (%setup-mac-app-menu self))   ; About in the native app menu (macOS)
             ;; receive files arriving via macOS Finder "Open" / Dock drop / file-association launch.
             ;; replace if there is a viewer; otherwise stack onto the target opened by the next build.
             (dotnet:static "Paalam.FileOpenHelper" "Enable" self
