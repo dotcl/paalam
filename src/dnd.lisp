@@ -1,16 +1,16 @@
-;;;; dnd.lisp — paalam (#39 main.lisp 分割): ドラッグ&ドロップ (#302)
+;;;; dnd.lisp — paalam (#39 main.lisp split): drag and drop (#302)
 (in-package :paalam)
 
 ;;; ------------------------------------------------------------------
-;;; ドラッグ&ドロップ (#302): C# シム (Paalam.DragDropHelper) を剥がし Lisp 直叩き。
-;;; Avalonia 12 の DnD は IDataTransfer + DataFormat。ルーテッドイベントは静的
-;;; RoutedEvent フィールド (DragDrop.DropEvent 等) を読み、EventHandler<DragEventArgs>
-;;; デリゲートで AddHandler 購読する。ファイル取り出し/パス化は静的拡張メソッド
-;;; (DataTransferExtensions / StorageProviderExtensions) を直叩き。
+;;; drag and drop (#302): remove the C# shim (Paalam.DragDropHelper) and call Lisp directly.
+;;; Avalonia 12 DnD is IDataTransfer + DataFormat. For routed events, read the static
+;;; RoutedEvent fields (DragDrop.DropEvent etc.) and subscribe via AddHandler with an
+;;; EventHandler<DragEventArgs> delegate. File extraction / path conversion call the static
+;;; extension methods (DataTransferExtensions / StorageProviderExtensions) directly.
 ;;; ------------------------------------------------------------------
 
 (defun %dnd-has-files (e)
-  "DragEventArgs e がファイルを含むか (DataTransferExtensions.Contains(_, DataFormat.File))。"
+  "Whether DragEventArgs e contains files (DataTransferExtensions.Contains(_, DataFormat.File))."
   (handler-case
       (let ((dt (dotnet:invoke e "get_DataTransfer")))
         (and dt
@@ -20,7 +20,7 @@
     (error (err) (log-err "dnd-has-files" err) nil)))
 
 (defun %dnd-paths (e)
-  "DragEventArgs e からドロップされたローカルパスのリストを取り出す。"
+  "Extract the list of dropped local paths from DragEventArgs e."
   (handler-case
       (let ((dt (dotnet:invoke e "get_DataTransfer"))
             (paths '()))
@@ -38,11 +38,11 @@
     (error (err) (log-err "dnd-paths" err) nil)))
 
 (defun %dnd-add-handler (target event-name handler &optional handled-too)
-  "target (Interactive) の静的 RoutedEvent (DragDrop の event-name フィールド) に
-handler=(lambda (sender args)) を購読。
-AddHandler(RoutedEvent, EventHandler<DragEventArgs>, RoutingStrategies, bool)。"
-  ;; 構築済みジェネリック デリゲート型は型引数を [[Type, Assembly]] と
-  ;; アセンブリ修飾しないと dotcl が解決できない (単純 [Type] は corelib 型のみ; #302)。
+  "Subscribe handler=(lambda (sender args)) to target's (Interactive) static RoutedEvent
+(the event-name field of DragDrop).
+AddHandler(RoutedEvent, EventHandler<DragEventArgs>, RoutingStrategies, bool)."
+  ;; A constructed generic delegate type cannot be resolved by dotcl unless its type
+  ;; argument is assembly-qualified as [[Type, Assembly]] (plain [Type] resolves corelib types only; #302).
   (dotnet:invoke target "AddHandler"
                  (dotnet:static "Avalonia.Input.DragDrop" event-name)
                  (dotnet:make-delegate
@@ -52,10 +52,10 @@ AddHandler(RoutedEvent, EventHandler<DragEventArgs>, RoutingStrategies, bool)。
                  (and handled-too t)))
 
 (defun %add-pressed-tunnel (target handler)
-  "PointerPressed を Tunnel + handledEventsToo で購読 (handler=(lambda (sender args)))。
-TreeViewItem 等が選択処理で PointerPressed を Handled にしても先に受け取れる
-(intra-app ドラッグ開始トリガ用; #32)。CLR の += (add-event) は handledEventsToo=false
-なので捕捉済みイベントを取りこぼす。"
+  "Subscribe to PointerPressed with Tunnel + handledEventsToo (handler=(lambda (sender args))).
+Even when a TreeViewItem etc. marks PointerPressed as Handled during selection, we can still
+receive it first (for the intra-app drag-start trigger; #32). The CLR's += (add-event) uses
+handledEventsToo=false, so it would miss already-handled events."
   (dotnet:invoke target "AddHandler"
                  (dotnet:static "Avalonia.Input.InputElement" "PointerPressedEvent")
                  (dotnet:make-delegate
@@ -69,8 +69,8 @@ TreeViewItem 等が選択処理で PointerPressed を Handled にしても先に
                  (dotnet:static "Avalonia.Input.DragDropEffects" (if has "Copy" "None"))))
 
 (defun %dnd-enable (win on-drop on-highlight)
-  "ウィンドウへ本ファイルの DnD を配線。on-drop=(lambda (path))、on-highlight=(lambda (bool))。
-ファイルが来たら Copy エフェクト、ドロップで先頭パスを on-drop に渡す。"
+  "Wire up book-file DnD to the window. on-drop=(lambda (path)), on-highlight=(lambda (bool)).
+When files arrive, set the Copy effect; on drop, pass the first path to on-drop."
   (dotnet:static "Avalonia.Input.DragDrop" "SetAllowDrop" win t)
   (%dnd-add-handler win "DragOverEvent"
                     (lambda (s e) (declare (ignore s))
@@ -86,8 +86,8 @@ TreeViewItem 等が選択処理で PointerPressed を Handled にしても先に
                         (when paths (funcall on-drop (first paths)))))))
 
 (defun %dnd-enable-clip (pane on-drop on-highlight)
-  "素材ペインへ DnD を配線。落ちた全パスを on-drop に渡し、e.Handled=t で
-ウィンドウ側の「本を開く」DnD と区別する。"
+  "Wire up DnD to the material pane. Pass all dropped paths to on-drop, and use e.Handled=t to
+distinguish it from the window's \"open book\" DnD."
   (dotnet:static "Avalonia.Input.DragDrop" "SetAllowDrop" pane t)
   (%dnd-add-handler pane "DragOverEvent"
                     (lambda (s e) (declare (ignore s))

@@ -1,14 +1,16 @@
-;;;; thumb-pane.lisp — paalam (#39 main.lisp 分割): ページサムネ本棚 (#6 A)
+;;;; thumb-pane.lisp — paalam (#39 main.lisp split): page-thumbnail shelf (#6 A)
 (in-package :paalam)
 
 ;;; ------------------------------------------------------------------
-;;; ページサムネ本棚 (#6 A): サイドペインに現在の本の全ページを縮小サムネで並べ、
-;;; クリックでそのページへジャンプ。サムネは DecodeToWidth で縮小デコード (全ページ分
-;;; フル Bitmap を抱えないため)。背景スレッドで非同期ロードして後から差し込む。
+;;; Page-thumbnail shelf (#6 A): lay out all pages of the current book as
+;;; downscaled thumbnails in a side pane, and click to jump to that page. Each
+;;; thumbnail is downscale-decoded via DecodeToWidth (so we don't hold a full
+;;; Bitmap for every page). Loaded asynchronously on a background thread and
+;;; spliced in afterward.
 ;;; ------------------------------------------------------------------
-(defparameter *thumb-width* 150 "ページサムネの幅 (px)。")
+(defparameter *thumb-width* 150 "Width of a page thumbnail (px).")
 (defparameter *page-thumb-cache* (make-hash-table :test 'equal)
-  "(source . page) -> 縮小サムネ Bitmap。本を変えたらクリア。")
+  "(source . page) -> downscaled thumbnail Bitmap. Cleared when the book changes.")
 (defun %pthumb-get (src page) (gethash (cons src page) *page-thumb-cache*))
 (defun %pthumb-put (src page bmp) (setf (gethash (cons src page) *page-thumb-cache*) bmp))
 (defun %pthumb-clear ()
@@ -17,8 +19,8 @@
   (clrhash *page-thumb-cache*))
 
 (defun %make-page-thumb (book index width)
-  "BOOK の INDEX ページを WIDTH px に縮小デコードした Bitmap。バイト列から DecodeToWidth。
-MemoryStream(byte[]) ctor は overload バグ (#294) を踏むので無引数 + Write で渡す。"
+  "Bitmap of BOOK's INDEX page downscale-decoded to WIDTH px. DecodeToWidth from a byte array.
+The MemoryStream(byte[]) ctor hits an overload bug (#294), so pass via no-arg ctor + Write."
   (multiple-value-bind (bytes ext) (book-page-bytes book index)
     (declare (ignore ext))
     (let ((ms (dotnet:new "System.IO.MemoryStream")))
@@ -30,14 +32,15 @@ MemoryStream(byte[]) ctor は overload バグ (#294) を踏むので無引数 + 
         (dotnet:invoke ms "Dispose")))))
 
 (defun %jump-to-page (vw page)
-  "PAGE を含む見開きへ移動 (本棚クリック)。フォーカスはビューポートへ戻す。"
+  "Move to the spread containing PAGE (shelf click). Return focus to the viewport."
   (setf (viewer-sindex vw) (spread-index-of (viewer-spreads vw) page))
   (show-spread vw)
   (%focus-viewport vw))
 
 (defun %rebuild-thumb-pane (vw)
-  "thumb-stack を現在の本の全ページサムネで作り直す。キャッシュ済みは即表示、
-未キャッシュは背景スレッドで縮小デコードして差し込む (本は別ハンドルで開き直す)。"
+  "Rebuild thumb-stack with thumbnails for every page of the current book. Cached
+ones display immediately; uncached ones are downscale-decoded on a background thread
+and spliced in (the book is reopened with a separate handle)."
   (let* ((stack (viewer-thumb-stack vw))
          (children (dotnet:invoke stack "get_Children"))
          (src (viewer-source vw))
@@ -53,7 +56,7 @@ MemoryStream(byte[]) ctor は overload バグ (#294) を踏むので無引数 + 
         (dotnet:invoke img "set_Margin" (dotnet:new "Avalonia.Thickness" 4d0 3d0 4d0 3d0))
         (dotnet:add-event img "PointerPressed"
           (lambda (s e) (declare (ignore s))
-            (dotnet:invoke e "set_Handled" t)   ; ウィンドウのパンを起こさない
+            (dotnet:invoke e "set_Handled" t)   ; don't trigger window panning
             (%jump-to-page vw page)))
         (if cached
             (dotnet:invoke img "set_Source" cached)
@@ -83,13 +86,13 @@ MemoryStream(byte[]) ctor は overload バグ (#294) を踏むので無引数 + 
     (unless vis (%rebuild-thumb-pane vw))))
 
 (defun %thumb-pane-refresh (vw)
-  "本を変えたとき: サムネ表示を作り直し、旧サムネ Bitmap は描画後に破棄 (use-after-dispose 回避)。"
+  "When the book changes: rebuild the thumbnail display and dispose the old thumbnail Bitmaps after rendering (avoid use-after-dispose)."
   (let ((old '()))
     (maphash (lambda (k v) (declare (ignore k)) (push v old)) *page-thumb-cache*)
-    (clrhash *page-thumb-cache*)   ; 新しい本は別キーなので参照だけ落とす
+    (clrhash *page-thumb-cache*)   ; the new book uses different keys, so just drop the references
     (when (and (viewer-thumb-pane vw)
                (dotnet:invoke (viewer-thumb-pane vw) "get_IsVisible"))
-      (%rebuild-thumb-pane vw))    ; 旧 Image を tstack から外す (Clear)
+      (%rebuild-thumb-pane vw))    ; remove old Images from tstack (Clear)
     (when old
       (%defer (lambda () (dolist (b old) (ignore-errors (dotnet:invoke b "Dispose"))))))))
 

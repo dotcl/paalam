@@ -1,20 +1,20 @@
-;;;; browse-pane.lisp — paalam (#39 main.lisp 分割): フォルダツリー本棚 (#6 B)
+;;;; browse-pane.lisp — paalam (#39 main.lisp split): folder-tree shelf (#6 B)
 (in-package :paalam)
 
 ;;; ------------------------------------------------------------------
-;;; フォルダツリー本棚 (#6 B): サイドにファイルシステムのツリー。ドライブをルートに
-;;; 遅延展開 (選択でその直下を読む)。クリック=展開ナビ、ダブルクリック=本として開く
-;;; (クリックだけで巨大フォルダを recursive 展開しないように分ける)。
+;;; Folder-tree shelf (#6 B): a filesystem tree on the side. Drives as roots.
+;;; Lazy expand (select reads the immediate children). Click=expand/navigate, double-click=open as book
+;;; (split so that a single click does not recursively expand a huge folder).
 ;;; ------------------------------------------------------------------
 (defparameter *book-file-extensions*
   '("zip" "cbz" "rar" "cbr" "7z" "cb7" "tar" "cbt" "pdf")
-  "ツリーで本として扱うファイル拡張子 (フォルダ + これら)。")
+  "File extensions treated as books in the tree (folders + these).")
 (defun %book-file-p (name)
   (let ((ext (pathname-type name)))
     (and ext (member (string-downcase ext) *book-file-extensions* :test #'string=) t)))
 
 (defun %dir-children (dir)
-  "DIR 直下の (label . fullpath): サブフォルダ(自然順) → 本ファイル(自然順)。アクセス不可は無視。"
+  "Immediate children of DIR as (label . fullpath): subfolders (natural order) -> book files (natural order). Inaccessible entries are ignored."
   (let ((folders '()) (files '()))
     (ignore-errors
       (dolist (d (%enum->list (dotnet:static "System.IO.Directory" "GetDirectories" dir)))
@@ -28,18 +28,18 @@
 (defun %browse-tvi (label path)
   (let ((it (dotnet:new "Avalonia.Controls.TreeViewItem")))
     (dotnet:invoke it "set_Header" label)
-    (dotnet:invoke it "set_Tag" path)   ; Tag=フルパス (文字列なので marshal は素直)
+    (dotnet:invoke it "set_Tag" path)   ; Tag=full path (a string, so marshalling is straightforward)
     it))
 
 (defun %browse-populate (item dir)
-  "ITEM (フォルダノード) の子を未展開なら DIR 直下で埋める。"
+  "If ITEM (a folder node) is not yet expanded, fill its children with the immediate entries of DIR."
   (let ((items (dotnet:invoke item "get_Items")))
     (when (zerop (dotnet:invoke items "get_Count"))
       (dolist (e (%dir-children dir))
         (dotnet:invoke items "Add" (%browse-tvi (car e) (cdr e)))))))
 
 (defun %rebuild-browse-pane (vw)
-  "ルート (論理ドライブ) を並べる。配下は選択時に遅延展開。"
+  "List the roots (logical drives). Children are lazily expanded on selection."
   (let ((items (dotnet:invoke (viewer-browse-tree vw) "get_Items")))
     (dotnet:invoke items "Clear")
     (ignore-errors
@@ -47,7 +47,7 @@
         (dotnet:invoke items "Add" (%browse-tvi d d))))))
 
 (defun %path-ancestors (path)
-  "PATH の祖先フルパス列を ルート(ドライブ)→PATH の順で。"
+  "The sequence of ancestor full paths of PATH, ordered root (drive) -> PATH."
   (let ((acc (list path)) (cur path))
     (loop
       (let ((parent (ignore-errors (dotnet:static "System.IO.Path" "GetDirectoryName" cur))))
@@ -57,7 +57,7 @@
     acc))
 
 (defun %browse-find-child (items path)
-  "ITEMS (TreeViewItem の Items) から Tag=PATH のノードを探す (大小無視)。"
+  "Find the node with Tag=PATH within ITEMS (a TreeViewItem's Items) (case-insensitive)."
   (let ((n (dotnet:invoke items "get_Count")))
     (dotimes (i n)
       (let ((it (dotnet:invoke items "get_Item" i)))
@@ -65,8 +65,8 @@
           (return-from %browse-find-child it))))))
 
 (defun %browse-reveal (vw target)
-  "ドライブから TARGET まで辿って各ノードを展開し、最深まで届いたノードを選択+可視化。
-TARGET がツリーに出ない種別 (素の画像等) なら、辿れた最後のフォルダを選ぶ。"
+  "Walk from the drive down to TARGET, expanding each node, then select and reveal the deepest node reached.
+If TARGET is a kind that does not appear in the tree (e.g. a bare image), select the last folder reached."
   (when (and target (plusp (length target)))
     (let ((items (dotnet:invoke (viewer-browse-tree vw) "get_Items")) (node nil))
       (dolist (a (%path-ancestors target))
@@ -88,6 +88,6 @@ TARGET がツリーに出ない種別 (素の画像等) なら、辿れた最後
     (unless vis
       (when (zerop (dotnet:invoke (dotnet:invoke (viewer-browse-tree vw) "get_Items") "get_Count"))
         (%rebuild-browse-pane vw))
-      ;; 開いている本のディレクトリまで展開・選択する。
+      ;; Expand and select down to the directory of the currently open book.
       (ignore-errors (%browse-reveal vw (viewer-source vw))))))
 
