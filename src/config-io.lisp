@@ -1,11 +1,11 @@
-;;;; config-io.lisp — paalam (#39 main.lisp 分割): 設定 import/export (#24) + 設定ウィンドウ
+;;;; config-io.lisp — paalam (#39 main.lisp split): settings import/export (#24) + settings window
 (in-package :paalam)
 
-;;; 設定の import / export (#24): 設定一式を 1 ファイル (s式 plist) に書き出し/読み込み。
-;;; 対象: settings / keybinds(keymap) / gestures / menu / bookmarks。未知キーは無視、
-;;; 欠けセクションは現状維持。clip/history はパス依存で揮発的なので含めない。
+;;; Settings import / export (#24): write/read the whole settings set as 1 file (s-expr plist).
+;;; Targets: settings / keybinds(keymap) / gestures / menu / bookmarks. Unknown keys are ignored,
+;;; missing sections keep current. clip/history are path-dependent and volatile, so not included.
 (defun %config-bundle ()
-  "現在の設定一式を 1 つの plist にまとめる (export 用)。先頭 :paalam-config がバージョン。"
+  "Gather the whole current settings set into one plist (for export). Leading :paalam-config is the version."
   (list :paalam-config 1
         :settings (loop for e in *settings*
                         append (list (car e) (symbol-value (cdr e))))
@@ -15,7 +15,7 @@
         :bookmarks *bookmarks*))
 
 (defun %apply-config-bundle (vw bundle)
-  "import した BUNDLE を反映・永続化する。未知キー無視・欠けセクションは現状維持。"
+  "Apply and persist the imported BUNDLE. Unknown keys are ignored, missing sections keep current."
   (when (and (consp bundle) (getf bundle :paalam-config))
     (let ((s (getf bundle :settings)))
       (when (consp s)
@@ -31,7 +31,7 @@
       (when m (setf *command-menu* m) (save-menu) (%rebuild-menus vw)))
     (let ((b (getf bundle :bookmarks)))
       (when b (setf *bookmarks* b) (save-bookmarks)))
-    ;; ビューワへ反映: テーマ/背景/補間 + 本を開き直してキャッシュ等を作り直す。
+    ;; Apply to viewer: theme/background/interpolation + reopen the book to rebuild caches etc.
     (%apply-theme)
     (%reopen vw)
     (%apply-background vw)
@@ -43,10 +43,10 @@
                  (dotnet:make-delegate "System.Action`1[System.String]"
                    (lambda (path)
                      (%atomic-write path (%config-bundle))
-                     (%ui-post (lambda () (%status vw (format nil "設定をエクスポート → ~a" path))))))))
+                     (%ui-post (lambda () (%status vw (format nil "Exported settings → ~a" path))))))))
 
 (defun %import-config (vw &optional after)
-  "設定ファイルを選んで反映する。AFTER があれば反映後に呼ぶ (設定窓を閉じる等)。"
+  "Pick a settings file and apply it. If AFTER is given, call it after applying (e.g. close the settings window)."
   (dotnet:static "Paalam.DialogHelper" "PickOpenConfig" (viewer-window vw)
                  (dotnet:make-delegate "System.Action`1[System.String]"
                    (lambda (path)
@@ -55,17 +55,17 @@
                         (lambda ()
                           (cond ((and (consp bundle) (getf bundle :paalam-config))
                                  (%apply-config-bundle vw bundle)
-                                 (%status vw "設定をインポートしました")
+                                 (%status vw "Imported settings")
                                  (when after (funcall after)))
-                                (t (%status vw "paalam の設定ファイルではありません"))))))))))
+                                (t (%status vw "Not a paalam settings file"))))))))))
 
 (defun %open-settings (vw)
-  ;; 左に折りたたみツリー (カテゴリ)、右に該当ページ。選択で右を差し替える master/detail。
-  ;; OK/キャンセルは全ページ共通 (コントロールは非表示でも値を保持するので OK で読める)。
+  ;; Left: collapsible tree (categories), right: the matching page. Selection swaps the right side (master/detail).
+  ;; OK/Cancel are shared across all pages (controls keep their values even when hidden, so OK can read them).
   (let* ((owner (viewer-window vw))
          (swin  (dotnet:new "Avalonia.Controls.Window"))
-         (dir-img-combo (%s-choice-combo *dir-choices* *image-direction*))   ; 画像/書庫の綴じ方向 (#33)
-         (dir-pdf-combo (%s-choice-combo *dir-choices* *pdf-direction*))     ; PDF の綴じ方向 (#33)
+         (dir-img-combo (%s-choice-combo *dir-choices* *image-direction*))   ; binding direction for image/archive (#33)
+         (dir-pdf-combo (%s-choice-combo *dir-choices* *pdf-direction*))     ; binding direction for PDF (#33)
          (cb-spread (%s-checkbox *spread*))
          (cb-fps    (%s-checkbox *first-page-single*))
          (cb-rec    (%s-checkbox *recursive*))
@@ -78,27 +78,28 @@
          (bg-combo     (%s-choice-combo *bg-choices* *background-color* #'string=))
          (interp-combo (%s-choice-combo *interp-choices* *interpolation*))
          (theme-combo  (%s-choice-combo *theme-choices* *theme*))
-         (exp-w-combo  (%s-choice-combo *export-width-choices* *export-width*))   ; 掃き出し最大幅 (#35 ②)
+         (exp-w-combo  (%s-choice-combo *export-width-choices* *export-width*))   ; max export width (#35 ②)
          (tb-dpi    (%s-textbox *pdf-dpi*))
-         ;; キー割当の作業用コピー。(car kbox) が作業リスト。クロージャからは
-         ;; (setf (car kbox) ..) で place を書き換える (let* 変数の再束縛は dotcl が不正 IL)。
+         ;; Working copy of key bindings. (car kbox) is the working list. From closures,
+         ;; overwrite the place with (setf (car kbox) ..) (rebinding a let* var produces invalid IL in dotcl).
          (kbox (list (let ((acc '()))
                        (dolist (c *commands*)
                          (dolist (k (%effective-keys c)) (push (cons k (command-id c)) acc)))
                        (nreverse acc))))
          (kb-stack (dotnet:new "Avalonia.Controls.StackPanel"))
          (content  (dotnet:new "Avalonia.Controls.ContentControl"))
-         (win-p (dotnet:static "System.OperatingSystem" "IsWindows"))  ; 関連付けは Windows のみ (#11)
+         (win-p (dotnet:static "System.OperatingSystem" "IsWindows"))  ; file association is Windows only (#11)
          (assoc-status (dotnet:new "Avalonia.Controls.TextBlock"))
-         (cur (list "レイアウト"))   ; 現在のページ名 (検索クリア時の復帰先; #27)
-         ;; 検索インデックス (項目ラベル . ページ名)。ページ構築 (spage) が各行を登録するので
-         ;; 二重管理にならない。種類が特殊で %s-row を使わないページ (キー割当/関連付け) の
-         ;; 別名だけ種として置く (ページ名そのものは do-search が pages から直接引く)。
-         (sidx (list (list (cons "ショートカット" "キー割当") (cons "キーバインド" "キー割当")
-                           (cons "拡張子" "関連付け") (cons "ファイル関連付け" "関連付け")))))
+         (cur (list "Layout"))   ; current page name (fallback when clearing search; #27)
+         ;; Search index (item label . page name). Page builder (spage) registers each row, so
+         ;; there is no double bookkeeping. For pages that don't use %s-row because of their special
+         ;; kind (keybinds/file association), only aliases are seeded here (page names themselves are
+         ;; looked up by do-search directly from pages).
+         (sidx (list (list (cons "Shortcut" "Keybinds") (cons "Key binding" "Keybinds")
+                           (cons "Extension" "File Association") (cons "File association" "File Association")))))
     (labels
         ((add-binding (k)
-           ;; 数字 1-9 は count プレフィックス予約で割当てても発火しないので弾く (#23)。0 は可。
+           ;; Digits 1-9 are reserved for the count prefix, so binding them won't fire — reject them (#23). 0 is OK.
            (let ((d (%digit-key k)))
              (unless (or (and d (> d 0)) (assoc k (car kbox) :test #'string=))
                (setf (car kbox) (cons (cons k (command-id (car *commands*))) (car kbox)))))
@@ -141,7 +142,7 @@
              (dolist (pair (sort (copy-list (car kbox)) #'string< :key #'car))
                (dotnet:invoke ch "Add" (kb-row pair)))))
          (page (rows)
-           "rows を縦に並べた設定ページ (StackPanel)。"
+           "A settings page (StackPanel) stacking rows vertically."
            (let ((p (dotnet:new "Avalonia.Controls.StackPanel")))
              (dotnet:invoke p "set_Margin" (dotnet:new "Avalonia.Thickness" 16d0))
              (let ((ch (dotnet:invoke p "get_Children")))
@@ -154,9 +155,10 @@
                                      (or (position (sd key) choices :key #'cdr :test test) 0))))
          (reset-text (tb key) (lambda () (dotnet:invoke tb "set_Text" (format nil "~a" (sd key)))))
          (spage (name rows)
-           "NAME 見出し + (ラベル コントロール 既定化thunk) の行を並べた設定ページ。各ラベルを
-検索インデックス sidx に登録 (ページ定義が検索の出どころ; #27)、末尾に「このページを既定に
-戻す」(各 thunk を呼びコントロールを出荷時値へ; グローバルは OK まで触らない; #27)。"
+           "A settings page with a NAME header + rows of (label control default-thunk). Each label is
+registered in the search index sidx (page definitions are the source for search; #27), with a trailing
+\"Reset this page to default\" button (calls each thunk to set controls to factory values; globals are
+left untouched until OK; #27)."
            (let ((resets (mapcar #'third rows)))
              (page (append
                     (cons (%s-header name)
@@ -164,10 +166,10 @@
                                     (push (cons (first r) name) (car sidx))
                                     (%s-row (first r) (second r)))
                                   rows))
-                    (list (%s-button "このページを既定に戻す"
+                    (list (%s-button "Reset this page to default"
                                      (lambda () (dolist (f resets) (funcall f)))))))))
          (tvi (header &optional children)
-           "TreeViewItem を作る (children があれば展開済みの親ノード)。"
+           "Make a TreeViewItem (an expanded parent node if children are given)."
            (let ((it (dotnet:new "Avalonia.Controls.TreeViewItem")))
              (dotnet:invoke it "set_Header" header)
              (when children
@@ -176,7 +178,7 @@
                  (dolist (c children) (dotnet:invoke items "Add" c))))
              it))
          (assoc-page ()
-           "関連付けページ (#11): 拡張子ごとチェックボックス + 登録/登録解除 (Windows)。"
+           "File association page (#11): a checkbox per extension + register/unregister (Windows)."
            (let ((wrap  (dotnet:new "Avalonia.Controls.WrapPanel"))
                  (boxes (mapcar (lambda (ext)
                                   (let ((cb (dotnet:new "Avalonia.Controls.CheckBox")))
@@ -193,49 +195,49 @@
                           (dolist (b boxes) (when (dotnet:invoke (cdr b) "get_IsChecked") (push (car b) acc)))
                           (nreverse acc)))
                       (set-all (v) (dolist (b boxes) (%set-check (cdr b) v)))
-                      (sync ()  ; レジストリの実状態をチェックに反映
+                      (sync ()  ; reflect the actual registry state into the checkboxes
                         (dolist (b boxes)
                           (%set-check (cdr b) (%assoc-registered-p (car b))))))
                (let ((row (dotnet:new "Avalonia.Controls.StackPanel")))
                  (dotnet:invoke row "set_Orientation" (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
                  (let ((rc (dotnet:invoke row "get_Children")))
-                   (dotnet:invoke rc "Add" (%s-button "全選択" (lambda () (set-all t))))
-                   (dotnet:invoke rc "Add" (%s-button "全解除" (lambda () (set-all nil))))
+                   (dotnet:invoke rc "Add" (%s-button "Select all" (lambda () (set-all t))))
+                   (dotnet:invoke rc "Add" (%s-button "Clear all" (lambda () (set-all nil))))
                    (dotnet:invoke rc "Add"
-                     (%s-button "登録"
+                     (%s-button "Register"
                        (lambda ()
                          (let ((es (checked-exts)))
                            (handler-case
                                (progn (%assoc-register es) (sync)
                                       (dotnet:invoke assoc-status "set_Text"
-                                        (format nil "~d 件を「プログラムから開く」候補に登録しました。" (length es))))
-                             (error (e) (dotnet:invoke assoc-status "set_Text" (format nil "失敗: ~a" e))))))))
+                                        (format nil "Registered ~d type(s) as \"Open with\" candidates." (length es))))
+                             (error (e) (dotnet:invoke assoc-status "set_Text" (format nil "Failed: ~a" e))))))))
                    (dotnet:invoke rc "Add"
-                     (%s-button "登録解除"
+                     (%s-button "Unregister"
                        (lambda ()
                          (handler-case
                              (progn (%assoc-unregister (checked-exts)) (sync)
-                                    (dotnet:invoke assoc-status "set_Text" "選択分の関連付けを解除。"))
-                           (error (e) (dotnet:invoke assoc-status "set_Text" (format nil "失敗: ~a" e))))))))
+                                    (dotnet:invoke assoc-status "set_Text" "Unregistered the selected associations."))
+                           (error (e) (dotnet:invoke assoc-status "set_Text" (format nil "Failed: ~a" e))))))))
                  (let ((desc (dotnet:new "Avalonia.Controls.TextBlock")))
                    (dotnet:invoke desc "set_Text"
-                     "関連付ける拡張子を選び「登録」(per-user・管理者権限不要)。候補に載るだけで既定は変わらないので、既定にしたい型は『既定のアプリ』で paalam を選ぶ。")
+                     "Pick extensions to associate and \"Register\" (per-user, no admin rights). This only adds them as candidates and doesn't change the default, so to make a type default, choose paalam in 'Default apps'.")
                    (dotnet:invoke desc "set_TextWrapping" (dotnet:static "Avalonia.Media.TextWrapping" "Wrap"))
                    (dotnet:invoke desc "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 0d0 0d0 8d0))
-                   ;; 既定化は任意。登録時に自動で開かず、押したい人だけ Windows の設定へ。
-                   (let ((defbtn (%s-button "既定のアプリ設定を開く…" (lambda () (%open-default-apps)))))
+                   ;; Setting as default is optional. Registering doesn't auto-open it; only those who want to press it go to Windows settings.
+                   (let ((defbtn (%s-button "Open Default Apps settings…" (lambda () (%open-default-apps)))))
                      (dotnet:invoke defbtn "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 8d0 0d0 0d0))
                      (dotnet:invoke defbtn "set_HorizontalAlignment"
                                     (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Left"))
-                     (page (list (%s-header "関連付け (Windows / 管理者権限不要)")
+                     (page (list (%s-header "File Association (Windows / no admin rights)")
                                  desc wrap row defbtn assoc-status)))))))))
       (refresh)
       (let* ((scr (dotnet:new "Avalonia.Controls.ScrollViewer"))
-             (addbtn (%s-button "＋ キーを追加"
+             (addbtn (%s-button "+ Add key"
                                 (lambda () (%capture-key swin (lambda (k) (add-binding k))))))
-             ;; 既定に戻す (#23): 作業リストを command-keys (出荷時既定) で作り直す。
-             ;; OK で保存すると現行既定のスナップショットになる (= 新既定の取り込み手段)。
-             (reset-btn (%s-button "既定に戻す"
+             ;; Reset to default (#23): rebuild the working list from command-keys (factory defaults).
+             ;; Saving with OK becomes a snapshot of the current defaults (= a way to pull in new defaults).
+             (reset-btn (%s-button "Reset to default"
                           (lambda ()
                             (setf (car kbox)
                                   (let ((acc '()))
@@ -245,32 +247,32 @@
                                     (nreverse acc)))
                             (refresh))))
              (panel-layout
-               (spage "レイアウト"
-                      (list (list "綴じ方向 (画像/書庫)" dir-img-combo (reset-combo dir-img-combo *dir-choices* :image-direction))
-                            (list "綴じ方向 (PDF)" dir-pdf-combo (reset-combo dir-pdf-combo *dir-choices* :pdf-direction))
-                            (list "見開き" cb-spread (reset-check cb-spread :spread))
-                            (list "表紙を単独表示" cb-fps (reset-check cb-fps :first-page-single))
-                            (list "サブフォルダも再帰収集" cb-rec (reset-check cb-rec :recursive))
-                            (list "フィット" fit-combo (reset-combo fit-combo *fit-choices* :fit-mode)))))
+               (spage "Layout"
+                      (list (list "Binding direction (image/archive)" dir-img-combo (reset-combo dir-img-combo *dir-choices* :image-direction))
+                            (list "Binding direction (PDF)" dir-pdf-combo (reset-combo dir-pdf-combo *dir-choices* :pdf-direction))
+                            (list "Spread" cb-spread (reset-check cb-spread :spread))
+                            (list "Show cover alone" cb-fps (reset-check cb-fps :first-page-single))
+                            (list "Recursively collect subfolders" cb-rec (reset-check cb-rec :recursive))
+                            (list "Fit" fit-combo (reset-combo fit-combo *fit-choices* :fit-mode)))))
              (panel-quality
-               (spage "画質"
-                      (list (list "テーマ" theme-combo (reset-combo theme-combo *theme-choices* :theme))
-                            (list "背景色" bg-combo (reset-combo bg-combo *bg-choices* :background-color #'string=))
-                            (list "拡大補間" interp-combo (reset-combo interp-combo *interp-choices* :interpolation))
-                            (list "PDF 解像度 (DPI)" tb-dpi (reset-text tb-dpi :pdf-dpi))
-                            (list "掃き出し最大幅" exp-w-combo (reset-combo exp-w-combo *export-width-choices* :export-width)))))
+               (spage "Image Quality"
+                      (list (list "Theme" theme-combo (reset-combo theme-combo *theme-choices* :theme))
+                            (list "Background color" bg-combo (reset-combo bg-combo *bg-choices* :background-color #'string=))
+                            (list "Zoom interpolation" interp-combo (reset-combo interp-combo *interp-choices* :interpolation))
+                            (list "PDF resolution (DPI)" tb-dpi (reset-text tb-dpi :pdf-dpi))
+                            (list "Max export width" exp-w-combo (reset-combo exp-w-combo *export-width-choices* :export-width)))))
              (panel-perf
-               (spage "先読み"
-                      (list (list "キャッシュ上限 (MB)" tb-mem (reset-text tb-mem :cache-memory-mb))
-                            (list "キャッシュ最大ページ数" tb-cache (reset-text tb-cache :cache-size))
-                            (list "先読み見開き数" tb-pf (reset-text tb-pf :prefetch-ahead))
-                            (list "ローダースレッド数" tb-th (reset-text tb-th :loader-threads))
-                            (list "スライドショー間隔 (秒)" tb-slide (reset-text tb-slide :slideshow-interval)))))
+               (spage "Prefetch"
+                      (list (list "Cache limit (MB)" tb-mem (reset-text tb-mem :cache-memory-mb))
+                            (list "Max cached pages" tb-cache (reset-text tb-cache :cache-size))
+                            (list "Prefetch spread count" tb-pf (reset-text tb-pf :prefetch-ahead))
+                            (list "Loader threads" tb-th (reset-text tb-th :loader-threads))
+                            (list "Slideshow interval (sec)" tb-slide (reset-text tb-slide :slideshow-interval)))))
              (panel-keys
                (progn
                  (dotnet:invoke scr "set_MaxHeight" 360d0)
                  (dotnet:invoke scr "set_Content" kb-stack)
-                 (page (list (%s-header "キー割当 (キー → 機能。1キー1機能・複数可。数字1-9はcount予約)")
+                 (page (list (%s-header "Keybinds (key → command. one command per key, multiple allowed. digits 1-9 reserved for count)")
                              scr addbtn reset-btn))))
              (panel-assoc (assoc-page))
              (panel-io
@@ -279,43 +281,43 @@
                  (dotnet:invoke row "set_Orientation"
                                 (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
                  (let ((rc (dotnet:invoke row "get_Children")))
-                   (dotnet:invoke rc "Add" (%s-button "エクスポート…" (lambda () (%export-config vw))))
+                   (dotnet:invoke rc "Add" (%s-button "Export…" (lambda () (%export-config vw))))
                    (dotnet:invoke rc "Add"
-                     (%s-button "インポート…"
+                     (%s-button "Import…"
                                 (lambda () (%import-config vw (lambda () (dotnet:invoke swin "Close")))))))
                  (dotnet:invoke desc "set_Text"
-                   "設定すべて (レイアウト・画質・先読みの各設定 / キー割当 / メニュー構成 / マウスジェスチャ / しおり) を 1 ファイルに書き出し / 読み込み。環境間の持ち運び・共有・退避用。インポートは即時反映し、この設定窓を閉じます (未知項目は無視・欠けは現状維持)。")
+                   "Write / read all settings (layout, image quality, prefetch settings / keybinds / menu layout / mouse gestures / bookmarks) to/from a single file. For carrying between environments, sharing, and backup. Import applies immediately and closes this settings window (unknown items ignored, missing items keep current).")
                  (dotnet:invoke desc "set_TextWrapping" (dotnet:static "Avalonia.Media.TextWrapping" "Wrap"))
                  (dotnet:invoke desc "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 0d0 0d0 10d0))
-                 (page (list (%s-header "設定の入出力") desc row))))
-             (pages (append (list (cons "レイアウト" panel-layout)
-                                  (cons "画質"      panel-quality)
-                                  (cons "先読み"    panel-perf)
-                                  (cons "キー割当"  panel-keys)
-                                  (cons "入出力"    panel-io))
-                            (when win-p (list (cons "関連付け" panel-assoc)))))
+                 (page (list (%s-header "Settings I/O") desc row))))
+             (pages (append (list (cons "Layout"        panel-layout)
+                                  (cons "Image Quality" panel-quality)
+                                  (cons "Prefetch"      panel-perf)
+                                  (cons "Keybinds"      panel-keys)
+                                  (cons "Settings I/O"  panel-io))
+                            (when win-p (list (cons "File Association" panel-assoc)))))
              (tree (dotnet:new "Avalonia.Controls.TreeView"))
-             (leaf-layout  (tvi "レイアウト"))
-             (leaf-quality (tvi "画質"))
-             (leaf-perf    (tvi "先読み"))
-             (leaf-keys    (tvi "キー割当"))
-             (leaf-io      (tvi "入出力"))
-             (leaf-assoc   (tvi "関連付け"))
-             (g-view (tvi "表示" (list leaf-layout leaf-quality)))
-             (g-perf (tvi "性能" (list leaf-perf)))
-             (g-op   (tvi "操作" (list leaf-keys)))
-             (g-system (tvi "システム" (if win-p (list leaf-io leaf-assoc) (list leaf-io))))
-             (leaves (append (list (cons "レイアウト" leaf-layout) (cons "画質" leaf-quality)
-                                   (cons "先読み" leaf-perf) (cons "キー割当" leaf-keys)
-                                   (cons "入出力" leaf-io))
-                             (when win-p (list (cons "関連付け" leaf-assoc)))))
-             (sbox (dotnet:new "Avalonia.Controls.TextBox"))   ; 設定検索ボックス (#27)
-             ;; name のページへ移動 (ツリー選択経由 → SelectionChanged が content を差し替え)。
+             (leaf-layout  (tvi "Layout"))
+             (leaf-quality (tvi "Image Quality"))
+             (leaf-perf    (tvi "Prefetch"))
+             (leaf-keys    (tvi "Keybinds"))
+             (leaf-io      (tvi "Settings I/O"))
+             (leaf-assoc   (tvi "File Association"))
+             (g-view (tvi "Display" (list leaf-layout leaf-quality)))
+             (g-perf (tvi "Performance" (list leaf-perf)))
+             (g-op   (tvi "Controls" (list leaf-keys)))
+             (g-system (tvi "System" (if win-p (list leaf-io leaf-assoc) (list leaf-io))))
+             (leaves (append (list (cons "Layout" leaf-layout) (cons "Image Quality" leaf-quality)
+                                   (cons "Prefetch" leaf-perf) (cons "Keybinds" leaf-keys)
+                                   (cons "Settings I/O" leaf-io))
+                             (when win-p (list (cons "File Association" leaf-assoc)))))
+             (sbox (dotnet:new "Avalonia.Controls.TextBox"))   ; settings search box (#27)
+             ;; Navigate to the page for name (via tree selection → SelectionChanged swaps content).
              (nav (lambda (name)
-                    (dotnet:invoke sbox "set_Text" "")        ; 検索をクリアして
+                    (dotnet:invoke sbox "set_Text" "")        ; clear the search, then
                     (let ((lf (cdr (assoc name leaves :test #'equal))))
                       (when lf (dotnet:invoke lf "set_IsSelected" t)))))
-             ;; 検索: 空ならカレントページ、非空ならヒット (ページ›項目) のボタン一覧を右に出す。
+             ;; Search: if empty show the current page; if non-empty show a list of hit (page › item) buttons on the right.
              (do-search
                (lambda (q)
                  (let ((qq (string-downcase (string-trim '(#\Space #\Tab) (or q "")))))
@@ -325,11 +327,11 @@
                        (let ((res (dotnet:new "Avalonia.Controls.StackPanel"))
                              (hits (remove-duplicates
                                     (append
-                                     ;; ページ名そのもの (レイアウト/画質/…) もヒット対象。
+                                     ;; Page names themselves (Layout/Image Quality/…) are also hit targets.
                                      (loop for (nm . pg) in pages
                                            when (search qq (string-downcase nm))
                                            collect (cons nm nm))
-                                     ;; 各ページが登録した項目ラベル + 特殊ページの別名。
+                                     ;; Item labels registered by each page + aliases of special pages.
                                      (loop for (label . page) in (car sidx)
                                            when (search qq (string-downcase label))
                                            collect (cons label page)))
@@ -338,25 +340,25 @@
                          (if hits
                              (dolist (h hits)
                                (let* ((label (car h)) (page (cdr h))
-                                      (btn (%s-button (format nil "~a 〉 ~a" page label)
+                                      (btn (%s-button (format nil "~a > ~a" page label)
                                                       (let ((pg page)) (lambda () (funcall nav pg))))))
                                  (dotnet:invoke btn "set_HorizontalAlignment"
                                                 (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Left"))
                                  (dotnet:invoke btn "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 2d0))
                                  (dotnet:invoke (dotnet:invoke res "get_Children") "Add" btn)))
                              (let ((tb (dotnet:new "Avalonia.Controls.TextBlock")))
-                               (dotnet:invoke tb "set_Text" "該当なし")
+                               (dotnet:invoke tb "set_Text" "No matches")
                                (dotnet:invoke (dotnet:invoke res "get_Children") "Add" tb)))
                          (dotnet:invoke content "set_Content" res))))))
              (root (dotnet:new "Avalonia.Controls.DockPanel"))
              (grid (dotnet:new "Avalonia.Controls.Grid"))
              (btns (dotnet:new "Avalonia.Controls.StackPanel")))
-        ;; 左ツリー (折りたたみ可能なカテゴリ)。選択された葉の header からページを引いて右へ。
+        ;; Left tree (collapsible categories). Look up the page from the selected leaf's header and show it on the right.
         (let ((items (dotnet:invoke tree "get_Items")))
           (dotnet:invoke items "Add" g-view)
           (dotnet:invoke items "Add" g-perf)
           (dotnet:invoke items "Add" g-op)
-          (dotnet:invoke items "Add" g-system))   ; システム: 入出力 (+ 関連付けは Windows のみ)
+          (dotnet:invoke items "Add" g-system))   ; System: Settings I/O (+ File Association is Windows only)
         (dotnet:add-event tree "SelectionChanged"
           (lambda (s e) (declare (ignore s e))
             (let ((item (dotnet:invoke tree "get_SelectedItem")))
@@ -364,15 +366,15 @@
                 (let* ((name (dotnet:invoke item "get_Header"))
                        (p (cdr (assoc name pages :test #'equal))))
                   (when p (setf (car cur) name) (dotnet:invoke content "set_Content" p)))))))
-        ;; 検索ボックス: 入力で横断ヒットをページ›項目で右に出す (#27)。
-        (dotnet:invoke sbox "set_Watermark" "設定を検索…")
+        ;; Search box: typing shows cross-cutting hits as page › item on the right (#27).
+        (dotnet:invoke sbox "set_Watermark" "Search settings…")
         (dotnet:invoke sbox "set_Margin" (dotnet:new "Avalonia.Thickness" 12d0 12d0 12d0 0d0))
         (dotnet:add-event sbox "TextChanged"
           (lambda (s e) (declare (ignore s e))
             (funcall do-search (dotnet:invoke sbox "get_Text"))))
-        (dotnet:invoke content "set_Content" panel-layout)   ; 初期ページ
+        (dotnet:invoke content "set_Content" panel-layout)   ; initial page
         (dotnet:invoke leaf-layout "set_IsSelected" t)
-        ;; 2 列 grid: [tree(180) | content(*)]
+        ;; 2-column grid: [tree(180) | content(*)]
         (let ((cols (dotnet:invoke grid "get_ColumnDefinitions"))
               (c0 (dotnet:new "Avalonia.Controls.ColumnDefinition")))
           (dotnet:invoke c0 "set_Width" (dotnet:new "Avalonia.Controls.GridLength" 180d0))
@@ -383,21 +385,21 @@
         (let ((gc (dotnet:invoke grid "get_Children")))
           (dotnet:invoke gc "Add" tree)
           (dotnet:invoke gc "Add" content))
-        ;; OK/キャンセル (下部共通)
+        ;; OK/Cancel (shared at the bottom)
         (dotnet:invoke btns "set_Orientation"
                        (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
         (dotnet:invoke btns "set_HorizontalAlignment"
                        (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Right"))
         (dotnet:invoke btns "set_Margin" (dotnet:new "Avalonia.Thickness" 12d0))
         (let ((bc (dotnet:invoke btns "get_Children")))
-          (dotnet:invoke bc "Add" (%s-button "キャンセル" (lambda () (dotnet:invoke swin "Close"))))
+          (dotnet:invoke bc "Add" (%s-button "Cancel" (lambda () (dotnet:invoke swin "Close"))))
           (dotnet:invoke bc "Add"
             (%s-button "OK"
               (lambda ()
                 (%settings-apply vw cb-spread cb-fps cb-rec tb-cache tb-pf tb-th
                                  fit-combo bg-combo interp-combo tb-dpi tb-mem tb-slide
                                  dir-img-combo dir-pdf-combo theme-combo exp-w-combo)
-                ;; キー指向の作業リストを機能ごとにまとめ直して確定 (削除は空リストで反映)。
+                ;; Regroup the key-oriented working list by command and commit (deletions reflected as empty lists).
                 (setf *keybinds*
                       (mapcar (lambda (c)
                                 (let ((ks '()))
@@ -408,7 +410,7 @@
                 (rebuild-keymap)
                 (save-keybinds)
                 (dotnet:invoke swin "Close")))))
-        ;; root: [sbox(上) | btns(下) | grid(残り)]
+        ;; root: [sbox(top) | btns(bottom) | grid(rest)]
         (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" sbox
                        (dotnet:static "Avalonia.Controls.Dock" "Top"))
         (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" btns
@@ -417,7 +419,7 @@
           (dotnet:invoke rc "Add" sbox)
           (dotnet:invoke rc "Add" btns)
           (dotnet:invoke rc "Add" grid))
-        (dotnet:invoke swin "set_Title" "設定")
+        (dotnet:invoke swin "set_Title" "Settings")
         (dotnet:invoke swin "set_Width" 640d0)
         (dotnet:invoke swin "set_Height" 520d0)
         (dotnet:invoke swin "set_WindowStartupLocation"

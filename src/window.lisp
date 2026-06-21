@@ -1,29 +1,30 @@
-;;;; window.lisp — paalam (#39 main.lisp 分割): ウィンドウ操作・設定ウィンドウ補助・関連付け
+;;;; window.lisp — paalam (#39 main.lisp split): window operations / settings-window helpers / file association
 (in-package :paalam)
 
 ;;; ------------------------------------------------------------------
-;;; ウィンドウ / アプリ (Avalonia)
+;;; window / app (Avalonia)
 ;;; ------------------------------------------------------------------
 
 (defvar *target-path* nil
-  "RUN-PAALAM が受け取った対象パス (App は Avalonia が生成するので global で渡す)。")
+  "Target path received by RUN-PAALAM (passed via global since the App is created by Avalonia).")
 
 (defvar *viewers* nil
-  "開いている全ウィンドウの viewer リスト。build-main-window で push、
-ウィンドウ Closed で remove する。macOS の Finder「開く」(IActivatableLifetime)
-で起動済みのとき、新しいファイルを別ウィンドウで開くか (空なら *target-path* に積む)
-の判定に使う。Windows/Linux は OS がファイル毎に別プロセスを起動するので、
-この activation 経路は通らず実質 macOS 専用。")
+  "List of viewers for all open windows. Pushed in build-main-window,
+removed on window Closed. Used to decide, when already launched via the macOS
+Finder \"open\" (IActivatableLifetime), whether to open a new file in a separate
+window (if empty, push onto *target-path*). On Windows/Linux the OS launches a
+separate process per file, so this activation path is not taken; effectively macOS-only.")
 
 (defun %resolve-path (path)
-  "対象パスを決める。指定が無ければ nil を返す (= 本を開かず空の窓を出す)。
-以前は Windows 固定パス (@WLOGO_96x96.png) をフォールバックにしていたが、
-他 OS では存在せず open-book が例外 → 初期化中断で窓が出なかったため廃止。"
+  "Determine the target path. Return nil if none is given (= show an empty window without opening a book).
+Previously a fixed Windows path (@WLOGO_96x96.png) was used as a fallback, but it
+does not exist on other OSes and open-book would throw -> initialization aborted and
+no window appeared, so it was removed."
   (or (and (stringp path) (plusp (length path)) path)
       (let ((env (dotnet:static "System.Environment" "GetEnvironmentVariable" "PAALAM_PATH")))
         (and env (plusp (length env)) env))))
 
-;;; 表示トグル (キー / メニュー 共用)
+;;; display toggles (shared by key / menu)
 (defun %toggle-spread (vw)
   (setf *spread* (not *spread*)) (%recompute vw (%cur-page vw)) (save-settings))
 (defun %toggle-direction (vw)
@@ -32,7 +33,7 @@
 (defun %toggle-recursive (vw)
   (setf *recursive* (not *recursive*)) (save-settings) (%reopen vw))
 (defun %cycle-fit-mode (vw)
-  "フィットモードを 全体→幅→高→全体 と巡回し、フィットし直す (#15)。"
+  "Cycle the fit mode whole->width->height->whole and re-fit (#15)."
   (setf *fit-mode* (ecase *fit-mode* (:whole :width) (:width :height) (:height :whole)))
   (save-settings)
   (reset-view vw)
@@ -47,11 +48,11 @@
                  (dotnet:make-delegate "System.Action`1[System.String]"
                                        (lambda (p) (open-path vw p)))))
 
-;;; 設定ウィンドウ (#9): メニュー「設定…」から別ウィンドウで開く。OK で確定保存、
-;;; キャンセルで破棄 (グローバル特殊変数は OK を押すまで一切触らない)。永続化基盤
-;;; (*settings*/save-settings, #8) にそのまま乗せ、反映は変更内容に応じて再描画。
+;;; settings window (#9): opened in a separate window from the menu "Settings...". OK confirms and saves,
+;;; Cancel discards (global special variables are not touched at all until OK is pressed). Built directly
+;;; on the persistence base (*settings*/save-settings, #8); applied by redrawing according to what changed.
 (defun %parse-int (s default min)
-  "S を整数に。パース失敗 or MIN 未満なら DEFAULT を返す。"
+  "Parse S as an integer. Return DEFAULT if parsing fails or the value is below MIN."
   (let ((v (ignore-errors (parse-integer (string-trim '(#\Space #\Tab) s) :junk-allowed t))))
     (if (and v (>= v min)) v default)))
 
@@ -63,7 +64,7 @@
     tb))
 
 (defun %s-row (label control)
-  "[label(固定幅) ........ control] の横並び行。"
+  "A horizontal row [label(fixed width) ........ control]."
   (let ((row (dotnet:new "Avalonia.Controls.DockPanel"))
         (tb  (dotnet:new "Avalonia.Controls.TextBlock")))
     (dotnet:invoke tb "set_Text" label)
@@ -79,9 +80,9 @@
     row))
 
 (defun %set-check (cb on)
-  "CheckBox.IsChecked (bool?) を true/false に。#305 (setter, D1225 / 0.1.13-pkgtest3) で
-bool? プロパティ setter も nil→false になったので boxed-false シムを撤去 (true=t / false=nil)。
-indeterminate が要るなら (dotnet:null)。"
+  "Set CheckBox.IsChecked (bool?) to true/false. Since #305 (setter, D1225 / 0.1.13-pkgtest3)
+the bool? property setter also maps nil->false, so the boxed-false shim was removed (true=t / false=nil).
+Use (dotnet:null) if indeterminate is needed."
   (dotnet:invoke cb "set_IsChecked" (if on t nil)))
 
 (defun %s-checkbox (checked)
@@ -105,20 +106,20 @@ indeterminate が要るなら (dotnet:null)。"
     (dotnet:add-event b "Click" (lambda (s e) (declare (ignore s e)) (funcall click)))
     b))
 
-;;; 設定コンボの選択肢 (表示ラベル . 値)。
-(defparameter *dir-choices*    '(("右開き (RTL)" . :rtl) ("左開き (LTR)" . :ltr)))
-(defparameter *fit-choices*    '(("全体" . :whole) ("幅フィット" . :width) ("高さフィット" . :height)))
-(defparameter *bg-choices*     '(("黒" . "Black") ("濃い灰" . "DimGray") ("灰" . "Gray") ("白" . "White")))
+;;; settings combo box choices (display label . value).
+(defparameter *dir-choices*    '(("Right-opening (RTL)" . :rtl) ("Left-opening (LTR)" . :ltr)))
+(defparameter *fit-choices*    '(("Whole" . :whole) ("Fit width" . :width) ("Fit height" . :height)))
+(defparameter *bg-choices*     '(("Black" . "Black") ("Dim gray" . "DimGray") ("Gray" . "Gray") ("White" . "White")))
 (defparameter *interp-choices*
-  '(("高品質 (なめらか)" . :high) ("低品質" . :low) ("なし (ドット絵/最近傍)" . :none)))
+  '(("High quality (smooth)" . :high) ("Low quality" . :low) ("None (pixel art / nearest neighbor)" . :none)))
 (defparameter *theme-choices*
-  '(("システム追従 (OS のライト/ダーク)" . :system) ("ライト" . :light) ("ダーク" . :dark)))
+  '(("Follow system (OS light/dark)" . :system) ("Light" . :light) ("Dark" . :dark)))
 (defparameter *export-width-choices*
-  '(("原寸 (変換なし)" . :original) ("最大 1080px" . 1080) ("最大 1600px" . 1600) ("最大 2048px" . 2048))
-  "掃き出し最大幅の選択肢 (#35 ②)。")
+  '(("Original size (no conversion)" . :original) ("Max 1080px" . 1080) ("Max 1600px" . 1600) ("Max 2048px" . 2048))
+  "Choices for the maximum export width (#35 ②).")
 
 (defun %s-choice-combo (choices current &optional (test #'eql))
-  "(ラベル . 値) の CHOICES から ComboBox を作り、CURRENT の項目を選択。"
+  "Build a ComboBox from CHOICES (label . value) and select the item matching CURRENT."
   (let ((c (dotnet:new "Avalonia.Controls.ComboBox")))
     (let ((items (dotnet:invoke c "get_Items")))
       (dolist (ch choices) (dotnet:invoke items "Add" (car ch))))
@@ -129,8 +130,8 @@ indeterminate が要るなら (dotnet:null)。"
   (cdr (nth (max 0 (dotnet:invoke combo "get_SelectedIndex")) choices)))
 
 (defun %prompt-text (owner title initial on-ok)
-  "1 行テキスト入力のモーダル。OK/Enter で (funcall on-ok 入力文字列) を呼んでから閉じる。
-空白のみは無視。Esc/キャンセルで閉じる。コールバック方式 (ShowDialog の戻り値は使わない)。"
+  "Modal single-line text input. On OK/Enter, call (funcall on-ok input-string) and then close.
+Whitespace-only input is ignored. Esc/Cancel closes. Callback style (the ShowDialog return value is not used)."
   (let* ((w    (dotnet:new "Avalonia.Controls.Window"))
          (tb   (dotnet:new "Avalonia.Controls.TextBox"))
          (root (dotnet:new "Avalonia.Controls.StackPanel"))
@@ -152,7 +153,7 @@ indeterminate が要るなら (dotnet:null)。"
       (dotnet:invoke btns "set_HorizontalAlignment" (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Right"))
       (dotnet:invoke btns "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 12d0 0d0 0d0))
       (let ((c (dotnet:invoke btns "get_Children")))
-        (dotnet:invoke c "Add" (%s-button "キャンセル" (lambda () (dotnet:invoke w "Close"))))
+        (dotnet:invoke c "Add" (%s-button "Cancel" (lambda () (dotnet:invoke w "Close"))))
         (dotnet:invoke c "Add" (%s-button "OK" (lambda () (commit)))))
       (dotnet:invoke root "set_Margin" (dotnet:new "Avalonia.Thickness" 12d0))
       (let ((c (dotnet:invoke root "get_Children")))
@@ -163,23 +164,24 @@ indeterminate が要るなら (dotnet:null)。"
       (dotnet:invoke w "set_SizeToContent" (dotnet:static "Avalonia.Controls.SizeToContent" "WidthAndHeight"))
       (dotnet:invoke w "set_WindowStartupLocation"
                      (dotnet:static "Avalonia.Controls.WindowStartupLocation" "CenterOwner"))
-      ;; 表示直後に入力欄へフォーカス&全選択 (Focus のオーバーロード差異は握り潰す)。
+      ;; focus the input field and select all right after it is shown (swallow Focus overload differences).
       (dotnet:add-event w "Opened"
         (lambda (s e) (declare (ignore s e))
           (ignore-errors (dotnet:invoke tb "Focus") (dotnet:invoke tb "SelectAll"))))
       (dotnet:invoke w "ShowDialog" owner))))
 
-;;; ファイル関連付け (#11, Windows): per-user (HKCU) なので管理者権限不要。ProgID を登録し
-;;; 対応拡張子の OpenWithProgids に追加 (「プログラムから開く」に出る)。既定化は OS 仕様で
-;;; 自動不可なので、登録後に「既定のアプリ」設定へ誘導する。レジストリ書き込みは Lisp から
-;;; Microsoft.Win32.Registry を叩く (C# シムを増やさない方針)。
+;;; file association (#11, Windows): per-user (HKCU), so no administrator privileges needed. Register a
+;;; ProgID and add it to the OpenWithProgids of the supported extensions (shows up in "Open with"). Making
+;;; it the default cannot be automated per OS design, so after registering, guide the user to the
+;;; "default apps" settings. Registry writes hit Microsoft.Win32.Registry directly from Lisp
+;;; (policy of not adding more C# shims).
 (defparameter *progid* "Paalam.Document")
 (defparameter *assoc-extensions*
   (append *image-extensions* '("zip" "cbz" "rar" "cbr" "7z" "cb7" "tar" "cbt" "pdf"))
-  "関連付け対象の拡張子 (paalam が開けるもの)。")
+  "Extensions targeted for file association (those paalam can open).")
 
 (defun %reg-set (path name value)
-  "HKCU\\PATH のサブキー (無ければ作成) に (NAME -> VALUE) を書く。NAME=\"\" で既定値。"
+  "Write (NAME -> VALUE) into the subkey of HKCU\\PATH (created if absent). NAME=\"\" for the default value."
   (let* ((cu (dotnet:static "Microsoft.Win32.Registry" "CurrentUser"))
          (k  (dotnet:invoke cu "CreateSubKey" path)))
     (unwind-protect (dotnet:invoke k "SetValue" name value)
@@ -188,15 +190,15 @@ indeterminate が要るなら (dotnet:null)。"
 (defun %assoc-key (ext) (format nil "Software\\Classes\\.~a\\OpenWithProgids" ext))
 
 (defun %ensure-progid ()
-  "ProgID 本体 (開くコマンド + アイコン) を登録 (冪等)。exe は自分自身。"
+  "Register the ProgID itself (open command + icon) (idempotent). The exe is this process."
   (let ((exe (dotnet:static "System.Environment" "ProcessPath")))
-    (%reg-set (format nil "Software\\Classes\\~a" *progid*) "" "paalam 画像 / 書庫 / PDF")
+    (%reg-set (format nil "Software\\Classes\\~a" *progid*) "" "paalam image / archive / PDF")
     (%reg-set (format nil "Software\\Classes\\~a\\DefaultIcon" *progid*) "" (format nil "~a,0" exe))
     (%reg-set (format nil "Software\\Classes\\~a\\shell\\open\\command" *progid*) ""
               (format nil "\"~a\" \"%1\"" exe))))
 
 (defun %assoc-registered-p (ext)
-  "EXT の OpenWithProgids に *progid* が載っているか。"
+  "Whether *progid* is listed in EXT's OpenWithProgids."
   (handler-case
       (let* ((cu (dotnet:static "Microsoft.Win32.Registry" "CurrentUser"))
              (k  (dotnet:invoke cu "OpenSubKey" (%assoc-key ext))))
@@ -207,13 +209,13 @@ indeterminate が要るなら (dotnet:null)。"
     (error () nil)))
 
 (defun %assoc-register (exts)
-  "EXTS を *progid* の OpenWithProgids 候補に追加 (per-user)。ProgID 本体も用意。"
+  "Add EXTS as OpenWithProgids candidates for *progid* (per-user). Also prepare the ProgID itself."
   (ignore-errors (dotnet:load-assembly "Microsoft.Win32.Registry"))
   (%ensure-progid)
   (dolist (ext exts) (%reg-set (%assoc-key ext) *progid* "")))
 
 (defun %assoc-unregister (exts)
-  "EXTS の OpenWithProgids から *progid* を外す。"
+  "Remove *progid* from EXTS' OpenWithProgids."
   (ignore-errors (dotnet:load-assembly "Microsoft.Win32.Registry"))
   (dolist (ext exts)
     (ignore-errors
@@ -225,7 +227,7 @@ indeterminate が要るなら (dotnet:null)。"
             (ignore-errors (dotnet:invoke k "Close"))))))))
 
 (defun %open-default-apps ()
-  "Windows の「既定のアプリ」設定を開く (既定化はユーザ操作が要るため誘導)。"
+  "Open the Windows \"default apps\" settings (guidance, since making it the default requires user action)."
   (ignore-errors
     (let ((psi (dotnet:new "System.Diagnostics.ProcessStartInfo")))
       (dotnet:invoke psi "set_FileName" "ms-settings:defaultapps")
@@ -235,15 +237,15 @@ indeterminate が要るなら (dotnet:null)。"
 (defun %settings-apply (vw cb-spread cb-fps cb-rec tb-cache tb-pf tb-th
                         fit-combo bg-combo interp-combo tb-dpi tb-mem tb-slide
                         dir-img-combo dir-pdf-combo theme-combo exp-w-combo)
-  "コントロールの現在値をグローバルへ反映し永続化、変更内容に応じて再描画する。"
+  "Apply the controls' current values to the globals, persist them, and redraw according to what changed."
   (let ((old-spread *spread*) (old-fps *first-page-single*)
         (old-rec *recursive*) (old-threads *loader-threads*) (old-dpi *pdf-dpi*))
     (setf *spread*            (and (dotnet:invoke cb-spread "get_IsChecked") t)
           *first-page-single* (and (dotnet:invoke cb-fps "get_IsChecked") t)
           *recursive*         (and (dotnet:invoke cb-rec "get_IsChecked") t)
-          *image-direction*   (%s-combo-value dir-img-combo *dir-choices*)   ; 種類別の既定 (#33)
+          *image-direction*   (%s-combo-value dir-img-combo *dir-choices*)   ; per-type default (#33)
           *pdf-direction*     (%s-combo-value dir-pdf-combo *dir-choices*)
-          ;; 現在の本の綴じ方向も新しい種類別既定で更新 (D で反転した分は上書き)。
+          ;; also update the current book's binding direction with the new per-type default (overrides any flip done with D).
           *page-direction*    (%book-direction (viewer-book vw))
           *fit-mode*          (%s-combo-value fit-combo *fit-choices*)
           *background-color*  (%s-combo-value bg-combo *bg-choices*)
@@ -257,11 +259,11 @@ indeterminate が要るなら (dotnet:null)。"
           *prefetch-ahead*    (%parse-int (dotnet:invoke tb-pf "get_Text") *prefetch-ahead* 0)
           *loader-threads*    (%parse-int (dotnet:invoke tb-th "get_Text") *loader-threads* 1))
     (save-settings)
-    (%apply-theme)               ; UI テーマ (システム追従/ライト/ダーク; #27)
-    (%apply-background vw)       ; 背景色 (#2)
-    (%apply-interpolation vw)    ; 補間品質 (#2)
-    ;; 反映の重さ順: recursive/スレッド数/PDF DPI は本を開き直す (キャッシュを再生成)、
-    ;; 見開き構成変化は再計算、それ以外 (綴じ方向/フィット/背景/補間/キャッシュ/先読み) は再描画。
+    (%apply-theme)               ; UI theme (follow system / light / dark; #27)
+    (%apply-background vw)       ; background color (#2)
+    (%apply-interpolation vw)    ; interpolation quality (#2)
+    ;; in order of how heavy applying is: recursive/thread count/PDF DPI reopen the book (rebuild the cache),
+    ;; spread layout changes recompute, everything else (binding direction/fit/background/interpolation/cache/prefetch) redraws.
     (cond ((or (not (eq old-rec *recursive*)) (/= old-threads *loader-threads*)
                (/= old-dpi *pdf-dpi*))
            (%reopen vw))
@@ -271,15 +273,15 @@ indeterminate が要るなら (dotnet:null)。"
 
 (defparameter *modifier-keys*
   '("LeftShift" "RightShift" "LeftCtrl" "RightCtrl" "LeftAlt" "RightAlt" "LWin" "RWin")
-  "単体では割当に使わない修飾キー (capture 中は無視して本命キーを待つ)。")
+  "Modifier keys that are not used for bindings on their own (ignored during capture while waiting for the real key).")
 
 (defun %capture-key (owner on-key)
-  "小窓を出し、次に押されたキー名を ON-KEY に渡して閉じる。Esc=キャンセル、修飾キー単体は無視。"
+  "Show a small window, pass the name of the next pressed key to ON-KEY, and close. Esc=cancel; lone modifier keys are ignored."
   (let ((w  (dotnet:new "Avalonia.Controls.Window"))
         (tb (dotnet:new "Avalonia.Controls.TextBlock")))
-    (dotnet:invoke tb "set_Text" "割り当てるキーを押してください (Esc でキャンセル)")
+    (dotnet:invoke tb "set_Text" "Press the key to assign (Esc to cancel)")
     (dotnet:invoke tb "set_Margin" (dotnet:new "Avalonia.Thickness" 24d0))
-    (dotnet:invoke w "set_Title" "キー割当")
+    (dotnet:invoke w "set_Title" "Key assignment")
     (dotnet:invoke w "set_SizeToContent"
                    (dotnet:static "Avalonia.Controls.SizeToContent" "WidthAndHeight"))
     (dotnet:invoke w "set_WindowStartupLocation"
@@ -295,9 +297,9 @@ indeterminate が要るなら (dotnet:null)。"
     (dotnet:invoke w "ShowDialog" owner)))
 
 (defun %goto-page (vw)
-  "vi 風ページ移動 (#23): [count]g で count ページ目へ。count 無しは末尾へ
- (メニュー/パレットからの直接実行時のフォールバック; キーでは G が末尾を担う)。
-count は %on-key が viewer-pending-count に溜めたもの (1g なら 1)。"
+  "vi-style page navigation (#23): [count]g jumps to page count. Without count, jumps to the end
+ (a fallback for direct execution from the menu/palette; for keys, G handles the end).
+count is what %on-key accumulated into viewer-pending-count (1 for 1g)."
   (let* ((n (book-page-count (viewer-book vw)))
          (cnt (viewer-pending-count vw))
          (page (if cnt (1- (max 1 (min cnt n))) (1- n))))
