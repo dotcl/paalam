@@ -71,10 +71,20 @@ arrange the relevant commands and separators in each group (shared by menu/conte
                     (%menu-cmd vw sub e)))
               (dotnet:invoke items "Add" sub))))))))
 
+(defun %add-help-menu (vw menu)
+  "Win/Linux: append a fixed Help menu (About) to the menu bar. macOS puts About in
+the native application menu instead (see %setup-mac-app-menu), so skip it there.
+About is deliberately outside *command-menu*, so it survives menu editing and is not reorderable."
+  (unless (%macos-p)
+    (let ((help (%menu-item vw "Help")))
+      (%menu-add help (%menu-item vw "About paalam…" (lambda () (%about vw))))
+      (%menu-add menu help))))
+
 (defun %build-menu (vw win)
   (declare (ignore win))   ; open-type commands use (viewer-window vw) as owner
   (let ((menu (dotnet:new "Avalonia.Controls.Menu")))
     (%add-menu-groups vw menu)
+    (%add-help-menu vw menu)
     menu))
 
 (defun %build-context-menu (vw)
@@ -95,7 +105,8 @@ marking ContextRequested Handled from outside does not stop it -> stop it with O
   "Rebuild the menu bar and context menu from *command-menu* (#26 apply edits immediately)."
   (when (viewer-menu vw)
     (dotnet:invoke (dotnet:invoke (viewer-menu vw) "get_Items") "Clear")
-    (%add-menu-groups vw (viewer-menu vw)))
+    (%add-menu-groups vw (viewer-menu vw))
+    (%add-help-menu vw (viewer-menu vw)))
   (ignore-errors
     (dotnet:invoke (viewer-viewport vw) "set_ContextMenu" (%build-context-menu vw))))
 

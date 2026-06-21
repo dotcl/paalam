@@ -170,6 +170,68 @@ Whitespace-only input is ignored. Esc/Cancel closes. Callback style (the ShowDia
           (ignore-errors (dotnet:invoke tb "Focus") (dotnet:invoke tb "SelectAll"))))
       (dotnet:invoke w "ShowDialog" owner))))
 
+;;; About dialog. Shown from Help -> About (Win/Linux in-window menu) or the native
+;;; application menu (macOS, see %setup-mac-app-menu). Also reachable from the command palette.
+(defparameter *version* "0.1"
+  "Version shown in the About dialog. Keep in sync with paalam.asd :version.")
+(defparameter *repository-url* "https://github.com/snmsts/paalam")
+
+(defun %macos-p () (dotnet:static "System.OperatingSystem" "IsMacOS"))
+
+(defun %open-url (url)
+  "Open URL in the OS default browser (UseShellExecute, so it works on Win/macOS/Linux)."
+  (ignore-errors
+    (let ((psi (dotnet:new "System.Diagnostics.ProcessStartInfo")))
+      (dotnet:invoke psi "set_FileName" url)
+      (dotnet:invoke psi "set_UseShellExecute" t)
+      (dotnet:static "System.Diagnostics.Process" "Start" psi))))
+
+(defun %about-text (text &optional bold size)
+  (let ((tb (dotnet:new "Avalonia.Controls.TextBlock")))
+    (dotnet:invoke tb "set_Text" text)
+    (when bold (dotnet:invoke tb "set_FontWeight" (dotnet:static "Avalonia.Media.FontWeight" "Bold")))
+    (when size (dotnet:invoke tb "set_FontSize" (coerce size 'double-float)))
+    tb))
+
+(defun %about (&optional vw)
+  "Modal About dialog: name / version / description / repository / credits.
+Owner is the given viewer's window, else the first open window, else centered on screen."
+  (let* ((owner (or (and vw (viewer-window vw))
+                    (and *viewers* (viewer-window (first *viewers*)))))
+         (w    (dotnet:new "Avalonia.Controls.Window"))
+         (root (dotnet:new "Avalonia.Controls.StackPanel"))
+         (btns (dotnet:new "Avalonia.Controls.StackPanel")))
+    (dotnet:invoke root "set_Spacing" 6d0)
+    (dotnet:invoke root "set_Margin" (dotnet:new "Avalonia.Thickness" 16d0))
+    (let ((c (dotnet:invoke root "get_Children")))
+      (dotnet:invoke c "Add" (%about-text "paalam" t 20))
+      (dotnet:invoke c "Add" (%about-text (format nil "Version ~a" *version*)))
+      (dotnet:invoke c "Add" (%about-text "A NeeView-style image viewer built with dotcl + Avalonia."))
+      (dotnet:invoke c "Add" (%about-text *repository-url*))
+      (dotnet:invoke c "Add" (%about-text "dotcl and Avalonia are MIT-licensed.")))
+    (dotnet:invoke btns "set_Orientation" (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
+    (dotnet:invoke btns "set_HorizontalAlignment" (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Right"))
+    (dotnet:invoke btns "set_Spacing" 8d0)
+    (dotnet:invoke btns "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 12d0 0d0 0d0))
+    (let ((c (dotnet:invoke btns "get_Children")))
+      (dotnet:invoke c "Add" (%s-button "GitHub" (lambda () (%open-url *repository-url*))))
+      (dotnet:invoke c "Add" (%s-button "Close" (lambda () (dotnet:invoke w "Close")))))
+    (dotnet:invoke (dotnet:invoke root "get_Children") "Add" btns)
+    (dotnet:invoke w "set_Content" root)
+    (dotnet:invoke w "set_Title" "About paalam")
+    (dotnet:invoke w "set_CanResize" nil)
+    (dotnet:invoke w "set_SizeToContent" (dotnet:static "Avalonia.Controls.SizeToContent" "WidthAndHeight"))
+    (dotnet:invoke w "set_WindowStartupLocation"
+                   (dotnet:static "Avalonia.Controls.WindowStartupLocation"
+                                  (if owner "CenterOwner" "CenterScreen")))
+    (dotnet:add-event w "KeyDown"
+      (lambda (s e) (declare (ignore s))
+        (when (string= (dotnet:invoke (dotnet:invoke e "get_Key") "ToString") "Escape")
+          (dotnet:invoke e "set_Handled" t) (dotnet:invoke w "Close"))))
+    (if owner
+        (dotnet:invoke w "ShowDialog" owner)
+        (dotnet:invoke w "Show"))))
+
 ;;; file association (#11, Windows): per-user (HKCU), so no administrator privileges needed. Register a
 ;;; ProgID and add it to the OpenWithProgids of the supported extensions (shows up in "Open with"). Making
 ;;; it the default cannot be automated per OS design, so after registering, guide the user to the

@@ -283,6 +283,20 @@ is left in the environment, it acts only when both *debug* and a \"positive inte
                                 (dotnet:invoke life "Shutdown" 0)))
             (dotnet:invoke timer "Start")))))))
 
+(defun %setup-mac-app-menu (app)
+  "macOS: add an About item to the native application menu (the bold app-name menu).
+A bare NativeMenuItem (no child menu) added to the app-level NativeMenu lands in the
+application menu on macOS. Win/Linux use the in-window Help menu instead (see %add-help-menu)."
+  (handler-case
+      (let* ((about (dotnet:new "Avalonia.Controls.NativeMenuItem" "About paalam"))
+             (menu  (dotnet:new "Avalonia.Controls.NativeMenu")))
+        (dotnet:add-event about "Click"
+                          (lambda (s e) (declare (ignore s e))
+                            (%about (first *viewers*))))
+        (dotnet:invoke (dotnet:invoke menu "get_Items") "Add" about)
+        (dotnet:static "Avalonia.Controls.NativeMenu" "SetMenu" app menu))
+    (error (e) (log-err "mac-app-menu" e))))
+
 ;;; emit an Avalonia.Application subclass on the Lisp side.
 (dotnet:define-class "Paalam.App" ("Avalonia.Application")
   (:ctor ()
@@ -300,6 +314,7 @@ is left in the environment, it acts only when both *debug* and a \"positive inte
           (let ((life (dotnet:invoke self "get_ApplicationLifetime"))
                 (win  (build-main-window)))
             (dotnet:invoke life "set_MainWindow" win)
+            (when (%macos-p) (%setup-mac-app-menu self))   ; About in the native app menu (macOS)
             ;; receive files arriving via macOS Finder "Open" / Dock drop / file-association launch.
             ;; replace if there is a viewer; otherwise stack onto the target opened by the next build.
             (dotnet:static "Paalam.FileOpenHelper" "Enable" self

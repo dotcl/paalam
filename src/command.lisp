@@ -72,7 +72,10 @@
    (make-command :bookmark      "Toggle Bookmark"  '("B")     '%toggle-bookmark-current)
    (make-command :prev-bookmark "Prev Bookmark"    '("OemOpenBrackets")  (lambda (vw) (%goto-bookmark vw -1)))
    (make-command :next-bookmark "Next Bookmark"    '("OemCloseBrackets") (lambda (vw) (%goto-bookmark vw  1)))
-   (make-command :escape        "Back / Quit"      '("Escape") '%escape))
+   (make-command :escape        "Back / Quit"      '("Escape") '%escape)
+   ;; About is reachable from the palette and the Help menu (Win/Linux) / app menu (macOS),
+   ;; but is intentionally kept out of *command-menu* (not part of the user-editable menu).
+   (make-command :about         "About paalam…"    '()        '%about))
   "All commands (in definition order). Menu/key-binding editing references this order.")
 
 (defun %command (id) (find id *commands* :key #'command-id))
