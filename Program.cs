@@ -1,7 +1,7 @@
-// paalam — Avalonia 画像ビューア (dotcl 組み込みホスト, クロスプラット)
+// paalam — Avalonia image viewer (dotcl embedded host, cross-platform)
 //
-// C# は boot とアセンブリ先読みだけ。UI/ロジックは src/main.lisp 側。
-// dotcl/Avalonia とも NuGet 経由のみ (dotcl repo 非依存; #281)。
+// C# only does boot and assembly pre-loading. UI/logic lives in src/main.lisp.
+// Both dotcl/Avalonia are via NuGet only (no dependency on the dotcl repo; #281).
 
 using System;
 using System.IO;
@@ -13,19 +13,20 @@ using DotCL;
 
 namespace Paalam;
 
-// （旧 Paalam.Imaging.BitmapFromStream シムは撤去。dotcl-internal #294 が
-//  DotCL.Runtime 0.1.12 で修正され、Lisp から (dotnet:new Bitmap stream) が
-//  Bitmap(Stream) を正しく選べるようになったため。）
+// (The old Paalam.Imaging.BitmapFromStream shim was removed. dotcl-internal #294
+//  was fixed in DotCL.Runtime 0.1.12, so (dotnet:new Bitmap stream) from Lisp can
+//  now correctly select Bitmap(Stream).)
 
-// PDF を PDFium (PDFtoImage) でページ毎にラスタライズして Avalonia Bitmap にする。
-// PDFium/SkiaSharp interop は C# 側に閉じ込める (Lisp からは PageCount/RenderPage だけ叩く)。
+// Rasterize a PDF page by page with PDFium (PDFtoImage) into an Avalonia Bitmap.
+// PDFium/SkiaSharp interop is confined to the C# side (Lisp only calls PageCount/RenderPage).
 public sealed class PdfDoc
 {
     private readonly byte[] _bytes;
     public PdfDoc(string path) => _bytes = System.IO.File.ReadAllBytes(path);
     public int PageCount => PDFtoImage.Conversion.GetPageCount(_bytes);
-    // dpi はラスタライズ解像度 (Lisp の *pdf-dpi*)。4K では 150 だと拡大されて粗いので
-    // 既定 300、設定で可変。高いほど精細だがメモリ/時間が増える。
+    // dpi is the rasterization resolution (Lisp's *pdf-dpi*). At 4K, 150 gets scaled
+    // up and looks coarse, so the default is 300, configurable. Higher is finer but
+    // uses more memory/time.
     public Avalonia.Media.Imaging.Bitmap RenderPage(int index, int dpi)
     {
         var opts = new PDFtoImage.RenderOptions(Dpi: dpi,
@@ -36,14 +37,14 @@ public sealed class PdfDoc
         return new Avalonia.Media.Imaging.Bitmap(ms);
     }
 
-    // 全文検索 (#23 /): query を含むページの 0-based index 配列。PdfText に委譲 (自前の bytes を使う)。
+    // Full-text search (#23 /): 0-based index array of pages containing query. Delegates to PdfText (uses its own bytes).
     public int[] SearchPages(string query) => PdfText.SearchPages(_bytes, query);
-    // ヒット箇所のハイライト矩形 (ページ正規化座標 [x,y,w,h,...]; 呼び側で表示寸法を掛ける)。
+    // Highlight rects of hits (page-normalized coords [x,y,w,h,...]; caller multiplies by display dimensions).
     public double[] MatchRects(int pageIndex, string query) => PdfText.MatchRects(_bytes, pageIndex, query);
-    // 目次 ("depth<TAB>page<TAB>title" 行の文字列)。
+    // Outline (string of "depth<TAB>page<TAB>title" lines).
     public string Outline() => PdfText.Outline(_bytes);
 
-    // 素材掃き出し用: ページを PNG バイト列で返す。
+    // For material export: return a page as a PNG byte array.
     public byte[] RenderPagePng(int index, int dpi)
     {
         var opts = new PDFtoImage.RenderOptions(Dpi: dpi,
@@ -54,9 +55,10 @@ public sealed class PdfDoc
     }
 }
 
-// PDF 全文検索 (#23 / の PDF 対応)。PDFtoImage は描画専用なので、同梱の pdfium ネイティブを
-// 直接 P/Invoke してテキスト検索する (FPDFText_Find*)。新規ネイティブ依存なし・全プラット対応。
-// raw P/Invoke は Lisp の dotnet: FFI では宣言できないので C# に置く (正当なネイティブ interop)。
+// PDF full-text search (#23 / 's PDF support). PDFtoImage is rendering-only, so we
+// P/Invoke the bundled pdfium native directly for text search (FPDFText_Find*). No new
+// native dependency, works on all platforms.
+// raw P/Invoke can't be declared in Lisp's dotnet: FFI, so it lives in C# (legitimate native interop).
 public static class PdfText
 {
     private static bool _init;
@@ -86,8 +88,8 @@ public static class PdfText
     [DllImport("pdfium", CallingConvention = CC)] private static extern IntPtr FPDFBookmark_GetDest(IntPtr doc, IntPtr bookmark);
     [DllImport("pdfium", CallingConvention = CC)] private static extern int FPDFDest_GetDestPageIndex(IntPtr doc, IntPtr dest);
 
-    // 目次 (PDF bookmark) を "depth<TAB>page<TAB>title" 行の文字列で返す (深さ優先)。無ければ ""。
-    // dotcl から扱いやすいよう区切り文字列にする (Lisp 側で行分割)。
+    // Return the outline (PDF bookmarks) as a string of "depth<TAB>page<TAB>title" lines (depth-first). "" if none.
+    // Use a delimited string so it's easy to handle from dotcl (Lisp splits by line).
     public static string Outline(byte[] bytes)
     {
         if (bytes == null || bytes.Length == 0) return "";
@@ -126,9 +128,10 @@ public static class PdfText
         }
     }
 
-    // pageIndex 上の query 最初のヒットの矩形群を、ページ寸法に対する正規化座標 (0..1, 左上原点)
-    // で [x,y,w,h, x,y,w,h, ...] で返す (複数行なら複数矩形)。無ければ空配列。
-    // 正規化なので呼び側でページ画像の表示寸法を掛ければよい (DPI/メタデータ非依存)。
+    // Return the rects of query's first hit on pageIndex, as normalized coords relative to
+    // page dimensions (0..1, top-left origin), as [x,y,w,h, x,y,w,h, ...] (multiple rects if
+    // multi-line). Empty array if none.
+    // Since normalized, the caller just multiplies by the page image's display dimensions (DPI/metadata-independent).
     public static double[] MatchRects(byte[] bytes, int pageIndex, string query)
     {
         if (bytes == null || bytes.Length == 0 || string.IsNullOrEmpty(query)) return Array.Empty<double>();
@@ -151,16 +154,16 @@ public static class PdfText
                 int cnt = FPDFText_GetSchCount(sh);
                 int nr = FPDFText_CountRects(tp, start, cnt);
                 double pw = FPDF_GetPageWidthF(page);
-                double ph = FPDF_GetPageHeightF(page);   // 点 (1/72in)。PDF は原点が左下。
+                double ph = FPDF_GetPageHeightF(page);   // points (1/72in). PDF origin is bottom-left.
                 if (pw <= 0 || ph <= 0) return Array.Empty<double>();
                 var outv = new List<double>(nr * 4);
                 for (int i = 0; i < nr; i++)
                 {
                     FPDFText_GetRect(tp, i, out double l, out double t, out double r, out double b);
-                    outv.Add(l / pw);                 // x 比
-                    outv.Add((ph - t) / ph);          // y 比 (上下反転: top が大きい y)
-                    outv.Add((r - l) / pw);           // w 比
-                    outv.Add((t - b) / ph);           // h 比
+                    outv.Add(l / pw);                 // x ratio
+                    outv.Add((ph - t) / ph);          // y ratio (flipped vertically: top is the larger y)
+                    outv.Add((r - l) / pw);           // w ratio
+                    outv.Add((t - b) / ph);           // h ratio
                 }
                 return outv.ToArray();
             }
@@ -175,15 +178,15 @@ public static class PdfText
         }
     }
 
-    // query を含むページの 0-based index 配列を返す (大文字小文字無視・出現順)。
-    // FPDF_LoadMemDocument はバッファを参照し続けるので、doc を閉じるまで byte[] を pin し続ける。
+    // Return a 0-based index array of pages containing query (case-insensitive, in order of appearance).
+    // FPDF_LoadMemDocument keeps referencing the buffer, so pin the byte[] until doc is closed.
     public static int[] SearchPages(byte[] bytes, string query)
     {
         if (bytes == null || bytes.Length == 0 || string.IsNullOrEmpty(query))
             return Array.Empty<int>();
         lock (_lock)
         {
-            if (!_init) { FPDF_InitLibrary(); _init = true; }   // PDFtoImage と共有 OK (init は冪等運用)
+            if (!_init) { FPDF_InitLibrary(); _init = true; }   // OK to share with PDFtoImage (init treated as idempotent)
             var pin = GCHandle.Alloc(bytes, GCHandleType.Pinned);
             IntPtr doc = IntPtr.Zero;
             try
@@ -200,7 +203,7 @@ public static class PdfText
                     IntPtr tp = FPDFText_LoadPage(page);
                     if (tp != IntPtr.Zero)
                     {
-                        IntPtr sh = FPDFText_FindStart(tp, findWhat, 0, 0);   // flags 0 = 大小無視
+                        IntPtr sh = FPDFText_FindStart(tp, findWhat, 0, 0);   // flags 0 = case-insensitive
                         if (sh != IntPtr.Zero)
                         {
                             if (FPDFText_FindNext(sh)) hits.Add(i);
@@ -220,7 +223,7 @@ public static class PdfText
         }
     }
 
-    // FPDF_WIDESTRING = UTF-16LE null 終端。
+    // FPDF_WIDESTRING = UTF-16LE null-terminated.
     private static ushort[] ToUtf16(string s)
     {
         var a = new ushort[s.Length + 1];
@@ -230,8 +233,8 @@ public static class PdfText
     }
 }
 
-// 保存ダイアログ (素材掃き出し先の選択)。async は UI スレッドで進み、確定後に
-// onPicked(path) を呼ぶ (UI を固めない)。
+// Save dialog (choosing where to export materials). async runs on the UI thread and,
+// once confirmed, calls onPicked(path) (without freezing the UI).
 public static class DialogHelper
 {
     public static async void PickSaveZip(Avalonia.Controls.Window win, string suggestedName,
@@ -254,7 +257,7 @@ public static class DialogHelper
                 if (!string.IsNullOrEmpty(p)) onPicked(p!);
             }
         }
-        catch { /* キャンセル等は無視 */ }
+        catch { /* ignore cancellation etc. */ }
     }
 
     public static async void PickOpenBook(Avalonia.Controls.Window win, Action<string> onPicked)
@@ -266,7 +269,7 @@ public static class DialogHelper
                 AllowMultiple = false,
                 FileTypeFilter = new[]
                 {
-                    new FilePickerFileType("画像 / 書庫 / PDF")
+                    new FilePickerFileType("Image / Archive / PDF")
                     {
                         Patterns = new[]
                         {
@@ -285,7 +288,7 @@ public static class DialogHelper
         catch { }
     }
 
-    // 設定の export/import (#24): paalam-config.lisp (s式) の保存/開く。
+    // Config export/import (#24): save/open paalam-config.lisp (s-expressions).
     public static async void PickSaveConfig(Avalonia.Controls.Window win, string suggestedName,
                                             Action<string> onPicked)
     {
@@ -297,7 +300,7 @@ public static class DialogHelper
                 DefaultExtension = "lisp",
                 FileTypeChoices = new[]
                 {
-                    new FilePickerFileType("paalam 設定") { Patterns = new[] { "*.lisp" } }
+                    new FilePickerFileType("paalam config") { Patterns = new[] { "*.lisp" } }
                 }
             });
             if (file != null)
@@ -318,7 +321,7 @@ public static class DialogHelper
                 AllowMultiple = false,
                 FileTypeFilter = new[]
                 {
-                    new FilePickerFileType("paalam 設定") { Patterns = new[] { "*.lisp" } }
+                    new FilePickerFileType("paalam config") { Patterns = new[] { "*.lisp" } }
                 }
             });
             if (files != null && files.Count > 0)
@@ -346,23 +349,23 @@ public static class DialogHelper
     }
 }
 
-// macOS の Finder「このアプリで開く」/ Dock へのドロップ / 関連付け起動で渡される
-// ファイルを受ける (#19)。これらは argv ではなく Apple Event 経由で来るので、
-// Avalonia の IActivatableLifetime.Activated (ActivationKind.File) を購読する。
-// ジェネリック TryGetFeature<T> と FileActivatedEventArgs のキャストは Lisp の
-// dotnet: FFI では扱いづらいので C# シムに閉じ込め、Lisp へは文字列パスだけ渡す。
+// Receive files passed via macOS Finder "Open With" / drop onto the Dock / file-association
+// launch (#19). These come via Apple Events rather than argv, so subscribe to Avalonia's
+// IActivatableLifetime.Activated (ActivationKind.File).
+// The generic TryGetFeature<T> and the FileActivatedEventArgs cast are awkward in Lisp's
+// dotnet: FFI, so confine them to a C# shim and pass only string paths to Lisp.
 public static class FileOpenHelper
 {
-    // app: Avalonia.Application (Paalam.App)。onFile: 開くべきローカルパスを 1 件ずつ通知。
+    // app: Avalonia.Application (Paalam.App). onFile: notify the local paths to open, one at a time.
     public static void Enable(Avalonia.Application app, Action<string> onFile)
     {
         try
         {
-            // Avalonia 12 の TryGetFeature は非ジェネリック (Type を取る) 版。
+            // Avalonia 12's TryGetFeature is the non-generic (takes a Type) version.
             var life = app.TryGetFeature(
                 typeof(Avalonia.Controls.ApplicationLifetimes.IActivatableLifetime))
                 as Avalonia.Controls.ApplicationLifetimes.IActivatableLifetime;
-            if (life == null) return;   // 非対応プラットフォーム
+            if (life == null) return;   // unsupported platform
             life.Activated += (s, e) =>
             {
                 if (e is Avalonia.Controls.ApplicationLifetimes.FileActivatedEventArgs fa)
@@ -375,17 +378,17 @@ public static class FileOpenHelper
                 }
             };
         }
-        catch { /* 機能が無い環境では黙ってスキップ */ }
+        catch { /* silently skip in environments where the feature is absent */ }
     }
 }
 
-// macOS の RenderTimer/-6661 回避 (Avalonia #14927)。CVDisplayLink ベースの
-// RenderTimer が起動初期に CreateAvaloniaNative/RegisterTick で失敗する
-// (蓋を閉じた・外部ディスプレイのみ・起動経路によるレース等の条件で再現)。
-// 公開 API では RenderTimer を直接差し替えられないので、GPU パス (Metal/OpenGl) を
-// 使わない Software レンダリングに固定して CVDisplayLink/Metal の初期化自体を避ける。
-// ジェネリックな AppBuilder.With<T> と IList<enum> 構築は Lisp の dotnet: FFI から
-// 扱いづらいので C# 側で組む。macOS でのみ呼ぶこと (他 OS には無効なオプション)。
+// Workaround for the macOS RenderTimer/-6661 issue (Avalonia #14927). The CVDisplayLink-based
+// RenderTimer fails at CreateAvaloniaNative/RegisterTick early in startup (reproduces under
+// conditions like a closed lid, external-display-only, or races depending on the launch path).
+// The public API can't directly replace the RenderTimer, so pin it to Software rendering that
+// doesn't use the GPU path (Metal/OpenGl), avoiding CVDisplayLink/Metal initialization itself.
+// The generic AppBuilder.With<T> and IList<enum> construction are awkward from Lisp's dotnet:
+// FFI, so build them on the C# side. Call only on macOS (an option that is ineffective on other OSes).
 public static class MacRenderFix
 {
     public static Avalonia.AppBuilder UseSoftwareRendering(Avalonia.AppBuilder builder)
@@ -404,7 +407,7 @@ internal static class Program
     {
         try
         {
-            // dotcl の型解決前に Avalonia アセンブリを AppDomain にロードしておく。
+            // Load Avalonia assemblies into the AppDomain before dotcl resolves types.
             _ = typeof(Avalonia.Application).Assembly;
             _ = typeof(Avalonia.Controls.Window).Assembly;
             _ = typeof(Avalonia.AppBuilderDesktopExtensions).Assembly; // Avalonia.Desktop
@@ -413,21 +416,21 @@ internal static class Program
             _ = typeof(PDFtoImage.Conversion).Assembly;
 
             DotclHost.Initialize();
-            // project-core build (dotcl #307): build 時に paalam.asd を精コンパイルした
-            // 成果物 (dotcl.core + 依存 fasl + paalam.fasl) を manifest 順にロードする。
-            // LoadFromManifest が dotcl.core のロードも兼ねる (LoadCore 不要)。
+            // project-core build (dotcl #307): load the artifacts produced by fully compiling
+            // paalam.asd at build time (dotcl.core + dependency fasls + paalam.fasl) in manifest order.
+            // LoadFromManifest also handles loading dotcl.core (no LoadCore needed).
             var manifest = Path.Combine(AppContext.BaseDirectory, "dotcl-fasl", "dotcl-deps.txt");
             DotclHost.LoadFromManifest(manifest);
 
-            // 第 1 引数 (フォルダ/アーカイブ/画像) を渡す。run-paalam は窓が閉じるまで blocking。
+            // Pass the first argument (folder/archive/image). run-paalam blocks until the window closes.
             var cmd = Environment.GetCommandLineArgs();
             object? target = cmd.Length > 1 ? cmd[1] : null;
             DotclHost.Call("RUN-PAALAM", target);
         }
         catch (Exception ex)
         {
-            // boot 例外はログに残す。署名済み .app の BaseDirectory は書けないことがあるので
-            // ホーム配下に出す (Console.Error は Finder 起動では見えない)。
+            // Log boot exceptions. A signed .app's BaseDirectory may not be writable, so write
+            // under the home directory (Console.Error isn't visible on Finder launch).
             try
             {
                 var log = Path.Combine(
