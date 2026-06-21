@@ -185,6 +185,57 @@ Higher is more detailed but uses more memory/time. For 4K, around 300-400 is a r
 (defmethod book-page-bytes ((b pdf-book) i)
   (values (dotnet:invoke (pdfb-doc b) "RenderPagePng" i *pdf-dpi*) "png"))
 
+;;; book-page-file-info: source size / mtime / full path of a page for the info pane (#36).
+;;; (values size-bytes mtime-string full-path). Each piece is nil when not applicable
+;;; (pdf has no per-page file; archives have no on-disk path). Best-effort; never throws.
+
+(defun %dt->string (dt)
+  "Format a .NET DateTime / DateTimeOffset as 'yyyy-MM-dd HH:mm:ss' (nil on failure)."
+  (ignore-errors (dotnet:invoke dt "ToString" "yyyy-MM-dd HH:mm:ss")))
+
+(defgeneric book-page-file-info (book index)
+  (:documentation "(values size-bytes mtime-string full-path) for the page source; nil parts where N/A."))
+
+(defmethod book-page-file-info ((b t) i) (declare (ignore i)) (values nil nil nil))
+
+(defmethod book-page-file-info ((b directory-book) i)
+  (or (ignore-errors
+        (let* ((path (aref (db-paths b) i))
+               (fi (dotnet:new "System.IO.FileInfo" path)))
+          (values (dotnet:invoke fi "get_Length")
+                  (%dt->string (dotnet:invoke fi "get_LastWriteTime"))
+                  path)))
+      (values nil nil nil)))
+
+(defmethod book-page-file-info ((b zip-book) i)
+  (or (ignore-errors
+        (let ((e (aref (zb-entries b) i)))
+          (values (dotnet:invoke e "get_Length")              ; uncompressed size
+                  (%dt->string (dotnet:invoke e "get_LastWriteTime"))   ; DateTimeOffset
+                  nil)))
+      (values nil nil nil)))
+
+(defmethod book-page-file-info ((b sharp-book) i)
+  ;; LastModifiedTime is Nullable<DateTime> (awkward via FFI), so size only.
+  (or (ignore-errors (values (dotnet:invoke (aref (sb2-entries b) i) "get_Size") nil nil))
+      (values nil nil nil)))
+
+;;; book-doc-info: document-level metadata for the info pane (#36). alist of (label . value),
+;;; nil when none. Only PDF has it for now (title/author/producer via pdfium FPDF_GetMetaText).
+(defgeneric book-doc-info (book)
+  (:documentation "alist (label . value) of document-level metadata; nil if none."))
+
+(defmethod book-doc-info ((b t)) nil)
+
+(defmethod book-doc-info ((b pdf-book))
+  (flet ((m (tag)
+           (let ((s (ignore-errors (dotnet:invoke (pdfb-doc b) "Meta" tag))))
+             (and (stringp s) (plusp (length s)) s))))
+    (loop for (label . tag) in '(("Title" . "Title") ("Author" . "Author")
+                                 ("Subject" . "Subject") ("Producer" . "Producer"))
+          for v = (m tag)
+          when v collect (cons label v))))
+
 ;;; open-book --------------------------------------------------------
 
 (defun open-book (path)

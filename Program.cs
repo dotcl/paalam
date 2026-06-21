@@ -43,6 +43,8 @@ public sealed class PdfDoc
     public double[] MatchRects(int pageIndex, string query) => PdfText.MatchRects(_bytes, pageIndex, query);
     // Outline (string of "depth<TAB>page<TAB>title" lines).
     public string Outline() => PdfText.Outline(_bytes);
+    // Document metadata (#36): tag is one of "Title"/"Author"/"Subject"/"Keywords"/"Creator"/"Producer"/"CreationDate"/"ModDate". "" if absent.
+    public string Meta(string tag) => PdfText.MetaText(_bytes, tag);
 
     // For material export: return a page as a PNG byte array.
     public byte[] RenderPagePng(int index, int dpi)
@@ -87,6 +89,7 @@ public static class PdfText
     [DllImport("pdfium", CallingConvention = CC)] private static extern uint FPDFBookmark_GetTitle(IntPtr bookmark, byte[] buffer, uint buflen);
     [DllImport("pdfium", CallingConvention = CC)] private static extern IntPtr FPDFBookmark_GetDest(IntPtr doc, IntPtr bookmark);
     [DllImport("pdfium", CallingConvention = CC)] private static extern int FPDFDest_GetDestPageIndex(IntPtr doc, IntPtr dest);
+    [DllImport("pdfium", CallingConvention = CC)] private static extern uint FPDF_GetMetaText(IntPtr doc, [MarshalAs(UnmanagedType.LPStr)] string tag, byte[] buffer, uint buflen);
 
     // Return the outline (PDF bookmarks) as a string of "depth<TAB>page<TAB>title" lines (depth-first). "" if none.
     // Use a delimited string so it's easy to handle from dotcl (Lisp splits by line).
@@ -123,6 +126,29 @@ public static class PdfText
                 }
                 Walk(FPDFBookmark_GetFirstChild(doc, IntPtr.Zero), 0);
                 return sb.ToString();
+            }
+            finally { if (doc != IntPtr.Zero) FPDF_CloseDocument(doc); pin.Free(); }
+        }
+    }
+
+    // Document metadata string for TAG (UTF-16LE out-param from pdfium). "" if absent (#36).
+    public static string MetaText(byte[] bytes, string tag)
+    {
+        if (bytes == null || bytes.Length == 0 || string.IsNullOrEmpty(tag)) return "";
+        lock (_lock)
+        {
+            if (!_init) { FPDF_InitLibrary(); _init = true; }
+            var pin = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+            IntPtr doc = IntPtr.Zero;
+            try
+            {
+                doc = FPDF_LoadMemDocument(pin.AddrOfPinnedObject(), bytes.Length, IntPtr.Zero);
+                if (doc == IntPtr.Zero) return "";
+                var buf = new byte[8192];
+                uint n = FPDF_GetMetaText(doc, tag, buf, (uint)buf.Length);
+                if (n <= 2) return "";   // only the UTF-16 NUL terminator
+                return System.Text.Encoding.Unicode
+                    .GetString(buf, 0, (int)Math.Min(n, (uint)buf.Length)).TrimEnd('\0');
             }
             finally { if (doc != IntPtr.Zero) FPDF_CloseDocument(doc); pin.Free(); }
         }

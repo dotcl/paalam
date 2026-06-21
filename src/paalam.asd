@@ -16,6 +16,7 @@
                (:file "browse-pane")
                (:file "loader")
                (:file "viewer")
+               (:file "info-pane")
                (:file "command")
                (:file "window")
                (:file "palette")

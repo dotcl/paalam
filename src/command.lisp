@@ -67,6 +67,7 @@
    (make-command :clip-pane     "Clip Pane"        '("P")     '%toggle-clip-pane)
    (make-command :thumb-pane    "Shelf (Thumbnails)" '("T")   '%toggle-thumb-pane)
    (make-command :browse-pane   "Folder"           '("L")     '%toggle-browse-pane)
+   (make-command :info          "Info Panel"       '("I")     '%toggle-info-pane)
    (make-command :clip-add      "Add to Clip"      '("A")     '%clip-add-current)
    (make-command :export        "Export…"          '("E")     '%pane-export)
    (make-command :bookmark      "Toggle Bookmark"  '("B")     '%toggle-bookmark-current)
@@ -89,7 +90,7 @@
   '((:file "File"  :open-file :open-folder :settings :edit-menu :edit-gestures :quit)
     (:view "View"  :fullscreen :fit :fit-mode :rotate-left :rotate-right :loupe :slideshow
                      :spread :direction :recursive
-                     :browse-pane :thumb-pane :clip-pane)
+                     :browse-pane :thumb-pane :clip-pane :info)
     (:jump "Go"    :first-spread :prev-spread :next-spread :last-spread :goto
                      :prev-bookmark :next-bookmark)
     (:tool "Tools" :palette :search :toc)

@@ -19,6 +19,8 @@
            (clip-count nil)             ; vi count prefix (#35 ④ Phase 2)
            thumb-pane thumb-stack       ; page thumbnail bookshelf (#6 A)
            browse-pane browse-tree      ; folder tree (#6 B)
+           info-pane info-stack         ; file info / EXIF panel (#36)
+           (info-page nil)              ; page selected for the info pane (left/right pick in spread; #36)
            (reorder-from nil)           ; source index during drag reorder (Phase 3)
            (reorder-img nil)            ; thumbnail being dragged (to restore opacity; #20)
            (reorder-line nil)           ; insertion position indicator Border (#20)
@@ -309,6 +311,7 @@ and prefetch-request the next spread in reading direction too."
               (mapcar (lambda (p) (if (%page-bitmap vw p) 1 0)) (aref spreads si)))
         (%render-spread vw)
         (%update-title vw)
+        (%info-pane-refresh-if-visible vw)   ; refresh info panel on page move (#36)
         (history-update (viewer-source vw) (%cur-page vw))   ; in-memory; saved on exit.
         (reset-view vw)))))
 
@@ -318,7 +321,9 @@ and prefetch-request the next spread in reading direction too."
   (let* ((spreads (viewer-spreads vw)) (m (length spreads)))
     (when (plusp m)
       (let ((pages (aref spreads (viewer-sindex vw))))
-        (when (member index pages) (%render-spread vw))))))
+        (when (member index pages)
+          (%render-spread vw)
+          (%info-pane-refresh-if-visible vw))))))   ; dims become available once decoded (#36)
 
 (defun %recompute (vw keep-page)
   "Recompute spreads, position to the spread containing keep-page, and re-render."
