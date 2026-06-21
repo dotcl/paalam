@@ -1,10 +1,10 @@
-;;;; menu.lisp — paalam (#39 main.lisp 分割): メニューバー (#21/#32)
+;;;; menu.lisp — paalam (#39 main.lisp split): menu bar (#21/#32)
 (in-package :paalam)
 
-;;; メニューバー (#21)
-;;; Menu/MenuItem はキーボードフォーカスを保持する。クリック後フォーカスが
-;;; メニューに残ると、矢印/Space/Esc 等がメニューのナビに食われて viewer の
-;;; KeyDown まで届かない。そこでクリック後は必ずビューポートへフォーカスを戻す。
+;;; Menu bar (#21)
+;;; Menu/MenuItem hold keyboard focus. If focus stays on the menu after a click,
+;;; arrows/Space/Esc etc. get eaten by the menu navigation and never reach the
+;;; viewer's KeyDown. So after a click we always return focus to the viewport.
 (defun %focus-viewport (vw)
   (ignore-errors (dotnet:invoke (viewer-viewport vw) "Focus")))
 
@@ -18,7 +18,7 @@
 (defun %menu-add (parent item) (dotnet:invoke (dotnet:invoke parent "get_Items") "Add" item))
 
 (defun %key-label (k)
-  "Avalonia Key 名をメニュー表示用に整える ([ ] 0 等)。"
+  "Tidy up an Avalonia Key name for menu display ([ ] 0 etc.)."
   (cond ((null k) nil)
         ((or (string= k "D0") (string= k "NumPad0")) "0")
         ((string= k "OemOpenBrackets") "[")
@@ -29,24 +29,24 @@
         (t k)))
 
 (defun %menu-cmd (vw parent id)
-  "コマンド ID をメニュー項目として PARENT に追加 (ラベル + 代表キーを表示)。"
+  "Add command ID to PARENT as a menu item (showing label + representative key)."
   (let* ((c (%command id))
          (k (%key-label (%command-primary-key id)))
          (header (if k (format nil "~a (~a)" (command-label c) k) (command-label c))))
     (%menu-add parent (%menu-item vw header (lambda () (%run-command vw id))))))
 
-;;; メニュー内セパレータ (#32)。区切りは一意な cons (:sep) で表す (識別子衝突を避け、
-;;; 並べ替え/削除を eql 同一性で扱えるようにするため)。menu.lisp には (:SEP) で round-trip。
+;;; In-menu separator (#32). A separator is represented by a unique cons (:sep) (to avoid
+;;; identifier collisions and to handle reorder/delete via eql identity). Round-trips as (:SEP) in menu.lisp.
 (defun %make-menu-sep () (list :sep))
 (defun %menu-sep-p (x) (and (consp x) (eq (car x) :sep)))
 (defun %fresh-gkey (menu)
-  "MENU (グループ列; 各要素の first が gkey) に無い新しいグループキーワードを返す。"
+  "Return a new group keyword not present in MENU (a group list whose first of each element is the gkey)."
   (loop for i from 1
         for k = (intern (format nil "GROUP-~d" i) :keyword)
         unless (find k menu :key #'first) return k))
 (defun %menu-render-entries (ids)
-  "IDS (コマンド id とセパレータの混在) を描画用に整える: 実在コマンドとセパレータだけにし、
-先頭/末尾/連続したセパレータは落とす。返り値はコマンド id と :sep マーカーの並び。"
+  "Tidy IDS (a mix of command ids and separators) for rendering: keep only existing commands and
+separators, dropping leading/trailing/consecutive separators. Returns a sequence of command ids and :sep markers."
   (let ((out '()) (pending nil) (seen nil))
     (dolist (id ids)
       (cond ((%menu-sep-p id) (when seen (setf pending t)))
@@ -56,14 +56,14 @@
     (nreverse out)))
 
 (defun %add-menu-groups (vw container)
-  "CONTAINER (Menu / ContextMenu) に *command-menu* の順でグループ submenu を追加し、
-各グループに該当コマンドとセパレータを並べる (メニュー/コンテキスト共通; #26/#32)。"
+  "Add group submenus to CONTAINER (Menu / ContextMenu) in *command-menu* order, and
+arrange the relevant commands and separators in each group (shared by menu/context; #26/#32)."
   (let ((items (dotnet:invoke container "get_Items")))
     (dolist (g *command-menu*)
       (destructuring-bind (gkey title &rest ids) g
         (declare (ignore gkey))
         (let ((entries (%menu-render-entries ids)))
-          (when entries        ; 実コマンドが 1 つ以上ある時のみグループを出す
+          (when entries        ; only show the group when it has at least one real command
             (let ((sub (%menu-item vw title)))
               (dolist (e entries)
                 (if (eq e :sep)
@@ -72,16 +72,16 @@
               (dotnet:invoke items "Add" sub))))))))
 
 (defun %build-menu (vw win)
-  (declare (ignore win))   ; 開く系コマンドは (viewer-window vw) を owner に使う
+  (declare (ignore win))   ; open-type commands use (viewer-window vw) as owner
   (let ((menu (dotnet:new "Avalonia.Controls.Menu")))
     (%add-menu-groups vw menu)
     menu))
 
 (defun %build-context-menu (vw)
-  "ビューポート右クリック用。メニューと同じ *command-menu* 定義から作る (#26)。
-ジェスチャ発火直後 (右ドラッグでコマンド実行) は Opening を Cancel して開かない (#29)。
-ContextMenu は set_ContextMenu 時に自前で ContextRequested を購読するため、
-外側で ContextRequested を Handled にしても止まらない → Opening.Cancel で止める。"
+  "For viewport right-click. Built from the same *command-menu* definition as the menu (#26).
+Right after a gesture fires (right-drag runs a command), Cancel Opening so it does not open (#29).
+Because ContextMenu subscribes to ContextRequested itself on set_ContextMenu,
+marking ContextRequested Handled from outside does not stop it -> stop it with Opening.Cancel."
   (let ((cm (dotnet:new "Avalonia.Controls.ContextMenu")))
     (%add-menu-groups vw cm)
     (dotnet:add-event cm "Opening"
@@ -92,33 +92,33 @@ ContextMenu は set_ContextMenu 時に自前で ContextRequested を購読する
     cm))
 
 (defun %rebuild-menus (vw)
-  "*command-menu* からメニューバーとコンテキストメニューを作り直す (#26 編集の即時反映)。"
+  "Rebuild the menu bar and context menu from *command-menu* (#26 apply edits immediately)."
   (when (viewer-menu vw)
     (dotnet:invoke (dotnet:invoke (viewer-menu vw) "get_Items") "Clear")
     (%add-menu-groups vw (viewer-menu vw)))
   (ignore-errors
     (dotnet:invoke (viewer-viewport vw) "set_ContextMenu" (%build-context-menu vw))))
 
-;;; メニュー編集 (#26)。グループ内の並べ替え/削除/追加 → menu.lisp 永続化 + 即反映。
+;;; Menu editing (#26). Reorder/delete/add within a group -> persist to menu.lisp + apply immediately.
 (defun %shift-in-list (lst item dir)
-  "LST 内の ITEM を dir (-1 上 / +1 下) 方向に隣と入れ替えた新リスト。"
+  "New list with ITEM in LST swapped with its neighbor in the dir (-1 up / +1 down) direction."
   (let ((v (copy-list lst)) (pos (position item lst)))
     (when pos
       (let ((j (+ pos dir)))
         (when (and (>= j 0) (< j (length v))) (rotatef (nth pos v) (nth j v)))))
     v))
 (defun %insert-before (ids item before)
-  "IDS に ITEM を BEFORE の直前へ挿入した新リスト (BEFORE 不在なら末尾)。
-ITEM は呼び側で除去済み前提 (重複は作らない)。"
+  "New list with ITEM inserted into IDS just before BEFORE (at the end if BEFORE is absent).
+Assumes ITEM has already been removed by the caller (does not create duplicates)."
   (if (member before ids)
       (loop for x in ids
             when (eql x before) collect item
             collect x)
       (append ids (list item))))
-(defun %menu-norm (menu)   ; (gkey title id...) → (gkey title (id...)) 編集用コピー
+(defun %menu-norm (menu)   ; (gkey title id...) → (gkey title (id...)) copy for editing
   (mapcar (lambda (g) (list (first g) (second g) (copy-list (cddr g)))) menu))
-(defun %menu-denorm (menu) ; 逆変換
+(defun %menu-denorm (menu) ; inverse transform
   (mapcar (lambda (g) (list* (first g) (second g) (third g))) menu))
 
-;;; マウスジェスチャ編集 (#29)。記録ボックスでドラッグ→方向列、コマンドを選んで
-;;; 追加/更新。gestures.lisp に即保存 (*gestures* はジェスチャ時に直接参照される)。
+;;; Mouse gesture editing (#29). Drag in the record box -> direction sequence, then pick a command to
+;;; add/update. Saved immediately to gestures.lisp (*gestures* is referenced directly during a gesture).
