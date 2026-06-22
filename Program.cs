@@ -5,10 +5,13 @@
 
 using System;
 using System.IO;
+using System.Linq;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Avalonia.Input;
 using Avalonia.Platform.Storage;
+using MetadataExtractor;
+using MetadataExtractor.Formats.Exif;
 using DotCL;
 
 namespace Paalam;
@@ -54,6 +57,53 @@ public sealed class PdfDoc
         using var sk = PDFtoImage.Conversion.ToImage(_bytes, index, null, opts);
         using var data = sk.Encode(SkiaSharp.SKEncodedImageFormat.Png, 90);
         return data.ToArray();
+    }
+}
+
+// EXIF / image metadata extraction (#36 Phase 2). MetadataExtractor (pure managed,
+// cross-platform) reads from the page's raw bytes. Kept on the C# side so Lisp gets a
+// simple "label<TAB>value" line string (same pattern as PdfText.Outline).
+public static class Exif
+{
+    public static string Summary(byte[] bytes)
+    {
+        if (bytes == null || bytes.Length == 0) return "";
+        try
+        {
+            using var ms = new MemoryStream(bytes);
+            var dirs = ImageMetadataReader.ReadMetadata(ms);
+            var ifd0 = dirs.OfType<ExifIfd0Directory>().FirstOrDefault();
+            var sub  = dirs.OfType<ExifSubIfdDirectory>().FirstOrDefault();
+            var gps  = dirs.OfType<GpsDirectory>().FirstOrDefault();
+            var sb = new System.Text.StringBuilder();
+            void Add(string label, string? value)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                    sb.Append(label).Append('\t')
+                      .Append(value.Replace('\t', ' ').Replace('\n', ' ').Replace('\r', ' '))
+                      .Append('\n');
+            }
+            void AddTag(MetadataExtractor.Directory? dir, string label, int tag)
+            {
+                if (dir != null) Add(label, dir.GetDescription(tag));
+            }
+            AddTag(sub,  "Taken",        ExifDirectoryBase.TagDateTimeOriginal);
+            AddTag(ifd0, "Camera Make",  ExifDirectoryBase.TagMake);
+            AddTag(ifd0, "Camera Model", ExifDirectoryBase.TagModel);
+            AddTag(sub,  "Lens",         ExifDirectoryBase.TagLensModel);
+            AddTag(sub,  "Aperture",     ExifDirectoryBase.TagFNumber);
+            AddTag(sub,  "Exposure",     ExifDirectoryBase.TagExposureTime);
+            AddTag(sub,  "ISO",          ExifDirectoryBase.TagIsoEquivalent);
+            AddTag(sub,  "Focal Length", ExifDirectoryBase.TagFocalLength);
+            AddTag(ifd0, "Orientation",  ExifDirectoryBase.TagOrientation);
+            if (gps != null)
+            {
+                var loc = gps.GetGeoLocation();
+                if (loc != null) Add("GPS", loc.ToString());
+            }
+            return sb.ToString();
+        }
+        catch { return ""; }
     }
 }
 

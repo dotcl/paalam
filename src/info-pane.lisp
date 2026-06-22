@@ -25,6 +25,26 @@
     (directory-book "Folder")
     (t "—")))
 
+(defun %tsv-lines (s)
+  "Parse \"label<TAB>value\" newline-separated lines into a list of (label . value)."
+  (let ((out '()) (i 0) (n (length s)))
+    (loop while (< i n)
+          for nl = (or (position #\Newline s :start i) n)
+          do (let* ((line (subseq s i nl))
+                    (tab (position #\Tab line)))
+               (when tab (push (cons (subseq line 0 tab) (subseq line (1+ tab))) out)))
+             (setf i (1+ nl)))
+    (nreverse out)))
+
+(defun %page-exif (book index)
+  "EXIF/metadata of page INDEX as a list of (label . value). nil if none/unreadable (#36 Phase 2).
+Reads the page's raw bytes (originals for dir/zip/sharp/clip; PDF renders carry none)."
+  (ignore-errors
+    (multiple-value-bind (bytes ext) (book-page-bytes book index)
+      (declare (ignore ext))
+      (let ((s (dotnet:static "Paalam.Exif" "Summary" bytes)))
+        (and (stringp s) (plusp (length s)) (%tsv-lines s))))))
+
 (defun %page-dimensions (vw page)
   "\"W x H\" of PAGE from the loader-cached bitmap, or nil if not decoded yet."
   (let ((bmp (%page-bitmap vw page)))
@@ -129,6 +149,11 @@ left/right chooses which page's details to display."
               (funcall add (%info-header "Image"))
               (funcall add (%info-row "Dimensions" (or dims "loading…")))
               (funcall add (%info-row "Type" (%book-type-name book)))
+              ;; image EXIF / camera metadata when present (#36 Phase 2)
+              (let ((exif (%page-exif book sel)))
+                (when exif
+                  (funcall add (%info-header "Photo"))
+                  (dolist (kv exif) (funcall add (%info-row (car kv) (cdr kv))))))
               ;; document-level metadata (PDF title/author/...) when available (#36)
               (let ((doc (book-doc-info book)))
                 (when doc
