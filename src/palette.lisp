@@ -32,7 +32,7 @@ Empty returns all of *commands*. Within the same rank, keep the original order o
 (defgeneric book-search (book query)
   (:documentation "List of 0-based page indices containing QUERY (in order of occurrence)."))
 (defmethod book-search ((b pdf-book) query)
-  (%array->list (dotnet:invoke (pdfb-doc b) "SearchPages" query)))
+  (%pdf-search-pages (pdfb-bytes b) query))
 (defmethod book-search ((b t) query)
   ;; For non-pdf, substring match on page name (file name) (case-insensitive).
   (let ((q (string-downcase query)) (acc '()))
@@ -60,7 +60,7 @@ Empty returns all of *commands*. Within the same rank, keep the original order o
 
 (defgeneric book-outline (book)
   (:documentation "List of TOC entries (depth page title). nil if none."))
-(defmethod book-outline ((b pdf-book)) (%parse-outline (dotnet:invoke (pdfb-doc b) "Outline")))
+(defmethod book-outline ((b pdf-book)) (%parse-outline (%pdf-outline (pdfb-bytes b))))
 (defmethod book-outline ((b t)) nil)
 
 (defun %run-search (vw query)
@@ -109,7 +109,7 @@ pdf-book only (other formats with page-name search have no rectangles)."
              (canvas (ignore-errors (dotnet:invoke (viewer-left-img vw) "get_Parent"))))
         (when (and lay canvas)
           (destructuring-bind (xoff yoff w h) (cdr lay)
-            (let ((coords (%array->list (dotnet:invoke (pdfb-doc book) "MatchRects" page q)))
+            (let ((coords (%pdf-match-rects (pdfb-bytes book) page q))
                   (children (dotnet:invoke canvas "get_Children")))
               (loop for (rx ry rw rh) on coords by #'cddddr while rh do
                 (let ((rect (dotnet:new "Avalonia.Controls.Shapes.Rectangle")))

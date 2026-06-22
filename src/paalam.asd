@@ -8,6 +8,7 @@
   :depends-on ("dotnet-class" "dotcl-thread")
   :components ((:file "package")
                (:file "util")
+               (:file "pdf-ffi")
                (:file "book")
                (:file "settings")
                (:file "clip")

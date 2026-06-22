@@ -166,6 +166,10 @@ Higher is more detailed but uses more memory/time. For 4K, around 300-400 is a r
          (n   (dotnet:invoke doc "get_PageCount")))
     (make-instance 'pdf-book :doc doc :count n)))
 
+;;; Raw PDF bytes for the pdfium FFI (text/metadata/outline; see pdf-ffi.lisp). PdfDoc keeps
+;;; the bytes it read, so reuse them rather than re-reading the file.
+(defun pdfb-bytes (b) (dotnet:invoke (pdfb-doc b) "get_Bytes"))
+
 (defmethod book-page-count ((b pdf-book)) (pdfb-count b))
 (defmethod book-page-name  ((b pdf-book) i) (format nil "p~d" (1+ i)))
 (defmethod book-load-image ((b pdf-book) i) (dotnet:invoke (pdfb-doc b) "RenderPage" i *pdf-dpi*))
@@ -244,7 +248,7 @@ Higher is more detailed but uses more memory/time. For 4K, around 300-400 is a r
 
 (defmethod book-doc-info ((b pdf-book))
   (flet ((m (tag)
-           (let ((s (ignore-errors (dotnet:invoke (pdfb-doc b) "Meta" tag))))
+           (let ((s (ignore-errors (%pdf-meta (pdfb-bytes b) tag))))
              (and (stringp s) (plusp (length s)) s))))
     (loop for (label . tag) in '(("Title" . "Title") ("Author" . "Author")
                                  ("Subject" . "Subject") ("Producer" . "Producer"))
