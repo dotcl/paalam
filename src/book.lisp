@@ -91,7 +91,8 @@ Uses System.IO.Directory.EnumerateFiles so UNC/NAS paths and unicode work reliab
 
 (defmethod book-page-count ((b zip-book)) (length (zb-entries b)))
 (defmethod book-page-name  ((b zip-book) i) (file-namestring (aref (zb-names b) i)))
-(defmethod book-load-image ((b zip-book) i) (%load-zip-bitmap (aref (zb-entries b) i)))
+(defmethod book-load-image ((b zip-book) i)
+  (%load-zip-bitmap (aref (zb-entries b) i) (aref (zb-names b) i)))
 (defmethod book-close ((b zip-book))
   (ignore-errors (dotnet:invoke (zb-archive b) "Dispose"))
   (ignore-errors (dotnet:invoke (zb-stream b) "Dispose")))
@@ -139,12 +140,15 @@ Uses System.IO.Directory.EnumerateFiles so UNC/NAS paths and unicode work reliab
 (defmethod book-page-name  ((b sharp-book) i) (%basename (aref (sb2-names b) i)))
 (defmethod book-load-image ((b sharp-book) i)
   (let ((es (dotnet:invoke (aref (sb2-entries b) i) "OpenEntryStream"))
-        (ms (dotnet:new "System.IO.MemoryStream")))
+        (ms (dotnet:new "System.IO.MemoryStream"))
+        (heic (heic-ext-p (pathname-type (aref (sb2-names b) i)))))
     (unwind-protect
          (progn (dotnet:invoke es "CopyTo" ms)
-                (dotnet:invoke ms "set_Position" 0)
-                ;; #294 fixed (0.1.12): direct call can select Bitmap(Stream).
-                (dotnet:new "Avalonia.Media.Imaging.Bitmap" ms))
+                (if heic
+                    (%heic->bitmap (dotnet:invoke ms "ToArray"))
+                    (progn (dotnet:invoke ms "set_Position" 0)
+                           ;; #294 fixed (0.1.12): direct call can select Bitmap(Stream).
+                           (dotnet:new "Avalonia.Media.Imaging.Bitmap" ms))))
       (dotnet:invoke es "Dispose")
       (dotnet:invoke ms "Dispose"))))
 (defmethod book-close ((b sharp-book))

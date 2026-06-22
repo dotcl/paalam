@@ -261,6 +261,7 @@ internal static class Program
             _ = typeof(Avalonia.Themes.Fluent.FluentTheme).Assembly;
             _ = typeof(SharpCompress.Archives.ArchiveFactory).Assembly;
             _ = typeof(PDFtoImage.Conversion).Assembly;
+            _ = typeof(SkiaSharp.Heic.HeicDecoder).Assembly;   // #13: HEIC/HEIF decode from Lisp
 
             DotclHost.Initialize();
             // project-core build (dotcl #307): load the artifacts produced by fully compiling
