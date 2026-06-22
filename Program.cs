@@ -96,10 +96,11 @@ public static class Exif
             AddTag(sub,  "ISO",          ExifDirectoryBase.TagIsoEquivalent);
             AddTag(sub,  "Focal Length", ExifDirectoryBase.TagFocalLength);
             AddTag(ifd0, "Orientation",  ExifDirectoryBase.TagOrientation);
-            if (gps != null)
+            if (gps != null && gps.GetGeoLocation() is { } loc)
             {
-                var loc = gps.GetGeoLocation();
-                if (loc != null) Add("GPS", loc.ToString());
+                var ic = System.Globalization.CultureInfo.InvariantCulture;
+                // decimal "lat, lon" — readable and directly usable in a map URL (#36 Phase 3).
+                Add("GPS", loc.Latitude.ToString(ic) + ", " + loc.Longitude.ToString(ic));
             }
             return sb.ToString();
         }

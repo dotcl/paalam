@@ -63,22 +63,68 @@ Reads the page's raw bytes (originals for dir/zip/sharp/clip; PDF renders carry 
     (dotnet:invoke tb "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 8d0 0d0 2d0))
     tb))
 
-(defun %info-row (label value)
-  "A small gray LABEL above the (wrapping, white) VALUE. nil/blank value -> em dash."
-  (let ((panel (dotnet:new "Avalonia.Controls.StackPanel"))
-        (l (dotnet:new "Avalonia.Controls.TextBlock"))
-        (v (dotnet:new "Avalonia.Controls.TextBlock")))
+(defun %info-row (vw label value &key on-click on-double)
+  "A small gray LABEL above the (wrapping, white) VALUE. nil/blank value -> em dash.
+Single-click runs ON-CLICK if given, else copies VALUE to the clipboard (#36 Phase 3).
+Double-click runs ON-DOUBLE if given (e.g. rename)."
+  (let* ((panel (dotnet:new "Avalonia.Controls.StackPanel"))
+         (l (dotnet:new "Avalonia.Controls.TextBlock"))
+         (v (dotnet:new "Avalonia.Controls.TextBlock"))
+         (copyable (and (stringp value) (plusp (length value)))))
     (dotnet:invoke panel "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 1d0 0d0 3d0))
     (dotnet:invoke l "set_Text" label)
     (dotnet:invoke l "set_FontSize" 11d0)
     (dotnet:invoke l "set_Foreground" (dotnet:static "Avalonia.Media.Brushes" "Silver"))
-    (dotnet:invoke v "set_Text" (if (and (stringp value) (plusp (length value))) value "—"))
+    (dotnet:invoke v "set_Text" (if copyable value "—"))
     (dotnet:invoke v "set_Foreground" (dotnet:static "Avalonia.Media.Brushes" "White"))
     (dotnet:invoke v "set_TextWrapping" (dotnet:static "Avalonia.Media.TextWrapping" "Wrap"))
+    (when (or on-click on-double copyable)
+      (dotnet:add-event panel "PointerPressed"
+        (lambda (s e) (declare (ignore s))
+          (dotnet:invoke e "set_Handled" t)
+          (cond (on-click (funcall on-click))
+                (copyable (%copy-text vw value))))))
+    (when on-double
+      (dotnet:add-event panel "DoubleTapped"
+        (lambda (s e) (declare (ignore s e)) (funcall on-double))))
     (let ((c (dotnet:invoke panel "get_Children")))
       (dotnet:invoke c "Add" l)
       (dotnet:invoke c "Add" v))
     panel))
+
+(defun %copy-text (vw text)
+  "Copy TEXT to the window clipboard with a brief status note (#36 Phase 3)."
+  (ignore-errors
+    (let ((clip (dotnet:invoke (viewer-window vw) "get_Clipboard")))
+      (when clip (dotnet:invoke clip "SetTextAsync" text))))
+  (ignore-errors (%status vw (format nil "Copied: ~a" text))))
+
+(defun %open-map (coords)
+  "Open \"lat, lon\" COORDS in the default map service (#36 Phase 3)."
+  (%open-url (format nil "https://www.google.com/maps?q=~a" (remove #\Space coords))))
+
+(defun %rename-current-file (vw)
+  "Rename the selected page's file on disk (directory-book only; archives unsupported) (#36 Phase 3).
+Prompts for the new name, File.Move, then reopens to resync book/loader/thumbnails."
+  (let ((book (viewer-book vw)) (sel (viewer-info-page vw)))
+    (when (and (typep book 'directory-book) sel)
+      (let ((old (aref (db-paths book) sel)))
+        (%prompt-text (viewer-window vw) "Rename file" (%path-file old)
+          (lambda (newname)
+            (let ((new (dotnet:static "System.IO.Path" "Combine" (%path-dir old) newname)))
+              (cond
+                ((string= new old))
+                ((dotnet:static "System.IO.File" "Exists" new)
+                 (%status vw "Rename: a file with that name already exists"))
+                (t (handler-case
+                       (progn
+                         (dotnet:static "System.IO.File" "Move" old new)
+                         (when (string= (viewer-source vw) old) (setf (viewer-source vw) new))
+                         (%reopen vw)
+                         (%info-pane-refresh-if-visible vw)
+                         (%status vw (format nil "Renamed to ~a" newname)))
+                     (error (e) (log-err "rename" e)
+                       (%status vw "Rename failed (see log)"))))))))))))
 
 (defun %info-spread-pages (vw)
   "Pages of the current spread in screen order (left, right), honoring binding direction (#36)."
@@ -121,7 +167,7 @@ left/right chooses which page's details to display."
          (n (book-page-count book)))
     (dotnet:invoke children "Clear")
     (if (zerop n)
-        (dotnet:invoke children "Add" (%info-row "Status" "No book opened"))
+        (dotnet:invoke children "Add" (%info-row vw "Status" "No book opened"))
         (let* ((pages (%info-spread-pages vw))
                ;; keep the prior left/right pick if still in this spread, else default to the primary page.
                (sel (if (member (viewer-info-page vw) pages) (viewer-info-page vw) (%cur-page vw))))
@@ -139,26 +185,34 @@ left/right chooses which page's details to display."
                    (dims (%page-dimensions vw sel))
                    (add  (lambda (item) (dotnet:invoke children "Add" item))))
               (funcall add (%info-header "File"))
-              (funcall add (%info-row "Name" name))
-              (funcall add (%info-row "Page" (format nil "~d / ~d" (1+ sel) n)))
-              (funcall add (%info-row "Format" (or ext (%book-type-name book))))
-              (funcall add (%info-row "Source" (viewer-source vw)))
-              (when path (funcall add (%info-row "Path" path)))
-              (funcall add (%info-row "Size" (%human-size size)))
-              (when mtime (funcall add (%info-row "Modified" mtime)))
+              ;; Name: click=copy, double-click=rename (directory-book only; #36 Phase 3)
+              (funcall add (%info-row vw "Name" name
+                                      :on-double (when (typep book 'directory-book)
+                                                   (lambda () (%rename-current-file vw)))))
+              (funcall add (%info-row vw "Page" (format nil "~d / ~d" (1+ sel) n)))
+              (funcall add (%info-row vw "Format" (or ext (%book-type-name book))))
+              (funcall add (%info-row vw "Source" (viewer-source vw)))
+              (when path (funcall add (%info-row vw "Path" path)))
+              (funcall add (%info-row vw "Size" (%human-size size)))
+              (when mtime (funcall add (%info-row vw "Modified" mtime)))
               (funcall add (%info-header "Image"))
-              (funcall add (%info-row "Dimensions" (or dims "loading…")))
-              (funcall add (%info-row "Type" (%book-type-name book)))
+              (funcall add (%info-row vw "Dimensions" (or dims "loading…")))
+              (funcall add (%info-row vw "Type" (%book-type-name book)))
               ;; image EXIF / camera metadata when present (#36 Phase 2)
               (let ((exif (%page-exif book sel)))
                 (when exif
                   (funcall add (%info-header "Photo"))
-                  (dolist (kv exif) (funcall add (%info-row (car kv) (cdr kv))))))
+                  (dolist (kv exif)
+                    ;; GPS row: click opens the location in a map (#36 Phase 3)
+                    (if (string= (car kv) "GPS")
+                        (funcall add (%info-row vw "GPS" (cdr kv)
+                                                :on-click (let ((c (cdr kv))) (lambda () (%open-map c)))))
+                        (funcall add (%info-row vw (car kv) (cdr kv)))))))
               ;; document-level metadata (PDF title/author/...) when available (#36)
               (let ((doc (book-doc-info book)))
                 (when doc
                   (funcall add (%info-header "Document"))
-                  (dolist (kv doc) (funcall add (%info-row (car kv) (cdr kv))))))))))))
+                  (dolist (kv doc) (funcall add (%info-row vw (car kv) (cdr kv))))))))))))
 
 (defun %info-pane-refresh-if-visible (vw)
   (when (and (viewer-info-pane vw) (dotnet:invoke (viewer-info-pane vw) "get_IsVisible"))
