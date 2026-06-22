@@ -47,7 +47,10 @@
    (make-command :settings      "Settings…"        '()        (lambda (vw) (%open-settings vw)))
    (make-command :edit-menu     "Edit Menu…"       '()        '%open-menu-editor)
    (make-command :edit-gestures "Edit Mouse Gestures…" '()     '%open-gesture-editor)
-   (make-command :quit          "Quit"             '("Q")     '%quit)
+   ;; No default key: q-to-quit was a footgun (terminates the last window). Quit via the :q
+   ;; palette, the File menu, the OS close button, or Esc-in-view (%escape). q is now free for
+   ;; the clip pane's close (:clip-close), and the view's q does nothing (#38).
+   (make-command :quit          "Quit"             '()        '%quit)
    (make-command :next-spread   "Next Spread"      '("PageDown" "Next" "Space" "J") '%next-spread)
    (make-command :prev-spread   "Prev Spread"      '("PageUp" "Prior" "Back" "K")   '%prev-spread)
    (make-command :reading-fwd   "Read Forward"     '("Left")  '%reading-forward)
@@ -90,7 +93,11 @@
    (make-command :clip-up        "Clip: Cursor Up"   '("K" "Up")   (lambda (vw) (%clip-cursor-move vw (- (or (viewer-clip-count vw) 1)))) :clip)
    (make-command :clip-cut       "Clip: Cut"         '("X" "Delete") (lambda (vw) (%clip-cut vw (viewer-clip-count vw)))   :clip)
    (make-command :clip-paste     "Clip: Paste After" '("P")        (lambda (vw) (%clip-paste vw nil))                      :clip)
-   (make-command :clip-select    "Clip: Toggle Select" '("Space")  '%clip-toggle-select                                    :clip))
+   (make-command :clip-select    "Clip: Toggle Select" '("Space")  '%clip-toggle-select                                    :clip)
+   ;; q closes the clip pane. Safe because it resolves in the :clip context (Handled=t), so it
+   ;; never reaches the window — unlike :quit, which no longer binds Q (#38: q-to-close needs
+   ;; the view's q not to terminate; quit is now via the :q palette / menu / OS close button).
+   (make-command :clip-close     "Clip: Close Pane"  '("Q")        '%close-clip-pane                                       :clip))
   "All commands (in definition order). Menu/key-binding editing references this order.")
 
 (defun %command (id) (find id *commands* :key #'command-id))

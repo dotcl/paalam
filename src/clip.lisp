@@ -629,20 +629,29 @@ background and inserted while accumulating into %thumb-cache (no source re-fetch
                      (dotnet:make-delegate "System.Action`1[System.String]"
                                            (lambda (out) (%do-export vw out)))))))
 
+(defun %close-clip-pane (vw)
+  "Hide the clip pane and return focus to the view (#38). Used by the clip 'q' key and as the
+close half of the toggle. Esc inside the clip only parks focus on the view (pane stays open);
+this actually closes it."
+  (let ((pane (viewer-clip-pane vw)))
+    (when (dotnet:invoke pane "get_IsVisible")
+      (dotnet:invoke pane "set_IsVisible" nil)
+      (%focus-viewport vw))))
+
 (defun %toggle-clip-pane (vw)
   ;; #35 ④: P = toggle. On open, focus the clip so you can edit right away; on close, focus the view.
-  ;; To just peek at the view during clip editing, use Esc (to the view without closing). A dedicated close key
-  ;; and key customization are follow-ups (for now p=paste eats P, so we don't add a focus-based close).
+  ;; Inside the clip, Esc just peeks at the view (pane stays open); q (:clip-close) actually closes (#38).
   (let* ((pane (viewer-clip-pane vw))
          (vis  (dotnet:invoke pane "get_IsVisible")))
-    (dotnet:invoke pane "set_IsVisible" (not vis))
-    (cond ((not vis)                       ; about to show → rebuild and focus the clip
-           (%rebuild-clip-pane vw)
-           (%defer (lambda ()
-                     (ignore-errors (dotnet:invoke (viewer-clip-stack vw) "Focus"))
-                     (%clip-cursor-highlight vw))
-                   120))
-          (t (%focus-viewport vw)))))      ; about to hide → return to the view
+    (if vis
+        (%close-clip-pane vw)              ; open → close (hide + focus view)
+        (progn                             ; closed → open: show, rebuild, focus the clip
+          (dotnet:invoke pane "set_IsVisible" t)
+          (%rebuild-clip-pane vw)
+          (%defer (lambda ()
+                    (ignore-errors (dotnet:invoke (viewer-clip-stack vw) "Focus"))
+                    (%clip-cursor-highlight vw))
+                  120)))))
 
 (defun %clip-drop (vw path)
   "Add the path dropped onto the pane to the clip (image=parent folder + that page;
