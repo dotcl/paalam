@@ -9,23 +9,55 @@
 ;;;; this file covers only the text-layer / metadata / bookmark APIs (#23 / #36).
 (in-package :paalam)
 
-;;; --- library name ---------------------------------------------------------
-;;; dotnet:ffi does not do DllImport-style prefix/suffix probing, so name the shared
-;;; library per platform. The native lib ships next to the apphost (PDFtoImage's pdfium).
-(defparameter *pdfium-lib*
+;;; --- library resolution ---------------------------------------------------
+;;; Unlike DllImport, dotnet:ffi does NOT do the .NET native-library probing: no lib/.so/.dll
+;;; prefix/suffix guessing AND no runtimes/<rid>/native/ lookup. So we resolve the path
+;;; ourselves, arch-agnostically (any RID, not just the big three OSes):
+;;;   1. <base>/<libfile>                      — self-contained publish flattens it next to apphost
+;;;   2. <base>/runtimes/<rid>/native/<libfile> — framework-dependent / `dotnet run`
+;;;   3. <base>/<rid>/<libfile>                 — `dotnet build` RID-subdir output
+;;;   4. <libfile>                              — last resort: OS loader search path
+;;; <rid> comes from RuntimeInformation.RuntimeIdentifier, so a new arch needs no code change
+;;; as long as PDFtoImage ships that RID's pdfium.
+(defun %pdfium-libfile ()
   (cond ((dotnet:static "System.OperatingSystem" "IsWindows") "pdfium.dll")
         ((dotnet:static "System.OperatingSystem" "IsMacOS")   "libpdfium.dylib")
-        (t                                                    "libpdfium.so"))
-  "pdfium shared-library name for dotnet:ffi (resolved against the process load path).")
+        (t                                                    "libpdfium.so")))
+
+(defun %path-combine (&rest parts)
+  "System.IO.Path.Combine over PARTS (each a string)."
+  (reduce (lambda (a b) (dotnet:static "System.IO.Path" "Combine" a b)) parts))
+
+(defun %file-exists (p) (dotnet:static "System.IO.File" "Exists" p))
+
+(defun %resolve-pdfium ()
+  "Pick the first existing pdfium path among the candidates; fall back to the bare filename
+so the OS loader can still try its search path. Result is what dotnet:ffi gets as the lib."
+  (let* ((base (dotnet:static "System.AppContext" "BaseDirectory"))
+         (rid  (ignore-errors
+                 (dotnet:static "System.Runtime.InteropServices.RuntimeInformation"
+                                "get_RuntimeIdentifier")))
+         (lib  (%pdfium-libfile))
+         (cands (remove nil
+                  (list (%path-combine base lib)
+                        (when rid (%path-combine base "runtimes" rid "native" lib))
+                        (when rid (%path-combine base rid lib))))))
+    (or (find-if #'%file-exists cands) lib)))
+
+(defvar *pdfium-lib* nil
+  "Resolved pdfium library path for dotnet:ffi (filled lazily by %pdfium-lib).")
+
+(defun %pdfium-lib ()
+  (or *pdfium-lib* (setf *pdfium-lib* (%resolve-pdfium))))
 
 (defun %pf (fn &rest opts)
   "Call pdfium function FN. OPTS is (:args '(types...) :ret type value...)."
-  (apply #'dotnet:ffi *pdfium-lib* fn opts))
+  (apply #'dotnet:ffi (%pdfium-lib) fn opts))
 
 (defun %pf-bool (fn &rest opts)
   "Like %pf for a :ret :bool call. dotnet:ffi returns 0/1 (an integer); in CL 0 is still
 true, so coerce to a real Lisp boolean. OPTS is the usual (:args ... :ret :bool value...)."
-  (plusp (apply #'dotnet:ffi *pdfium-lib* fn opts)))
+  (plusp (apply #'dotnet:ffi (%pdfium-lib) fn opts)))
 
 ;;; --- pinning helpers ------------------------------------------------------
 ;;; FFI passes raw addresses, so a managed array handed to native code must be pinned
