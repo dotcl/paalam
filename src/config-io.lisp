@@ -86,6 +86,9 @@
                        (dolist (c *commands*)
                          (dolist (k (%effective-keys c)) (push (cons k (command-id c)) acc)))
                        (nreverse acc))))
+         ;; Which context's bindings the keybinds page is currently editing (#38). (car kctx)
+         ;; is the keyword; the page filters rows / command choices by it.
+         (kctx (list :global))
          (kb-stack (dotnet:new "Avalonia.Controls.StackPanel"))
          (content  (dotnet:new "Avalonia.Controls.ContentControl"))
          (win-p (dotnet:static "System.OperatingSystem" "IsWindows"))  ; file association is Windows only (#11)
@@ -96,13 +99,20 @@
          ;; kind (keybinds/file association), only aliases are seeded here (page names themselves are
          ;; looked up by do-search directly from pages).
          (sidx (list (list (cons "Shortcut" "Keybinds") (cons "Key binding" "Keybinds")
+                           (cons "Clip key" "Keybinds") (cons "Clip editing keys" "Keybinds")
                            (cons "Extension" "File Association") (cons "File association" "File Association")))))
     (labels
-        ((add-binding (k)
+        ((ctx-commands ()
+           "Commands belonging to the context currently being edited (#38)."
+           (remove (car kctx) *commands* :key #'command-context :test-not #'eq))
+         (in-ctx-p (id)
+           "Whether command ID belongs to the current edit context."
+           (let ((c (%command id))) (and c (eq (command-context c) (car kctx)))))
+         (add-binding (k)
            ;; Digits 1-9 are reserved for the count prefix, so binding them won't fire — reject them (#23). 0 is OK.
            (let ((d (%digit-key k)))
              (unless (or (and d (> d 0)) (assoc k (car kbox) :test #'string=))
-               (setf (car kbox) (cons (cons k (command-id (car *commands*))) (car kbox)))))
+               (setf (car kbox) (cons (cons k (command-id (first (ctx-commands)))) (car kbox)))))
            (refresh))
          (remove-binding (pair) (setf (car kbox) (remove pair (car kbox))) (refresh))
          (kb-row (pair)
@@ -114,14 +124,15 @@
              (dotnet:invoke klbl "set_Width" 90d0)
              (dotnet:invoke klbl "set_VerticalAlignment"
                             (dotnet:static "Avalonia.Layout.VerticalAlignment" "Center"))
-             (let ((items (dotnet:invoke cbox "get_Items")))
-               (dolist (c *commands*) (dotnet:invoke items "Add" (command-label c))))
-             (dotnet:invoke cbox "set_SelectedIndex"
-                            (or (position (cdr pair) *commands* :key #'command-id) 0))
-             (dotnet:add-event cbox "SelectionChanged"
-               (lambda (s e) (declare (ignore s e))
-                 (let ((i (dotnet:invoke cbox "get_SelectedIndex")))
-                   (when (>= i 0) (setf (cdr pair) (command-id (nth i *commands*)))))))
+             (let ((cmds (ctx-commands))
+                   (items (dotnet:invoke cbox "get_Items")))
+               (dolist (c cmds) (dotnet:invoke items "Add" (command-label c)))
+               (dotnet:invoke cbox "set_SelectedIndex"
+                              (or (position (cdr pair) cmds :key #'command-id) 0))
+               (dotnet:add-event cbox "SelectionChanged"
+                 (lambda (s e) (declare (ignore s e))
+                   (let ((i (dotnet:invoke cbox "get_SelectedIndex")))
+                     (when (>= i 0) (setf (cdr pair) (command-id (nth i cmds))))))))
              (dotnet:invoke bdel "set_Content" "×")
              (dotnet:invoke bdel "set_Margin" (dotnet:new "Avalonia.Thickness" 6d0 0d0 0d0 0d0))
              (dotnet:add-event bdel "Click"
@@ -137,10 +148,12 @@
                (dotnet:invoke rc "Add" cbox))
              row))
          (refresh ()
+           ;; Show only the current context's bindings (#38).
            (let ((ch (dotnet:invoke kb-stack "get_Children")))
              (dotnet:invoke ch "Clear")
              (dolist (pair (sort (copy-list (car kbox)) #'string< :key #'car))
-               (dotnet:invoke ch "Add" (kb-row pair)))))
+               (when (in-ctx-p (cdr pair))
+                 (dotnet:invoke ch "Add" (kb-row pair))))))
          (page (rows)
            "A settings page (StackPanel) stacking rows vertically."
            (let ((p (dotnet:new "Avalonia.Controls.StackPanel")))
@@ -268,12 +281,22 @@ left untouched until OK; #27)."
                             (list "Prefetch spread count" tb-pf (reset-text tb-pf :prefetch-ahead))
                             (list "Loader threads" tb-th (reset-text tb-th :loader-threads))
                             (list "Slideshow interval (sec)" tb-slide (reset-text tb-slide :slideshow-interval)))))
+             (ctx-combo (dotnet:new "Avalonia.Controls.ComboBox"))
              (panel-keys
                (progn
                  (dotnet:invoke scr "set_MaxHeight" 360d0)
                  (dotnet:invoke scr "set_Content" kb-stack)
+                 ;; context selector (#38): Global / Clip. Switching re-renders the rows.
+                 (let ((items (dotnet:invoke ctx-combo "get_Items")))
+                   (dolist (lbl '("Global" "Clip")) (dotnet:invoke items "Add" lbl)))
+                 (dotnet:invoke ctx-combo "set_SelectedIndex" 0)
+                 (dotnet:invoke ctx-combo "set_Margin" (dotnet:new "Avalonia.Thickness" 0d0 0d0 0d0 6d0))
+                 (dotnet:add-event ctx-combo "SelectionChanged"
+                   (lambda (s e) (declare (ignore s e))
+                     (setf (car kctx) (if (= (dotnet:invoke ctx-combo "get_SelectedIndex") 1) :clip :global))
+                     (refresh)))
                  (page (list (%s-header "Keybinds (key → command. one command per key, multiple allowed. digits 1-9 reserved for count)")
-                             scr addbtn reset-btn))))
+                             ctx-combo scr addbtn reset-btn))))
              (panel-assoc (assoc-page))
              (panel-io
                (let ((row (dotnet:new "Avalonia.Controls.StackPanel"))

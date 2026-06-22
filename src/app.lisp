@@ -123,42 +123,12 @@ Avalonia Window (built on the calling thread). Two Images meet at the center of 
         (dotnet:add-event pbtn "Click" (lambda (s e) (declare (ignore s e)) (%open-clip-as-book vw)))
         (dotnet:invoke scr "set_Content" stack)
         (setf (viewer-clip-scroll vw) scr)   ; for cursor-following scroll (#35 ④)
-        ;; vi keys for clip editing (#35 ④ Phase 1). Local handler active only while stack has focus.
-        ;; Handled=t keeps them from leaking to the window's %on-key (P=pane / D=direction, etc.) (avoids key conflicts).
+        ;; vi keys for clip editing (#35 ④ / #38). Active only while stack has focus. The
+        ;; dispatcher (%on-clip-key, command.lisp) consumes recognized keys (Handled=t) and lets
+        ;; the rest fall through to the window's %on-key, so global keys still work here.
         (dotnet:invoke stack "set_Focusable" t)
         (dotnet:add-event stack "KeyDown"
-          (lambda (s e) (declare (ignore s))
-            (let* ((kn   (dotnet:invoke (dotnet:invoke e "get_Key") "ToString"))
-                   (d    (%digit-key kn))
-                   (cnt  (viewer-clip-count vw))
-                   (pend (viewer-clip-pending vw)))
-              (flet ((h () (dotnet:invoke e "set_Handled" t))
-                     (clear () (setf (viewer-clip-count vw) nil (viewer-clip-pending vw) nil)))
-                (cond
-                  ;; accumulate count (1-9 starts / 0 while continuing)
-                  ((and d (or (> d 0) cnt))
-                   (h) (setf (viewer-clip-pending vw) nil
-                             (viewer-clip-count vw) (+ (* 10 (or cnt 0)) d)))
-                  ((member kn '("J" "Down") :test #'string=) (h) (%clip-cursor-move vw (or cnt 1)) (clear))
-                  ((member kn '("K" "Up")   :test #'string=) (h) (%clip-cursor-move vw (- (or cnt 1))) (clear))
-                  ;; dd = cut (double press). count is kept on the first press.
-                  ((string= kn "D") (h) (if (eq pend :d) (progn (%clip-cut vw cnt) (clear))
-                                           (setf (viewer-clip-pending vw) :d)))
-                  ;; yy = copy (double press)
-                  ((string= kn "Y") (h) (if (eq pend :y) (progn (%clip-yank vw cnt) (clear))
-                                           (setf (viewer-clip-pending vw) :y)))
-                  ;; x = cut (single / count / selection)
-                  ((member kn '("X" "Delete") :test #'string=) (h) (%clip-cut vw cnt) (clear))
-                  ;; p = paste after / P(Shift) = paste before (can transplant to another clip)
-                  ((string= kn "P") (h) (%clip-paste vw (%shift? e)) (clear))
-                  ;; Space = toggle selection
-                  ((string= kn "Space") (h) (%clip-toggle-select vw) (clear))
-                  ((string= kn "Escape")
-                   (h) (if (or (viewer-clip-selected vw) pend cnt)
-                           (progn (setf (viewer-clip-selected vw) nil) (clear) (%clip-cursor-highlight vw))
-                           (%focus-viewport vw)))
-                  ;; unknown keys: just reset state and pass through (keep globals like F11 alive)
-                  (t (clear)))))))
+          (lambda (s e) (declare (ignore s)) (%on-clip-key vw e)))
         (let ((pc (dotnet:invoke pane "get_Children"))
               (cbar (%build-clip-bar vw))           ; clip-selection bar (#35 ③)
               (actions (dotnet:new "Avalonia.Controls.StackPanel")))   ; [Preview][Export] (#35 ⑤)

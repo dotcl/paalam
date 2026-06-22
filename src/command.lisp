@@ -9,8 +9,12 @@
 ;;; shortcut notation is not maintained twice. The future key-binding edit
 ;;; UI (phase 2) edits this table and *keymap*.
 ;;; ------------------------------------------------------------------
-(defstruct (command (:constructor make-command (id label keys handler)))
-  id label keys handler)
+;;; context: which input context the command lives in. :global = the window (default),
+;;; :clip = the clip pane's vi editing (#38). The keymap is per-context so the same key
+;;; (e.g. P) can mean different things in different panes, and each context's bindings are
+;;; independently customizable in the settings editor.
+(defstruct (command (:constructor make-command (id label keys handler &optional (context :global))))
+  id label keys handler context)
 
 ;;; Command handlers (each takes a single vw).
 (defun %next-spread (vw) (incf (viewer-sindex vw)) (show-spread vw))
@@ -76,7 +80,17 @@
    (make-command :escape        "Back / Quit"      '("Escape") '%escape)
    ;; About is reachable from the palette and the Help menu (Win/Linux) / app menu (macOS),
    ;; but is intentionally kept out of *command-menu* (not part of the user-editable menu).
-   (make-command :about         "About paalam…"    '()        '%about))
+   (make-command :about         "About paalam…"    '()        '%about)
+   ;; --- clip-pane vi editing context (#38) ---
+   ;; Only single terminal keys are customizable here. The modal scaffolding (count, dd/yy
+   ;; double-press, Shift=paste-before, Esc) stays in %on-clip-key, not the keymap.
+   ;; count is read from viewer-clip-count by these wrappers (mirrors how global commands read
+   ;; viewer-pending-count). The dispatcher clears the count after running.
+   (make-command :clip-down      "Clip: Cursor Down" '("J" "Down") (lambda (vw) (%clip-cursor-move vw (or (viewer-clip-count vw) 1)))  :clip)
+   (make-command :clip-up        "Clip: Cursor Up"   '("K" "Up")   (lambda (vw) (%clip-cursor-move vw (- (or (viewer-clip-count vw) 1)))) :clip)
+   (make-command :clip-cut       "Clip: Cut"         '("X" "Delete") (lambda (vw) (%clip-cut vw (viewer-clip-count vw)))   :clip)
+   (make-command :clip-paste     "Clip: Paste After" '("P")        (lambda (vw) (%clip-paste vw nil))                      :clip)
+   (make-command :clip-select    "Clip: Toggle Select" '("Space")  '%clip-toggle-select                                    :clip))
   "All commands (in definition order). Menu/key-binding editing references this order.")
 
 (defun %command (id) (find id *commands* :key #'command-id))
@@ -104,9 +118,22 @@ Persisted to menu.lisp by user editing and swapped in (#26).")
 ;;; one use the default keys. *keymap* (key name -> id) is built from that. Persisted
 ;;; to keymap.lisp (edited in the settings window).
 (defparameter *keybinds* nil
-  "User overrides ((command-id . (key ...)) ...). Commands without an entry use default keys.")
-(defparameter *keymap* (make-hash-table :test 'equal)
-  "Key name (Avalonia Key.ToString) -> command id. Built from *keybinds* + defaults.")
+  "User overrides ((command-id . (key ...)) ...), across all contexts (id identifies the
+context via its command). Commands without an entry use default keys. Persisted flat to
+keymap.lisp, so old (global-only) files load unchanged (#38 keeps this format).")
+(defparameter *keymaps*
+  (list (cons :global (make-hash-table :test 'equal))
+        (cons :clip   (make-hash-table :test 'equal)))
+  "Per-context key maps: context -> (key name -> command id). Built from *keybinds* + defaults.")
+
+(defun %keymap-for (context)
+  "The key->id hash for CONTEXT (created on demand for an unknown context)."
+  (or (cdr (assoc context *keymaps*))
+      (cdr (car (push (cons context (make-hash-table :test 'equal)) *keymaps*)))))
+
+(defun %keymap-lookup (context key)
+  "Command id bound to KEY in CONTEXT, or nil."
+  (gethash key (%keymap-for context)))
 
 (defun %effective-keys (c)
   "Effective keys of command C (the override if any, otherwise the default)."
@@ -114,10 +141,12 @@ Persisted to menu.lisp by user editing and swapped in (#26).")
     (if o (cdr o) (command-keys c))))
 
 (defun rebuild-keymap ()
-  "Rebuild *keymap* from *keybinds* + defaults."
-  (clrhash *keymap*)
+  "Rebuild every context's key map from *keybinds* + defaults, routing each command into the
+map for its context."
+  (dolist (cell *keymaps*) (clrhash (cdr cell)))
   (dolist (c *commands*)
-    (dolist (k (%effective-keys c)) (setf (gethash k *keymap*) (command-id c)))))
+    (let ((map (%keymap-for (command-context c))))
+      (dolist (k (%effective-keys c)) (setf (gethash k map) (command-id c))))))
 (rebuild-keymap)
 
 (defun load-keybinds ()
@@ -133,10 +162,12 @@ Persisted to menu.lisp by user editing and swapped in (#26).")
 
 (defun %command-primary-key (id)
   "Representative key of ID (for menu display; prefers default-key order, else picks from keymap)."
-  (let ((c (%command id)))
-    (or (and c (find-if (lambda (k) (eq (gethash k *keymap*) id)) (command-keys c)))
-        (loop for k being the hash-keys of *keymap* using (hash-value v)
-              when (eq v id) return k))))
+  (let* ((c (%command id))
+         (map (and c (%keymap-for (command-context c)))))
+    (when map
+      (or (find-if (lambda (k) (eq (gethash k map) id)) (command-keys c))
+          (loop for k being the hash-keys of map using (hash-value v)
+                when (eq v id) return k)))))
 
 (defun %run-command (vw id)
   (let ((c (%command id)))
@@ -205,7 +236,43 @@ While the command bar is shown, do nothing here (the TextBox handles input; prev
       ;; Otherwise: normal command
       (t
        (setf (viewer-pending-g vw) nil)
-       (let ((id (gethash kn *keymap*)))
+       (let ((id (%keymap-lookup :global kn)))
          (when id (%run-command vw id))     ; count is read via pending-count during execution
          (setf (viewer-pending-count vw) nil))))))
+
+(defun %on-clip-key (vw e)
+  "Clip-pane KeyDown (#38). The modal scaffolding stays here; the terminal single keys come
+from the :clip keymap so they're customizable. count accumulates in viewer-clip-count; dd/yy
+are double-press prefixes in viewer-clip-pending; Shift+P pastes before. Mark Handled only when
+we actually consume the key, so unbound keys still fall through to the window's %on-key (keeping
+globals like F11 alive while the clip has focus)."
+  (let* ((kn   (dotnet:invoke (dotnet:invoke e "get_Key") "ToString"))
+         (d    (%digit-key kn))
+         (cnt  (viewer-clip-count vw))
+         (pend (viewer-clip-pending vw)))
+    (flet ((h () (dotnet:invoke e "set_Handled" t))
+           (clear () (setf (viewer-clip-count vw) nil (viewer-clip-pending vw) nil)))
+      (cond
+        ;; count accumulation (1-9 starts / 0 continues)
+        ((and d (or (> d 0) cnt))
+         (h) (setf (viewer-clip-pending vw) nil
+                   (viewer-clip-count vw) (+ (* 10 (or cnt 0)) d)))
+        ;; dd = cut (double press); keeps count from the first press.
+        ((string= kn "D") (h) (if (eq pend :d) (progn (%clip-cut vw cnt) (clear))
+                                  (setf (viewer-clip-pending vw) :d)))
+        ;; yy = copy (double press)
+        ((string= kn "Y") (h) (if (eq pend :y) (progn (%clip-yank vw cnt) (clear))
+                                  (setf (viewer-clip-pending vw) :y)))
+        ;; Shift+P = paste before (the plain P=paste-after lives in the keymap)
+        ((and (string= kn "P") (%shift? e)) (h) (%clip-paste vw t) (clear))
+        ;; Escape: drop selection/pending if any, else park focus back on the view
+        ((string= kn "Escape")
+         (h) (if (or (viewer-clip-selected vw) pend cnt)
+                 (progn (setf (viewer-clip-selected vw) nil) (clear) (%clip-cursor-highlight vw))
+                 (%focus-viewport vw)))
+        ;; terminal single keys: look up the :clip keymap
+        (t (let ((id (%keymap-lookup :clip kn)))
+             (cond (id (h) (%run-command vw id) (clear))
+                   ;; unbound: reset state, let it fall through to the window (no Handled).
+                   (t (clear)))))))))
 
