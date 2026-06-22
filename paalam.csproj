@@ -37,7 +37,8 @@
     <PackageReference Include="PDFtoImage" Version="5.2.1" />
     <!-- EXIF/メタ抽出 (ピュア C#, クロスプラット, ネイティブ依存なし) (#36 Phase 2)。 -->
     <PackageReference Include="MetadataExtractor" Version="2.9.3" />
-    <PackageReference Include="DotCL.Runtime" Version="0.1.12" />
+    <!-- e2e: 正式 0.1.13 (ローカルフィード dotcl-0.1.13)。nuget.org 公開後に nuget.config を消す。 -->
+    <PackageReference Include="DotCL.Runtime" Version="0.1.13" />
   </ItemGroup>
 
   <ItemGroup>
