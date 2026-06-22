@@ -26,23 +26,38 @@
     (dolist (x list (nreverse acc))
       (unless (gethash x seen) (setf (gethash x seen) t) (push x acc)))))
 
+;;; .NET-based path helpers. CL's pathname / directory functions mishandle Windows UNC
+;;; (\\nas\share\...) paths, so anything touching real filesystem paths goes through
+;;; System.IO.Path / System.IO.Directory, which handle UNC, mapped drives and unicode.
+(defun %path-ext (p)
+  "Lowercase extension without the dot of path P (System.IO.Path). \"\" if none."
+  (let ((e (dotnet:static "System.IO.Path" "GetExtension" p)))
+    (if (and e (plusp (length e)) (char= (char e 0) #\.))
+        (string-downcase (subseq e 1))
+        "")))
+(defun %path-file (p) (dotnet:static "System.IO.Path" "GetFileName" p))
+(defun %path-dir  (p) (dotnet:static "System.IO.Path" "GetDirectoryName" p))
+
 (defun %dir-image-files (dir)
-  "Full paths of image files directly under dir (+ subfolders if *recursive*), in natural order.
-** does not include the top level, so take the union of *.ext and **/*.ext."
-  (let ((dir (%ensure-trailing-slash dir))
-        (globs (if *recursive* '("*." "**/*.") '("*.")))
+  "Full paths of image files directly under DIR (+ subfolders if *recursive*), natural order.
+Uses System.IO.Directory.EnumerateFiles so UNC/NAS paths and unicode work reliably
+(CL `directory` mishandles UNC). Partial results survive a mid-enumeration access error."
+  (let ((opt (dotnet:static "System.IO.SearchOption"
+                            (if *recursive* "AllDirectories" "TopDirectoryOnly")))
         (out '()))
-    (dolist (ext *image-extensions*)
-      (dolist (g globs)
-        (dolist (p (directory (concatenate 'string dir g ext)))
-          (push (namestring p) out))))
+    (ignore-errors
+      (let* ((files (dotnet:static "System.IO.Directory" "EnumerateFiles" dir "*" opt))
+             (en (dotnet:invoke files "GetEnumerator")))
+        (loop while (dotnet:invoke en "MoveNext")
+              do (let ((p (dotnet:invoke en "get_Current")))
+                   (when (image-name-p p) (push p out))))))
     (sort (%dedup-strings out) #'natural<)))
 
 (defun make-directory-book (dir)
   (make-instance 'directory-book :paths (coerce (%dir-image-files dir) 'vector)))
 
 (defmethod book-page-count ((b directory-book)) (length (db-paths b)))
-(defmethod book-page-name  ((b directory-book) i) (file-namestring (aref (db-paths b) i)))
+(defmethod book-page-name  ((b directory-book) i) (%path-file (aref (db-paths b) i)))
 (defmethod book-load-image ((b directory-book) i) (%load-file-bitmap (aref (db-paths b) i)))
 (defmethod book-close      ((b directory-book)) nil)
 
@@ -164,7 +179,7 @@ Higher is more detailed but uses more memory/time. For 4K, around 300-400 is a r
 
 (defmethod book-page-bytes ((b directory-book) i)
   (let ((path (aref (db-paths b) i)))
-    (values (dotnet:static "System.IO.File" "ReadAllBytes" path) (%name-ext path))))
+    (values (dotnet:static "System.IO.File" "ReadAllBytes" path) (%path-ext path))))
 
 (defmethod book-page-bytes ((b zip-book) i)
   (let ((es (dotnet:invoke (aref (zb-entries b) i) "Open"))
@@ -248,20 +263,19 @@ Returns two values (book start-index)."
     ((dotnet:static "System.IO.Directory" "Exists" path)
      (values (make-directory-book path) 0))
     ((dotnet:static "System.IO.File" "Exists" path)
-     (let ((ext (pathname-type path)))
+     (let ((ext (%path-ext path)))   ; .NET-based: UNC/NAS-safe
        (cond
-         ((and ext (member (string-downcase ext) '("zip" "cbz") :test #'string=))
+         ((member ext '("zip" "cbz") :test #'string=)
           (values (make-zip-book path) 0))
-         ((and ext (member (string-downcase ext)
-                           '("rar" "cbr" "7z" "cb7" "tar" "cbt") :test #'string=))
+         ((member ext '("rar" "cbr" "7z" "cb7" "tar" "cbt") :test #'string=)
           (values (make-sharp-book path) 0))
-         ((and ext (string= (string-downcase ext) "pdf"))
+         ((string= ext "pdf")
           (values (make-pdf-book path) 0))
          ((image-ext-p ext)
-          (let* ((dir  (directory-namestring path))
+          (let* ((dir  (%path-dir path))
                  (book (make-directory-book dir))
-                 (start (or (position (file-namestring path) (db-paths book)
-                                      :key #'file-namestring :test #'string-equal)
+                 (start (or (position (%path-file path) (db-paths book)
+                                      :key #'%path-file :test #'string-equal)
                             0)))
             (values book start)))
          (t (error "Unsupported file format: ~a" path)))))
