@@ -181,6 +181,86 @@ Whitespace-only input is ignored. Esc/Cancel closes. Callback style (the ShowDia
   "Version shown in the About dialog. Derived from paalam.asd :version.")
 (defparameter *repository-url* "https://github.com/snmsts/paalam")
 
+(defun %system-slot (reader fallback)
+  "Read a slot of the paalam ASDF system (single source of truth = paalam.asd). Falls back to
+FALLBACK when the system isn't registered (distributed binary) or the slot is empty. A list
+value (ASDF allows multiple authors) collapses to its first element."
+  (or (ignore-errors
+        (let ((v (funcall reader (asdf:find-system "paalam"))))
+          (let ((v (if (consp v) (first v) v)))
+            (and (stringp v) (plusp (length v)) v))))
+      fallback))
+
+(defun %strip-email (s)
+  "\"Name <e@mail>\" -> \"Name\" (the About dialog wants just the display name)."
+  (let ((p (position #\< s)))
+    (string-trim " " (if p (subseq s 0 p) s))))
+
+(defparameter *author* (%strip-email (%system-slot 'asdf:system-author "SANO Masatoshi"))
+  "Copyright holder shown in the About dialog. From paalam.asd :author.")
+(defparameter *license* (%system-slot 'asdf:system-license "MIT")
+  "License shown in the About dialog. From paalam.asd :license.")
+(defparameter *copyright* (format nil "Copyright © 2026 ~a" *author*)
+  "Shown in the About dialog. Holder from paalam.asd :author; year matches LICENSE.")
+
+;;; Bundled libraries shown in the About dialog. Versions are NOT hand-listed: they are read
+;;; at runtime from the actual binaries via reflection, so the dialog can never drift from the
+;;; PackageReference versions in paalam.csproj. Entries are assembly simple names (= DLL names).
+(defparameter *dependencies*
+  '("DotCL.Runtime" "Avalonia" "SkiaSharp" "SharpCompress" "PDFtoImage" "MetadataExtractor")
+  "Assembly names of notable bundled libraries, displayed with their versions in the About dialog.")
+
+(defun %assembly-version (name)
+  "ProductVersion (= NuGet package version) of the loaded/loadable assembly NAME, or NIL if it
+can't be resolved. ProductVersion carries a trailing \"+<commit>\" build suffix, which we strip."
+  (ignore-errors
+    (let* ((asm (dotnet:static "System.Reflection.Assembly" "Load" name))
+           (loc (dotnet:invoke asm "get_Location")))
+      (when (and loc (plusp (length loc)))
+        (let* ((fvi (dotnet:static "System.Diagnostics.FileVersionInfo" "GetVersionInfo" loc))
+               (pv  (dotnet:invoke fvi "get_ProductVersion")))
+          (when (and pv (plusp (length pv)))
+            (subseq pv 0 (or (position #\+ pv) (length pv)))))))))
+
+(defun %about-deps ()
+  "List of (NAME . VERSION) for each dependency in *dependencies* that resolves."
+  (loop for name in *dependencies*
+        for v = (%assembly-version name)
+        when v collect (cons name v)))
+
+(defun %about-deps-list (deps)
+  "A striped, two-column (name left / version right) ListBox of bundled libraries.
+Selection/hover is disabled — it's a static credits list, not an interactive control.
+Odd rows get a faint translucent grey so the stripe reads on both light and dark themes."
+  (let* ((lb     (dotnet:new "Avalonia.Controls.ListBox"))
+         (items  (dotnet:invoke lb "get_Items"))
+         ;; Faint translucent grey for the odd-row stripe. Built via set_Color/set_Opacity
+         ;; (single-overload setters) rather than the SolidColorBrush(Color) ctor: dotcl
+         ;; mis-resolves that ctor to SolidColorBrush(uint) and dies on the Color->uint
+         ;; conversion ("Object must implement IConvertible").
+         (stripe (let ((b (dotnet:new "Avalonia.Media.SolidColorBrush")))
+                   (dotnet:invoke b "set_Color" (dotnet:static "Avalonia.Media.Color" "Parse" "#808080"))
+                   (dotnet:invoke b "set_Opacity" 0.09d0)
+                   b)))
+    (dotnet:invoke lb "set_MaxHeight" 200d0)
+    (loop for (name . ver) in deps
+          for i from 0
+          do (let* ((row  (dotnet:new "Avalonia.Controls.DockPanel"))
+                    (kids (dotnet:invoke row "get_Children"))
+                    (vt   (%about-text ver))           ; version pinned right
+                    (nt   (%about-text name))          ; name fills the rest (LastChildFill)
+                    (item (dotnet:new "Avalonia.Controls.ListBoxItem")))
+               (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" vt
+                              (dotnet:static "Avalonia.Controls.Dock" "Right"))
+               (dotnet:invoke vt "set_Margin" (dotnet:new "Avalonia.Thickness" 16d0 0d0 0d0 0d0))
+               (dotnet:invoke kids "Add" vt)
+               (dotnet:invoke kids "Add" nt)
+               (dotnet:invoke item "set_Content" row)
+               (dotnet:invoke item "set_IsHitTestVisible" nil)
+               (when (oddp i) (dotnet:invoke item "set_Background" stripe))
+               (dotnet:invoke items "Add" item)))
+    lb))
+
 (defun %macos-p () (dotnet:static "System.OperatingSystem" "IsMacOS"))
 
 (defun %open-url (url)
@@ -222,9 +302,17 @@ Owner is the given viewer's window, else the first open window, else centered on
               (dotnet:invoke c "Add" img)))))
       (dotnet:invoke c "Add" (%about-text "paalam" t 20))
       (dotnet:invoke c "Add" (%about-text (format nil "Version ~a" *version*)))
-      (dotnet:invoke c "Add" (%about-text "A NeeView-style image viewer built with dotcl + Avalonia."))
+      (dotnet:invoke c "Add" (%about-text *copyright*))
       (dotnet:invoke c "Add" (%about-text *repository-url*))
-      (dotnet:invoke c "Add" (%about-text "dotcl and Avalonia are MIT-licensed.")))
+      (dotnet:invoke c "Add" (%about-text (format nil "License  paalam: ~a / dotcl, Avalonia: MIT" *license*)))
+      ;; Bundled libraries + versions, read live from the binaries (see %assembly-version),
+      ;; as a striped two-column list.
+      (handler-case
+          (let ((deps (%about-deps)))
+            (when deps
+              (dotnet:invoke c "Add" (%about-text "Libraries" t 12))
+              (dotnet:invoke c "Add" (%about-deps-list deps))))
+        (error (e) (log-err "about-deps" e))))
     (dotnet:invoke btns "set_Orientation" (dotnet:static "Avalonia.Layout.Orientation" "Horizontal"))
     (dotnet:invoke btns "set_HorizontalAlignment" (dotnet:static "Avalonia.Layout.HorizontalAlignment" "Right"))
     (dotnet:invoke btns "set_Spacing" 8d0)

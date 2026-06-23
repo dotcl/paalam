@@ -4,6 +4,9 @@
 ;;;; package.lisp の eval-when で行う (concatenate-source-op の連結コンパイル対策)。
 (defsystem "paalam"
   :description "dotcl + Avalonia による NeeView 風画像ビューア"
+  :author "SANO Masatoshi <snmsts@gmail.com>"
+  :maintainer "SANO Masatoshi <snmsts@gmail.com>"
+  :license "MIT"
   :version "0.1"
   :depends-on ("dotnet-class" "dotcl-thread")
   :components ((:file "package")
