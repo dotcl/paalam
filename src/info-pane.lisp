@@ -114,7 +114,7 @@ Prompts for the new name, File.Move, then reopens to resync book/loader/thumbnai
             (let ((new (dotnet:static "System.IO.Path" "Combine" (%path-dir old) newname)))
               (cond
                 ((string= new old))
-                ((dotnet:static "System.IO.File" "Exists" new)
+                ((%file-exists new)
                  (%status vw "Rename: a file with that name already exists"))
                 (t (handler-case
                        (progn

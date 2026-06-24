@@ -26,6 +26,15 @@
       (format s "[~a] ~a~%" where e))))
 
 ;;; ------------------------------------------------------------------
+;;; Filesystem predicates — one home for File/Directory.Exists, which was
+;;; otherwise hand-written as dotnet:static all over the tree. nil-safe.
+;;; (System.IO is used for UNC/NAS reliability; CL probe-file mishandles UNC.)
+;;; ------------------------------------------------------------------
+
+(defun %file-exists (p) (and p (dotnet:static "System.IO.File" "Exists" p)))
+(defun %dir-exists  (p) (and p (dotnet:static "System.IO.Directory" "Exists" p)))
+
+;;; ------------------------------------------------------------------
 ;;; Filename utilities
 ;;; ------------------------------------------------------------------
 

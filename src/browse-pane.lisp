@@ -73,7 +73,7 @@ If TARGET is a kind that does not appear in the tree (e.g. a bare image), select
         (let ((child (%browse-find-child items a)))
           (unless child (return))
           (setf node child)
-          (when (dotnet:static "System.IO.Directory" "Exists" a)
+          (when (%dir-exists a)
             (%browse-populate node a)
             (dotnet:invoke node "set_IsExpanded" t))
           (setf items (dotnet:invoke node "get_Items"))))

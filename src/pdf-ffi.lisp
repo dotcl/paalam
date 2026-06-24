@@ -28,7 +28,6 @@
   "System.IO.Path.Combine over PARTS (each a string)."
   (reduce (lambda (a b) (dotnet:static "System.IO.Path" "Combine" a b)) parts))
 
-(defun %file-exists (p) (dotnet:static "System.IO.File" "Exists" p))
 
 (defun %resolve-pdfium ()
   "Pick the first existing pdfium path among the candidates; fall back to the bare filename

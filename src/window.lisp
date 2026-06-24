@@ -244,7 +244,7 @@ and dependency values never contain '}', so [^}]* safely captures just that inne
   (ignore-errors
     (let* ((base (dotnet:static "System.AppContext" "BaseDirectory"))
            (path (concatenate 'string base "paalam.deps.json")))
-      (when (dotnet:static "System.IO.File" "Exists" path)
+      (when (%file-exists path)
         (let* ((text  (dotnet:static "System.IO.File" "ReadAllText" path))
                (rx    "System.Text.RegularExpressions.Regex")
                (block (dotnet:static rx "Match" text
@@ -369,7 +369,7 @@ Owner is the given viewer's window, else the first open window, else centered on
       ;; app icon (the same app.ico used for the window / taskbar), shown at the top.
       (ignore-errors
         (let ((ico (concatenate 'string (dotnet:static "System.AppContext" "BaseDirectory") "app.ico")))
-          (when (dotnet:static "System.IO.File" "Exists" ico)
+          (when (%file-exists ico)
             (let ((img (dotnet:new "Avalonia.Controls.Image")))
               (dotnet:invoke img "set_Source" (dotnet:new "Avalonia.Media.Imaging.Bitmap" ico))
               (dotnet:invoke img "set_Width" 64d0)

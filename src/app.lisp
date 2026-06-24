@@ -81,7 +81,7 @@ Avalonia Window (built on the calling thread). Two Images meet at the center of 
             (let ((item (dotnet:invoke btree "get_SelectedItem")))
               (when item
                 (let ((path (dotnet:invoke item "get_Tag")))
-                  (when (and path (dotnet:static "System.IO.Directory" "Exists" path))
+                  (when (and path (%dir-exists path))
                     (%browse-populate item path)
                     (dotnet:invoke item "set_IsExpanded" t)))))))
         (dotnet:add-event btree "DoubleTapped"
@@ -191,7 +191,7 @@ Avalonia Window (built on the calling thread). Two Images meet at the center of 
       ;; window / taskbar icon (app.ico right under the output dir).
       (ignore-errors
         (let ((ico (concatenate 'string (dotnet:static "System.AppContext" "BaseDirectory") "app.ico")))
-          (when (dotnet:static "System.IO.File" "Exists" ico)
+          (when (%file-exists ico)
             (dotnet:invoke win "set_Icon" (dotnet:new "Avalonia.Controls.WindowIcon" ico)))))
       (dotnet:invoke win "set_Width"  1200d0)
       (dotnet:invoke win "set_Height" 800d0)

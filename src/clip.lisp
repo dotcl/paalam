@@ -70,7 +70,7 @@
   (let ((v (gethash (cons source page) *clip-cache*)))
     (when (consp v)
       (let ((p (concatenate 'string (%clip-cache-dir) (first v))))
-        (when (dotnet:static "System.IO.File" "Exists" p)
+        (when (%file-exists p)
           (values p (second v)))))))
 (defun %clip-cache-drop (item)
   "Delete the cache file and manifest entry for ITEM = (source . page) (when a clip item is deleted)."
@@ -78,14 +78,14 @@
     (when (consp v)
       (ignore-errors
         (let ((p (concatenate 'string (%clip-cache-dir) (first v))))
-          (when (dotnet:static "System.IO.File" "Exists" p)
+          (when (%file-exists p)
             (dotnet:static "System.IO.File" "Delete" p))))
       (remhash item *clip-cache*)
       (save-clip-cache))))
 (defun %clip-cache-clear ()
   "Discard the entire cache (on clip-clear)."
   (ignore-errors
-    (when (dotnet:static "System.IO.Directory" "Exists" (%clip-cache-dir))
+    (when (%dir-exists (%clip-cache-dir))
       (dotnet:static "System.IO.Directory" "Delete" (%clip-cache-dir) t)))
   (clrhash *clip-cache*)
   (save-clip-cache))
@@ -657,7 +657,7 @@ this actually closes it."
   "Add the path dropped onto the pane to the clip (image=parent folder + that page;
 folder/archive=all pages)."
   (handler-case
-      (if (and (dotnet:static "System.IO.File" "Exists" path)
+      (if (and (%file-exists path)
                (image-ext-p (pathname-type path)))
           ;; Image: parent folder (with drive) as source, its index within as page.
           ;; directory-namestring drops the drive, so use Path.GetDirectoryName.

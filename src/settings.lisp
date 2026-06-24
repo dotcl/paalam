@@ -92,7 +92,7 @@ steer to the Mac-native ~/Library/Application Support (dotnet/runtime #40353)."
   "If a settings file exists, load and apply it. If missing/corrupt, recreate with default values."
   (let ((file (%config-file)))
     (handler-case
-        (if (dotnet:static "System.IO.File" "Exists" file)
+        (if (%file-exists file)
             (with-open-file (s file :direction :input)
               (let* ((*read-eval* nil) (plist (read s nil nil)))
                 (when (consp plist)
@@ -115,7 +115,7 @@ steer to the Mac-native ~/Library/Application Support (dotnet/runtime #40353)."
   "If FILE exists, read and return one s-expr (*read-eval* nil). nil if missing/corrupt.
 Arbitrary-path capable (common base for settings import and state-file reads; #24/#34)."
   (handler-case
-      (when (dotnet:static "System.IO.File" "Exists" file)
+      (when (%file-exists file)
         (with-open-file (s file :direction :input)
           (let ((*read-eval* nil)) (read s nil nil))))
     (error (e) (log-err (format nil "read ~a" file) e) nil)))
@@ -139,7 +139,7 @@ Arbitrary-path capable (common base for settings import and state-file reads; #2
                                   :if-exists :supersede :if-does-not-exist :create)
                  (with-standard-io-syntax (prin1 data s) (terpri s)))
                (dotnet:static "System.IO.File" "Move" tmp file t))   ; overwrite=t
-          (when (dotnet:static "System.IO.File" "Exists" tmp)
+          (when (%file-exists tmp)
             (ignore-errors (dotnet:static "System.IO.File" "Delete" tmp)))))
     (error (e) (log-err (format nil "write ~a" file) e))))
 

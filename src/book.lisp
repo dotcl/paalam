@@ -268,9 +268,9 @@ Returns two values (book start-index)."
     ;; Unspecified (path = nil): open an empty book (window with no book opened).
     ((null path)
      (values (make-instance 'directory-book :paths #()) 0))
-    ((dotnet:static "System.IO.Directory" "Exists" path)
+    ((%dir-exists path)
      (values (make-directory-book path) 0))
-    ((dotnet:static "System.IO.File" "Exists" path)
+    ((%file-exists path)
      (let ((ext (%path-ext path)))   ; .NET-based: UNC/NAS-safe
        (cond
          ((member ext '("zip" "cbz") :test #'string=)
