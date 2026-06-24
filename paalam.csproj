@@ -1,10 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- クロスプラット: net10.0 (-windows 不要)。GUI は Avalonia。
-       dotcl/Avalonia とも NuGet 経由のみ。dotcl repo への参照は持たない (#281)。 -->
+  <!-- Cross-platform: net10.0 (no -windows needed). GUI is Avalonia.
+       Both dotcl and Avalonia come via NuGet only; no reference to the dotcl repo (#281). -->
   <PropertyGroup>
-    <!-- WinExe: GUI アプリなので Windows でコンソールを出さない
-         (他 OS では実質 Exe 扱い)。boot/例外はログファイルに出す。 -->
+    <!-- WinExe: a GUI app, so no console window on Windows
+         (effectively Exe on other OSes). boot/exceptions go to a log file. -->
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
@@ -12,29 +12,29 @@
     <RootNamespace>Paalam</RootNamespace>
     <AssemblyName>paalam</AssemblyName>
 
-    <!-- 配布バイナリのメタ情報 (Explorer のプロパティ等)。About ダイアログはこれを自分の DLL から
-         読む (version=ProductVersion / copyright=LegalCopyright / author=CompanyName)。
-         ライセンスだけは FileVersionInfo に欄が無いので paalam.asd :license から読む。
-         version は asd :version (0.1) と二重管理になるので更新時は両方そろえる。 -->
+    <!-- Distribution binary metadata (Explorer properties etc.). The About dialog reads these
+         from its own DLL (version=ProductVersion / copyright=LegalCopyright / author=CompanyName).
+         License alone has no FileVersionInfo field, so it is read from paalam.asd :license.
+         version is duplicated with asd :version (0.1), so keep both in sync when bumping. -->
     <Version>0.1</Version>
     <Product>paalam</Product>
     <Authors>SANO Masatoshi</Authors>
     <Company>SANO Masatoshi</Company>
     <Copyright>Copyright © 2026 SANO Masatoshi</Copyright>
 
-    <!-- PDFtoImage の platform 注釈 (CA1416) ノイズを抑制 (対応 OS 上でのみ実行)。 -->
+    <!-- Suppress PDFtoImage's platform-annotation (CA1416) noise (only runs on supported OSes). -->
     <NoWarn>$(NoWarn);CA1416</NoWarn>
-    <!-- experiments/ 配下 (spike の .cs / obj 等) を本体ビルドから除外。 -->
+    <!-- Exclude experiments/ (spike .cs / obj etc.) from the main build. -->
     <DefaultItemExcludes>$(DefaultItemExcludes);experiments\**</DefaultItemExcludes>
-    <!-- exe にアプリアイコンを埋め込み (関連付け DefaultIcon = exe,0 / タスクバー)。 -->
+    <!-- Embed the app icon in the exe (file-association DefaultIcon = exe,0 / taskbar). -->
     <ApplicationIcon>app.ico</ApplicationIcon>
 
-    <!-- 配布/起動 (#22, dotcl #307 project-core build):
-         build 時に DotCL.Runtime の targets が paalam.asd の ASDF system を
-         in-process で fasl に精コンパイルし、依存 fasl + dotcl.core + manifest
-         (dotcl-deps.txt) を出力 (bin/.../dotcl-fasl/) に置く。実行時は Program.cs が
-         LoadFromManifest 一発でロード → 起動時 compile-file 無し・ソース非同梱。
-         手書きの precompile.lisp / <Exec dotcl> は不要になった。 -->
+    <!-- Distribution/launch (#22, dotcl #307 project-core build):
+         at build time DotCL.Runtime's targets ahead-of-time compile paalam.asd's ASDF system
+         in-process to a fasl, and place the dependency fasls + dotcl.core + manifest
+         (dotcl-deps.txt) in the output (bin/.../dotcl-fasl/). At runtime Program.cs loads it all
+         in one LoadFromManifest call -> no compile-file at startup, no source shipped.
+         The hand-written precompile.lisp / <Exec dotcl> are no longer needed. -->
     <DotclProjectAsd>$(MSBuildProjectDirectory)/src/paalam.asd</DotclProjectAsd>
   </PropertyGroup>
 
@@ -42,21 +42,21 @@
     <PackageReference Include="Avalonia" Version="12.0.4" />
     <PackageReference Include="Avalonia.Desktop" Version="12.0.4" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.0.4" />
-    <!-- RAR/7z/tar 等の書庫読み込み (ピュア C#, ネイティブ依存なし)。 -->
+    <!-- Archive reading: RAR/7z/tar etc. (pure C#, no native deps). -->
     <PackageReference Include="SharpCompress" Version="1.0.0" />
-    <!-- PDF (PDFium 経由)。bblanchon.PDFium が win-arm64 ネイティブを含む。 -->
+    <!-- PDF (via PDFium). bblanchon.PDFium includes the win-arm64 native binary. -->
     <PackageReference Include="PDFtoImage" Version="5.2.1" />
-    <!-- EXIF/メタ抽出 (ピュア C#, クロスプラット, ネイティブ依存なし) (#36 Phase 2)。 -->
+    <!-- EXIF/metadata extraction (pure C#, cross-platform, no native deps) (#36 Phase 2). -->
     <PackageReference Include="MetadataExtractor" Version="2.9.3" />
-    <!-- HEIC/HEIF デコード (ピュア C# = Openize.Heic 経由, ネイティブ依存なし, MIT) (#13)。
-         SkiaSharp は PDFtoImage 経由の 3.119 を共有 (互換確認済み)。decode のみ。 -->
+    <!-- HEIC/HEIF decode (pure C# via Openize.Heic, no native deps, MIT) (#13).
+         SkiaSharp shares the 3.119 pulled in via PDFtoImage (compatibility verified). Decode only. -->
     <PackageReference Include="SkiaSharp.Heic" Version="0.0.1" />
-    <!-- e2e: 正式 0.1.13 (ローカルフィード dotcl-0.1.13)。nuget.org 公開後に nuget.config を消す。 -->
+    <!-- e2e: official 0.1.13 (local feed dotcl-0.1.13). Remove nuget.config once published to nuget.org. -->
     <PackageReference Include="DotCL.Runtime" Version="0.1.13" />
   </ItemGroup>
 
   <ItemGroup>
-    <!-- 実行時の Window.Icon 用に app.ico も出力へ。 -->
+    <!-- Also copy app.ico to the output for the runtime Window.Icon. -->
     <Content Include="app.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>

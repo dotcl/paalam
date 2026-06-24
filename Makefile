@@ -1,19 +1,19 @@
 # paalam — build / run / package
 #
-#   make build              デバッグビルド
-#   make run                dotnet run (引数は ARGS で渡す: make run ARGS=~/manga.zip)
-#   make publish            framework-dependent publish (RID 自動判定)
-#   make app                macOS: dist/paalam.app を作る (framework-dependent)
-#   make win-installer      Windows: dist/paalam-setup-<arch>.exe を作る (Inno Setup)
-#   make clean              bin/ obj/ dist/ を消す
+#   make build              debug build
+#   make run                dotnet run (pass args via ARGS: make run ARGS=~/manga.zip)
+#   make publish            framework-dependent publish (RID auto-detected)
+#   make app                macOS: build dist/paalam.app (framework-dependent)
+#   make win-installer      Windows: build dist/paalam-setup-<arch>.exe (Inno Setup)
+#   make clean              remove bin/ obj/ dist/
 #
-# RID はホストから自動判定。明示するなら: make publish RID=linux-x64
+# RID is auto-detected from the host. To set it explicitly: make publish RID=linux-x64
 
 CONFIG     ?= Release
 UNAME_S    := $(shell uname -s)
 UNAME_M    := $(shell uname -m)
 
-# osx-arm64 / osx-x64 / linux-x64 / linux-arm64 を uname から決める。
+# Pick osx-arm64 / osx-x64 / linux-x64 / linux-arm64 from uname.
 ifeq ($(UNAME_S),Darwin)
   ifeq ($(UNAME_M),arm64)
     RID ?= osx-arm64
@@ -38,27 +38,27 @@ build:
 run:
 	dotnet run -c $(CONFIG) -- $(ARGS)
 
-# publish。SELF_CONTAINED=true で .NET ランタイムを同梱する。
-# 既定は framework-dependent (軽い)。`make app` は self-contained を使う:
-# Finder ダブルクリック起動は DOTNET_ROOT 等のシェル環境変数を引き継がないため、
-# framework-dependent だと (特に Homebrew など非標準パスの dotnet では) ランタイムを
-# 発見できず Main 到達前に SIGABRT する。同梱すれば環境非依存で起動できる。
+# publish. SELF_CONTAINED=true bundles the .NET runtime.
+# Default is framework-dependent (lighter). `make app` uses self-contained:
+# launching via a Finder double-click does not inherit shell env vars like DOTNET_ROOT, so a
+# framework-dependent build (especially with dotnet in a non-standard path like Homebrew) can
+# fail to find the runtime and SIGABRT before reaching Main. Bundling makes startup env-independent.
 SELF_CONTAINED ?= false
 publish:
 	rm -rf $(PUBLISH_DIR)
 	dotnet publish -c $(CONFIG) -r $(RID) --self-contained $(SELF_CONTAINED) -o $(PUBLISH_DIR)
 
-# macOS の .app バンドル。ランタイム同梱 (self-contained) で publish して委譲。
+# macOS .app bundle. Publish self-contained (runtime bundled) and delegate.
 app:
 ifneq ($(UNAME_S),Darwin)
-	@echo "make app は macOS 専用です (現在: $(UNAME_S))。Linux の配布は別途 (packaging/linux/)。"
+	@echo "make app is macOS-only (current: $(UNAME_S)). Linux distribution is separate (packaging/linux/)."
 	@exit 1
 endif
 	$(MAKE) publish SELF_CONTAINED=true
 	PUBLISH_DIR="$(PUBLISH_DIR)" RID="$(RID)" packaging/macos/make-app.sh
 
-# Windows のインストーラ (Inno Setup)。Windows 専用。
-# self-contained publish → ISCC を packaging/windows/build.ps1 が両 RID 分まわす。
+# Windows installer (Inno Setup). Windows-only.
+# self-contained publish -> packaging/windows/build.ps1 runs ISCC for both RIDs.
 win-installer:
 	powershell -ExecutionPolicy Bypass -File packaging/windows/build.ps1 $(if $(ARCH),-Arch $(ARCH))
 

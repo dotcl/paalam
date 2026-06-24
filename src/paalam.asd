@@ -1,9 +1,9 @@
-;;;; paalam システム定義 (#22 配布の足場 / #39 ファイル分割)。
-;;;; :components はロード順 (前方のマクロ・特殊変数が後続のコンパイルに効く)。
-;;;; 実行時の外部依存は :depends-on。dotnet-class / dotcl-thread の require は
-;;;; package.lisp の eval-when で行う (concatenate-source-op の連結コンパイル対策)。
+;;;; paalam system definition (#22 distribution scaffolding / #39 file split).
+;;;; :components is load order (earlier macros / special variables affect later compilation).
+;;;; Runtime external deps are :depends-on. The require of dotnet-class / dotcl-thread is done
+;;;; in package.lisp's eval-when (works around concatenate-source-op's single-unit compile).
 (defsystem "paalam"
-  :description "dotcl + Avalonia による NeeView 風画像ビューア"
+  :description "A NeeView-style image viewer built with dotcl + Avalonia"
   :author "SANO Masatoshi <snmsts@gmail.com>"
   :maintainer "SANO Masatoshi <snmsts@gmail.com>"
   :license "MIT"

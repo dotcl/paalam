@@ -1,23 +1,23 @@
 ﻿<#
 .SYNOPSIS
-  paalam の Windows インストーラ (setup.exe) をビルドする。
+  Build the paalam Windows installer (setup.exe).
 
 .DESCRIPTION
-  各 RID を self-contained で publish し、Inno Setup (ISCC) で per-user
-  インストーラを生成する。出力は dist\paalam-setup-<arch>.exe。
+  Publish each RID self-contained and generate a per-user installer with Inno Setup (ISCC).
+  Output is dist\paalam-setup-<arch>.exe.
 
-  方針 (#11): per-user / 管理者不要 / win-x64 + win-arm64 両対応 /
-  ファイル関連付けはインストーラでは行わない (アプリ内ボタン任せ)。
+  Policy (#11): per-user / no admin required / win-x64 + win-arm64 both /
+  file association is not done by the installer (left to the in-app button).
 
 .PARAMETER Arch
-  ビルド対象。x64 / arm64 / both (既定: both)。
+  Build target. x64 / arm64 / both (default: both).
 
 .PARAMETER Config
-  ビルド構成 (既定: Release)。
+  Build configuration (default: Release).
 
 .EXAMPLE
-  pwsh -File packaging\windows\build.ps1                 # x64 + arm64 両方
-  pwsh -File packaging\windows\build.ps1 -Arch x64       # x64 のみ
+  pwsh -File packaging\windows\build.ps1                 # both x64 + arm64
+  pwsh -File packaging\windows\build.ps1 -Arch x64       # x64 only
 #>
 [CmdletBinding()]
 param(
@@ -28,11 +28,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# リポジトリルート (このスクリプトの 2 つ上) へ。
+# Go to the repo root (two levels above this script).
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $RepoRoot
 
-# ISCC.exe を探す (winget は per-user に入れることがある)。
+# Find ISCC.exe (winget may install it per-user).
 function Find-ISCC {
   $cmd = Get-Command iscc.exe -ErrorAction SilentlyContinue
   if ($cmd) { return $cmd.Source }
@@ -42,7 +42,7 @@ function Find-ISCC {
     "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
   )
   foreach ($c in $candidates) { if (Test-Path $c) { return $c } }
-  throw "ISCC.exe が見つかりません。Inno Setup 6 を入れてください: winget install --id JRSoftware.InnoSetup"
+  throw "ISCC.exe not found. Install Inno Setup 6: winget install --id JRSoftware.InnoSetup"
 }
 
 $ISCC = Find-ISCC
@@ -55,18 +55,18 @@ foreach ($a in $archs) {
   $publishDir = "dist\publish-$rid"
 
   Write-Host "`n==> publish (self-contained) $rid"
-  # self-contained: 一般ユーザに .NET 10 ランタイムが無くても起動できるよう同梱する。
+  # self-contained: bundle the runtime so it starts even without .NET 10 installed for the user.
   & dotnet publish -c $Config -r $rid --self-contained true -o $publishDir
-  if ($LASTEXITCODE -ne 0) { throw "dotnet publish 失敗 ($rid)" }
+  if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed ($rid)" }
 
   Write-Host "==> ISCC $a"
   & $ISCC "/DArch=$a" "packaging\windows\paalam.iss"
-  if ($LASTEXITCODE -ne 0) { throw "ISCC 失敗 ($a)" }
+  if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($a)" }
 
-  Write-Host "==> 完成: dist\paalam-setup-$a.exe"
+  Write-Host "==> done: dist\paalam-setup-$a.exe"
 }
 
-Write-Host "`n全アーキテクチャ完了。"
+Write-Host "`nAll architectures done."
 Get-ChildItem dist\paalam-setup-*.exe | ForEach-Object {
   "  {0}  ({1:N1} MB)" -f $_.Name, ($_.Length / 1MB)
 }

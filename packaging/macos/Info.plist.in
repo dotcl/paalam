@@ -28,8 +28,8 @@
       </array>
     </dict>
   </array>
-  <!-- cbz/cbr は macOS 標準の UTI が無いので、拡張子→型をインポート宣言する。
-       cbz は zip の、cbr は rar の従属型として登録。 -->
+  <!-- cbz/cbr have no standard macOS UTI, so declare imported types mapping extension -> type.
+       cbz is registered as a subtype of zip, cbr as a subtype of rar. -->
   <key>UTImportedTypeDeclarations</key>
   <array>
     <dict>
