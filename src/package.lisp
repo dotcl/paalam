@@ -25,22 +25,3 @@
   (require :dotnet-class)
   (require :dotcl-thread)
   (use-package :dotcl-thread))
-
-(defvar *debug* nil "Enabled via PAALAM_DEBUG. Writes prefetch details to debug.log.")
-(defun %dbg (fmt &rest args)
-  (when *debug*
-    (ignore-errors
-      (with-open-file (s (concatenate 'string (%config-dir) "debug.log")
-                         :direction :output :if-exists :append :if-does-not-exist :create)
-        (format s "~a~%" (apply #'format nil fmt args))))))
-
-(defun log-err (where e)
-  ;; A signed .app bundle (BaseDirectory) is not writable, so write under the home directory.
-  ;; This reliably preserves initialization exceptions (Avalonia, etc.) when launched from Finder.
-  (ignore-errors
-    (with-open-file (s (concatenate 'string
-                                    (dotnet:static "System.Environment" "GetFolderPath"
-                                                   (dotnet:static "System.Environment+SpecialFolder" "UserProfile"))
-                                    "/paalam-error.log")
-                       :direction :output :if-exists :append :if-does-not-exist :create)
-      (format s "[~a] ~a~%" where e))))
