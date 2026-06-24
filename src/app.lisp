@@ -1,6 +1,73 @@
 ;;;; app.lisp — paalam (#39 main.lisp split): build-main-window, App emit, run-paalam
 (in-package :paalam)
 
+;;; Side panes of the main window. Each builds its control(s), configures them, places them in
+;;; their Grid column, stores the handles on VW, and returns the top control for the caller to
+;;; add to the root Grid (the add order = Z-order, kept in build-main-window).
+
+(defun %build-folder-pane (vw)
+  "Leftmost folder-tree pane (#6 B, col 0), hidden by default. Select = expand/navigate,
+double-click = open."
+  (let ((btree (dotnet:new "Avalonia.Controls.TreeView")))
+    (dotnet:invoke btree "set_Width" 220d0)
+    (dotnet:invoke btree "set_IsVisible" nil)
+    (dotnet:invoke btree "set_Background" (dotnet:static "Avalonia.Media.Brushes" "DimGray"))
+    (dotnet:static "Avalonia.Controls.Grid" "SetColumn" btree 0)
+    (setf (viewer-browse-pane vw) btree (viewer-browse-tree vw) btree)
+    (dotnet:add-event btree "SelectionChanged"
+      (lambda (s e) (declare (ignore s e))
+        (let ((item (dotnet:invoke btree "get_SelectedItem")))
+          (when item
+            (let ((path (dotnet:invoke item "get_Tag")))
+              (when (and path (%dir-exists path))
+                (%browse-populate item path)
+                (dotnet:invoke item "set_IsExpanded" t)))))))
+    (dotnet:add-event btree "DoubleTapped"
+      (lambda (s e) (declare (ignore s e))
+        (let ((item (dotnet:invoke btree "get_SelectedItem")))
+          (when item
+            (let ((path (dotnet:invoke item "get_Tag")))
+              (when path (ignore-errors (open-path vw path)) (%focus-viewport vw)))))))
+    btree))
+
+(defun %build-thumb-pane (vw)
+  "Page-thumbnail shelf (#6 A, col 1), hidden by default."
+  (let ((tpane  (dotnet:new "Avalonia.Controls.ScrollViewer"))
+        (tstack (dotnet:new "Avalonia.Controls.StackPanel")))
+    (dotnet:invoke tpane "set_Width" 180d0)
+    (dotnet:invoke tpane "set_IsVisible" nil)
+    (dotnet:invoke tpane "set_Background" (dotnet:static "Avalonia.Media.Brushes" "DimGray"))
+    (dotnet:invoke tpane "set_Content" tstack)
+    (dotnet:static "Avalonia.Controls.Grid" "SetColumn" tpane 1)
+    (setf (viewer-thumb-pane vw) tpane (viewer-thumb-stack vw) tstack)
+    tpane))
+
+(defun %build-info-pane (vw)
+  "Rightmost file/EXIF info pane (#36, col 4), hidden by default."
+  (let ((ipane  (dotnet:new "Avalonia.Controls.ScrollViewer"))
+        (istack (dotnet:new "Avalonia.Controls.StackPanel")))
+    (dotnet:invoke ipane "set_Width" (coerce *info-pane-width* 'double-float))
+    (dotnet:invoke ipane "set_IsVisible" nil)
+    (dotnet:invoke ipane "set_Background" (dotnet:static "Avalonia.Media.Brushes" "DimGray"))
+    (dotnet:invoke istack "set_Margin" (dotnet:new "Avalonia.Thickness" 8d0))
+    (dotnet:invoke ipane "set_Content" istack)
+    (dotnet:static "Avalonia.Controls.Grid" "SetColumn" ipane 4)
+    (setf (viewer-info-pane vw) ipane (viewer-info-stack vw) istack)
+    ipane))
+
+(defun %build-dnd-overlay (vw)
+  "DnD drop-eligibility highlight frame (#20): a thick border over the whole grid (cols 0-4),
+transparent inside, hit-testing disabled so it never blocks the drop."
+  (let ((overlay (dotnet:new "Avalonia.Controls.Border")))
+    (dotnet:invoke overlay "set_BorderBrush" (dotnet:static "Avalonia.Media.Brushes" "DeepSkyBlue"))
+    (dotnet:invoke overlay "set_BorderThickness" (dotnet:new "Avalonia.Thickness" 4d0))
+    (dotnet:invoke overlay "set_IsHitTestVisible" nil)
+    (dotnet:invoke overlay "set_IsVisible" nil)
+    (dotnet:static "Avalonia.Controls.Grid" "SetColumn" overlay 0)
+    (dotnet:static "Avalonia.Controls.Grid" "SetColumnSpan" overlay 5)
+    (setf (viewer-dnd-overlay vw) overlay)
+    overlay))
+
 (defun build-main-window (&optional (target *target-path*))
   "Open the book at TARGET (default *target-path*) and return a spread-capable
 Avalonia Window (built on the calling thread). Two Images meet at the center of a
@@ -52,17 +119,15 @@ Avalonia Window (built on the calling thread). Two Images meet at the center of 
                         (lambda (s e) (declare (ignore s e)) (%apply-fit vw)))
       ;; root: [viewport* | material pane (Auto, hidden by default)] (#18 Phase 2)
       (let* ((root  (dotnet:new "Avalonia.Controls.Grid"))
-             (btree (dotnet:new "Avalonia.Controls.TreeView"))      ; folder tree (#6 B)
-             (tpane (dotnet:new "Avalonia.Controls.ScrollViewer"))  ; page-thumbnail shelf (#6 A)
-             (tstack (dotnet:new "Avalonia.Controls.StackPanel"))
+             (btree (%build-folder-pane vw))   ; folder tree (#6 B, col 0)
+             (tpane (%build-thumb-pane vw))     ; page-thumbnail shelf (#6 A, col 1)
              (pane  (dotnet:new "Avalonia.Controls.DockPanel"))
              (ebtn  (dotnet:new "Avalonia.Controls.Button"))
              (pbtn  (dotnet:new "Avalonia.Controls.Button"))   ; preview (open clip as a book; #35 ⑤)
              (scr   (dotnet:new "Avalonia.Controls.ScrollViewer"))
              (stack (dotnet:new "Avalonia.Controls.StackPanel"))
-             (ipane (dotnet:new "Avalonia.Controls.ScrollViewer"))   ; info pane (#36)
-             (istack (dotnet:new "Avalonia.Controls.StackPanel"))
-             (overlay (dotnet:new "Avalonia.Controls.Border")))   ; DnD drop-eligibility highlight frame (#20)
+             (ipane (%build-info-pane vw))      ; info pane (#36, col 4)
+             (overlay (%build-dnd-overlay vw)))   ; DnD highlight frame (#20, spans cols 0-4)
         ;; 5 columns: [folder(Auto) | thumbs(Auto) | viewport(star) | material(Auto) | info(Auto)]. Auto collapses when hidden.
         (let ((cols (dotnet:invoke root "get_ColumnDefinitions")))
           (dolist (w (list "Auto" "Auto" "*" "Auto" "Auto"))
@@ -70,53 +135,11 @@ Avalonia Window (built on the calling thread). Two Images meet at the center of 
               (unless (string= w "*")
                 (dotnet:invoke c "set_Width" (dotnet:static "Avalonia.Controls.GridLength" "Auto")))
               (dotnet:invoke cols "Add" c))))
-        ;; folder-tree pane (leftmost, hidden by default). select = expand/navigate, double-click = open.
-        (dotnet:invoke btree "set_Width" 220d0)
-        (dotnet:invoke btree "set_IsVisible" nil)
-        (dotnet:invoke btree "set_Background" (dotnet:static "Avalonia.Media.Brushes" "DimGray"))
-        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" btree 0)
-        (setf (viewer-browse-pane vw) btree (viewer-browse-tree vw) btree)
-        (dotnet:add-event btree "SelectionChanged"
-          (lambda (s e) (declare (ignore s e))
-            (let ((item (dotnet:invoke btree "get_SelectedItem")))
-              (when item
-                (let ((path (dotnet:invoke item "get_Tag")))
-                  (when (and path (%dir-exists path))
-                    (%browse-populate item path)
-                    (dotnet:invoke item "set_IsExpanded" t)))))))
-        (dotnet:add-event btree "DoubleTapped"
-          (lambda (s e) (declare (ignore s e))
-            (let ((item (dotnet:invoke btree "get_SelectedItem")))
-              (when item
-                (let ((path (dotnet:invoke item "get_Tag")))
-                  (when path (ignore-errors (open-path vw path)) (%focus-viewport vw)))))))
-        ;; thumbnail pane (hidden by default)
-        (dotnet:invoke tpane "set_Width" 180d0)
-        (dotnet:invoke tpane "set_IsVisible" nil)
-        (dotnet:invoke tpane "set_Background" (dotnet:static "Avalonia.Media.Brushes" "DimGray"))
-        (dotnet:invoke tpane "set_Content" tstack)
-        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" tpane 1)
-        (setf (viewer-thumb-pane vw) tpane (viewer-thumb-stack vw) tstack)
         (dotnet:static "Avalonia.Controls.Grid" "SetColumn" vport 2)
         (dotnet:static "Avalonia.Controls.Grid" "SetColumn" pane  3)
         (dotnet:invoke pane "set_Width" 220d0)
         (dotnet:invoke pane "set_IsVisible" nil)
         (dotnet:invoke pane "set_Background" (dotnet:static "Avalonia.Media.Brushes" "DimGray"))
-        ;; info pane (rightmost, hidden by default) (#36)
-        (dotnet:invoke ipane "set_Width" (coerce *info-pane-width* 'double-float))
-        (dotnet:invoke ipane "set_IsVisible" nil)
-        (dotnet:invoke ipane "set_Background" (dotnet:static "Avalonia.Media.Brushes" "DimGray"))
-        (dotnet:invoke istack "set_Margin" (dotnet:new "Avalonia.Thickness" 8d0))
-        (dotnet:invoke ipane "set_Content" istack)
-        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" ipane 4)
-        (setf (viewer-info-pane vw) ipane (viewer-info-stack vw) istack)
-        ;; DnD highlight frame: a thick border covering the whole area (transparent inside). Disable hit-testing so it does not block the drop.
-        (dotnet:invoke overlay "set_BorderBrush" (dotnet:static "Avalonia.Media.Brushes" "DeepSkyBlue"))
-        (dotnet:invoke overlay "set_BorderThickness" (dotnet:new "Avalonia.Thickness" 4d0))
-        (dotnet:invoke overlay "set_IsHitTestVisible" nil)
-        (dotnet:invoke overlay "set_IsVisible" nil)
-        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" overlay 0)
-        (dotnet:static "Avalonia.Controls.Grid" "SetColumnSpan" overlay 5)
         (dotnet:invoke ebtn "set_Content" "Export")
         (dotnet:add-event ebtn "Click" (lambda (s e) (declare (ignore s e)) (%pane-export vw)))
         (dotnet:invoke pbtn "set_Content" "Preview")
@@ -159,8 +182,7 @@ Avalonia Window (built on the calling thread). Two Images meet at the center of 
             (dotnet:static "Avalonia.Controls.Grid" "SetColumn" st 0)
             (dotnet:static "Avalonia.Controls.Grid" "SetColumnSpan" st 5)
             (dotnet:invoke rc "Add" st)))
-        (setf (viewer-clip-pane vw) pane (viewer-clip-stack vw) stack
-              (viewer-dnd-overlay vw) overlay)
+        (setf (viewer-clip-pane vw) pane (viewer-clip-stack vw) stack)
         ;; add material via DnD onto the pane (#18 Phase 2b). Emphasize the pane background during DnD (#20).
         (%dnd-enable-clip pane
                           (lambda (p) (%clip-drop vw p))
