@@ -11,6 +11,17 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Paalam</RootNamespace>
     <AssemblyName>paalam</AssemblyName>
+
+    <!-- 配布バイナリのメタ情報 (Explorer のプロパティ等)。About ダイアログはこれを自分の DLL から
+         読む (version=ProductVersion / copyright=LegalCopyright / author=CompanyName)。
+         ライセンスだけは FileVersionInfo に欄が無いので paalam.asd :license から読む。
+         version は asd :version (0.1) と二重管理になるので更新時は両方そろえる。 -->
+    <Version>0.1</Version>
+    <Product>paalam</Product>
+    <Authors>SANO Masatoshi</Authors>
+    <Company>SANO Masatoshi</Company>
+    <Copyright>Copyright © 2026 SANO Masatoshi</Copyright>
+
     <!-- PDFtoImage の platform 注釈 (CA1416) ノイズを抑制 (対応 OS 上でのみ実行)。 -->
     <NoWarn>$(NoWarn);CA1416</NoWarn>
     <!-- experiments/ 配下 (spike の .cs / obj 等) を本体ビルドから除外。 -->

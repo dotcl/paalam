@@ -172,93 +172,170 @@ Whitespace-only input is ignored. Esc/Cancel closes. Callback style (the ShowDia
 
 ;;; About dialog. Shown from Help -> About (Win/Linux in-window menu) or the native
 ;;; application menu (macOS, see %setup-mac-app-menu). Also reachable from the command palette.
-(defparameter *version*
-  ;; Single source of truth = paalam.asd :version. Read it at load/compile time so the
-  ;; string is baked into the .fasl; if the system isn't registered at runtime (distributed
-  ;; binary), fall back to the literal captured here. No more hand-syncing a literal.
-  (or (ignore-errors (asdf:component-version (asdf:find-system "paalam")))
-      "0.1")
-  "Version shown in the About dialog. Derived from paalam.asd :version.")
 (defparameter *repository-url* "https://github.com/snmsts/paalam")
 
 (defun %system-slot (reader fallback)
-  "Read a slot of the paalam ASDF system (single source of truth = paalam.asd). Falls back to
-FALLBACK when the system isn't registered (distributed binary) or the slot is empty. A list
-value (ASDF allows multiple authors) collapses to its first element."
+  "Read a slot of the paalam ASDF system. Falls back to FALLBACK when the system isn't registered
+(distributed binary) or the slot is empty. A list value collapses to its first element."
   (or (ignore-errors
         (let ((v (funcall reader (asdf:find-system "paalam"))))
           (let ((v (if (consp v) (first v) v)))
             (and (stringp v) (plusp (length v)) v))))
       fallback))
 
-(defun %strip-email (s)
-  "\"Name <e@mail>\" -> \"Name\" (the About dialog wants just the display name)."
-  (let ((p (position #\< s)))
-    (string-trim " " (if p (subseq s 0 p) s))))
-
-(defparameter *author* (%strip-email (%system-slot 'asdf:system-author "SANO Masatoshi"))
-  "Copyright holder shown in the About dialog. From paalam.asd :author.")
-(defparameter *license* (%system-slot 'asdf:system-license "MIT")
-  "License shown in the About dialog. From paalam.asd :license.")
-(defparameter *copyright* (format nil "Copyright © 2026 ~a" *author*)
-  "Shown in the About dialog. Holder from paalam.asd :author; year matches LICENSE.")
-
-;;; Bundled libraries shown in the About dialog. Versions are NOT hand-listed: they are read
-;;; at runtime from the actual binaries via reflection, so the dialog can never drift from the
-;;; PackageReference versions in paalam.csproj. Entries are assembly simple names (= DLL names).
+;;; Fallback library list for the About dialog. The primary source is paalam.deps.json (see
+;;; %deps-from-json), which tracks the csproj automatically; this curated list is only used when
+;;; that file can't be read. Entries are assembly simple names (= DLL names) whose versions are
+;;; read from the actual binaries via reflection (%assembly-version).
 (defparameter *dependencies*
   '("DotCL.Runtime" "Avalonia" "SkiaSharp" "SharpCompress" "PDFtoImage" "MetadataExtractor")
-  "Assembly names of notable bundled libraries, displayed with their versions in the About dialog.")
+  "Fallback assembly names shown (with reflected versions) when paalam.deps.json is unavailable.")
 
-(defun %assembly-version (name)
-  "ProductVersion (= NuGet package version) of the loaded/loadable assembly NAME, or NIL if it
-can't be resolved. ProductVersion carries a trailing \"+<commit>\" build suffix, which we strip."
+(defun %assembly-fvi (name)
+  "FileVersionInfo of assembly NAME (loaded by simple name), or NIL if it can't be resolved."
   (ignore-errors
     (let* ((asm (dotnet:static "System.Reflection.Assembly" "Load" name))
            (loc (dotnet:invoke asm "get_Location")))
       (when (and loc (plusp (length loc)))
-        (let* ((fvi (dotnet:static "System.Diagnostics.FileVersionInfo" "GetVersionInfo" loc))
-               (pv  (dotnet:invoke fvi "get_ProductVersion")))
-          (when (and pv (plusp (length pv)))
-            (subseq pv 0 (or (position #\+ pv) (length pv)))))))))
+        (dotnet:static "System.Diagnostics.FileVersionInfo" "GetVersionInfo" loc)))))
+
+(defun %assembly-version (name)
+  "ProductVersion (= NuGet package version) of assembly NAME, or NIL. ProductVersion carries a
+trailing \"+<commit>\" build suffix, which we strip."
+  (let ((fvi (%assembly-fvi name)))
+    (when fvi
+      (let ((pv (ignore-errors (dotnet:invoke fvi "get_ProductVersion"))))
+        (when (and pv (plusp (length pv)))
+          (subseq pv 0 (or (position #\+ pv) (length pv))))))))
+
+(defun %assembly-copyright (name)
+  "LegalCopyright of assembly NAME (e.g. \"Copyright © 2026 …\"), or NIL if empty."
+  (let ((fvi (%assembly-fvi name)))
+    (when fvi
+      (let ((cr (let ((c (ignore-errors (dotnet:invoke fvi "get_LegalCopyright"))))
+                  (and c (string-trim " " c)))))
+        (when (and cr (plusp (length cr))) cr)))))
+
+;;; paalam's own metadata, read from its binary (csproj <Version>/<Copyright>) just like the
+;;; dependency rows — except the license, which has no FileVersionInfo field and stays in the asd
+;;; (:license). Fallbacks cover an unstamped/dev binary.
+(defparameter *version*
+  (or (%assembly-version "paalam")
+      (ignore-errors (asdf:component-version (asdf:find-system "paalam")))
+      "0.1")
+  "Version shown in the About dialog. From the paalam assembly (csproj <Version>); asd :version is the fallback.")
+(defparameter *copyright*
+  (or (%assembly-copyright "paalam") "Copyright © 2026 SANO Masatoshi")
+  "Copyright shown in the About dialog. From the paalam assembly LegalCopyright (csproj <Copyright>).")
+(defparameter *license* (%system-slot 'asdf:system-license "MIT")
+  "paalam's own license, shown in the About dialog. From paalam.asd :license (no DLL field carries it).")
+
+(defun %deps-from-json ()
+  "Direct package dependencies as (NAME . VERSION), read from paalam.deps.json next to the app.
+That file is the build's own record of the csproj PackageReferences (and ships with every
+build, dev or distributed), so the About list tracks the project automatically — no hand-kept
+name list. Avalonia.* sub-packages collapse into the single base \"Avalonia\" row. NIL if the
+file is missing or its shape doesn't match (caller then falls back to reflection).
+
+Parsed with .NET Regex rather than System.Text.Json: Match/Group are reference types and avoid
+the value-type JSON enumerators that dotcl marshals poorly. The app's dependency object is
+  \"paalam/<ver>\": { \"dependencies\": { \"Name\": \"Version\", ... }, ... }
+and dependency values never contain '}', so [^}]* safely captures just that inner object."
+  (ignore-errors
+    (let* ((base (dotnet:static "System.AppContext" "BaseDirectory"))
+           (path (concatenate 'string base "paalam.deps.json")))
+      (when (dotnet:static "System.IO.File" "Exists" path)
+        (let* ((text  (dotnet:static "System.IO.File" "ReadAllText" path))
+               (rx    "System.Text.RegularExpressions.Regex")
+               (block (dotnet:static rx "Match" text
+                        "\"paalam/[^\"]*\":\\s*\\{\\s*\"dependencies\":\\s*\\{([^}]*)\\}")))
+          (when (dotnet:invoke block "get_Success")
+            (let* ((inner (dotnet:invoke (dotnet:invoke (dotnet:invoke block "get_Groups")
+                                                        "get_Item" 1) "get_Value"))
+                   (ms    (dotnet:static rx "Matches" inner
+                            "\"([^\"]+)\"\\s*:\\s*\"([^\"]+)\""))
+                   (n     (dotnet:invoke ms "get_Count"))
+                   (out   '()))
+              (dotimes (i n)
+                (let* ((g    (dotnet:invoke (dotnet:invoke ms "get_Item" i) "get_Groups"))
+                       (name (dotnet:invoke (dotnet:invoke g "get_Item" 1) "get_Value"))
+                       (ver  (dotnet:invoke (dotnet:invoke g "get_Item" 2) "get_Value")))
+                  (unless (eql 0 (search "Avalonia." name))   ; collapse Avalonia.* → Avalonia
+                    (push (cons name ver) out))))
+              (nreverse out))))))))
+
+(defun %assembly-company (name)
+  "CompanyName (= the library's author/vendor) of assembly NAME, or NIL. Read from the DLL's
+FileVersionInfo (deps.json carries no author metadata, the binary does). The .NET SDK's
+\"Your Company\" placeholder (e.g. SkiaSharp.Heic ships it) is dropped — an empty author column
+reads better than a fake vendor name."
+  (let ((fvi (%assembly-fvi name)))
+    (when fvi
+      (let ((co (let ((c (ignore-errors (dotnet:invoke fvi "get_CompanyName"))))
+                  (and c (string-trim " " c)))))
+        (when (and co (plusp (length co)) (not (string-equal co "Your Company")))
+          co)))))
 
 (defun %about-deps ()
-  "List of (NAME . VERSION) for each dependency in *dependencies* that resolves."
-  (loop for name in *dependencies*
-        for v = (%assembly-version name)
-        when v collect (cons name v)))
+  "List of (NAME VERSION AUTHOR) for the About dialog. Name/version come from paalam.deps.json
+\(auto, tracks the csproj PackageReferences); author is the DLL's CompanyName. Falls back to
+reflecting versions off the curated *dependencies* when deps.json is unavailable."
+  (mapcar (lambda (nv)
+            (list (car nv) (cdr nv) (or (%assembly-company (car nv)) "")))
+          (or (%deps-from-json)
+              (loop for name in *dependencies*
+                    for v = (%assembly-version name)
+                    when v collect (cons name v)))))
+
+(defun %deps-row (name ver author &key bold stripe)
+  "One ListBoxItem with three shared-size columns (library / version / author). BOLD for the
+header row; STRIPE (a brush) shades the row. Static credits list, so it isn't hit-testable."
+  (let* ((grid (dotnet:new "Avalonia.Controls.Grid"))
+         (cols (dotnet:invoke grid "get_ColumnDefinitions"))
+         (kids (dotnet:invoke grid "get_Children"))
+         (item (dotnet:new "Avalonia.Controls.ListBoxItem")))
+    (flet ((addcol (group)
+             (let ((c (dotnet:new "Avalonia.Controls.ColumnDefinition")))
+               (dotnet:invoke c "set_Width" (dotnet:static "Avalonia.Controls.GridLength" "Auto"))
+               (dotnet:invoke c "set_SharedSizeGroup" group)   ; align columns across all rows
+               (dotnet:invoke cols "Add" c)))
+           (cell (text col muted)
+             (let ((tb (%about-text text bold)))
+               (dotnet:static "Avalonia.Controls.Grid" "SetColumn" tb col)
+               (when (plusp col)                                ; gap between columns
+                 (dotnet:invoke tb "set_Margin" (dotnet:new "Avalonia.Thickness" 18d0 0d0 0d0 0d0)))
+               (when muted
+                 (dotnet:invoke tb "set_Foreground" (dotnet:static "Avalonia.Media.Brushes" "Gray")))
+               (dotnet:invoke kids "Add" tb))))
+      (addcol "lib") (addcol "ver") (addcol "auth")
+      (cell name   0 nil)
+      (cell ver    1 (not bold))                                ; version/author muted on data rows
+      (cell author 2 (not bold)))
+    (dotnet:invoke item "set_Content" grid)
+    (dotnet:invoke item "set_IsHitTestVisible" nil)
+    (when stripe (dotnet:invoke item "set_Background" stripe))
+    item))
 
 (defun %about-deps-list (deps)
-  "A striped, two-column (name left / version right) ListBox of bundled libraries.
-Selection/hover is disabled — it's a static credits list, not an interactive control.
-Odd rows get a faint translucent grey so the stripe reads on both light and dark themes."
+  "A striped three-column (library / version / author) ListBox of bundled libraries, with a
+header row. Columns align via Grid SharedSizeScope. Odd data rows get a faint translucent grey
+so the stripe reads on both light and dark themes."
   (let* ((lb     (dotnet:new "Avalonia.Controls.ListBox"))
          (items  (dotnet:invoke lb "get_Items"))
-         ;; Faint translucent grey for the odd-row stripe. Built via set_Color/set_Opacity
-         ;; (single-overload setters) rather than the SolidColorBrush(Color) ctor: dotcl
-         ;; mis-resolves that ctor to SolidColorBrush(uint) and dies on the Color->uint
-         ;; conversion ("Object must implement IConvertible").
+         ;; Built via set_Color/set_Opacity (single-overload setters) rather than the
+         ;; SolidColorBrush(Color) ctor: dotcl mis-resolves that ctor to SolidColorBrush(uint)
+         ;; and dies on the Color->uint conversion (dotcl-internal#357).
          (stripe (let ((b (dotnet:new "Avalonia.Media.SolidColorBrush")))
                    (dotnet:invoke b "set_Color" (dotnet:static "Avalonia.Media.Color" "Parse" "#808080"))
                    (dotnet:invoke b "set_Opacity" 0.09d0)
                    b)))
-    (dotnet:invoke lb "set_MaxHeight" 200d0)
-    (loop for (name . ver) in deps
+    (dotnet:invoke lb "set_MaxHeight" 220d0)
+    (dotnet:static "Avalonia.Controls.Grid" "SetIsSharedSizeScope" lb t)
+    (dotnet:invoke items "Add" (%deps-row "Library" "Version" "Author" :bold t))
+    (loop for (name ver author) in deps
           for i from 0
-          do (let* ((row  (dotnet:new "Avalonia.Controls.DockPanel"))
-                    (kids (dotnet:invoke row "get_Children"))
-                    (vt   (%about-text ver))           ; version pinned right
-                    (nt   (%about-text name))          ; name fills the rest (LastChildFill)
-                    (item (dotnet:new "Avalonia.Controls.ListBoxItem")))
-               (dotnet:static "Avalonia.Controls.DockPanel" "SetDock" vt
-                              (dotnet:static "Avalonia.Controls.Dock" "Right"))
-               (dotnet:invoke vt "set_Margin" (dotnet:new "Avalonia.Thickness" 16d0 0d0 0d0 0d0))
-               (dotnet:invoke kids "Add" vt)
-               (dotnet:invoke kids "Add" nt)
-               (dotnet:invoke item "set_Content" row)
-               (dotnet:invoke item "set_IsHitTestVisible" nil)
-               (when (oddp i) (dotnet:invoke item "set_Background" stripe))
-               (dotnet:invoke items "Add" item)))
+          do (dotnet:invoke items "Add"
+                            (%deps-row name ver author :stripe (and (oddp i) stripe))))
     lb))
 
 (defun %macos-p () (dotnet:static "System.OperatingSystem" "IsMacOS"))
@@ -304,7 +381,7 @@ Owner is the given viewer's window, else the first open window, else centered on
       (dotnet:invoke c "Add" (%about-text (format nil "Version ~a" *version*)))
       (dotnet:invoke c "Add" (%about-text *copyright*))
       (dotnet:invoke c "Add" (%about-text *repository-url*))
-      (dotnet:invoke c "Add" (%about-text (format nil "License  paalam: ~a / dotcl, Avalonia: MIT" *license*)))
+      (dotnet:invoke c "Add" (%about-text (format nil "License: ~a" *license*)))
       ;; Bundled libraries + versions, read live from the binaries (see %assembly-version),
       ;; as a striped two-column list.
       (handler-case
