@@ -261,6 +261,87 @@ Higher is more detailed but uses more memory/time. For 4K, around 300-400 is a r
 
 ;;; open-book --------------------------------------------------------
 
+;;; ------------------------------------------------------------------
+;;; Nested books (#16): entries inside an archive that are themselves
+;;; openable (nested archive / PDF). Not flattened into pages — listed on
+;;; demand and opened by extracting the entry to a temp file and routing it
+;;; through the normal path-based open-book. Lazy: bytes are extracted only
+;;; when the user picks one (no NAS stall at open time). Recurses naturally:
+;;; the opened sub-book is itself a normal book that can have sub-books.
+;;; ------------------------------------------------------------------
+
+(defparameter *subbook-extensions*
+  '("zip" "cbz" "rar" "cbr" "7z" "cb7" "tar" "cbt" "pdf")
+  "Extensions of nested entries that are themselves openable as a book.")
+(defun subbook-name-p (name)
+  (let ((dot (position #\. name :from-end t)))
+    (and dot (member (string-downcase (subseq name (1+ dot))) *subbook-extensions* :test #'string=) t)))
+
+(defun %subbook-temp-dir () (%state-file "subbook/"))
+(defvar *subbook-temp-seq* 0)
+(defun %safe-temp-name (name)
+  (map 'string (lambda (c) (if (or (alphanumericp c) (member c '(#\- #\_ #\.))) c #\_))
+       (%basename name)))
+(defun %stream->bytes (stream)
+  (let ((ms (dotnet:new "System.IO.MemoryStream")))
+    (unwind-protect (progn (dotnet:invoke stream "CopyTo" ms) (dotnet:invoke ms "ToArray"))
+      (dotnet:invoke ms "Dispose"))))
+(defun %extract-to-temp (bytes name)
+  "Write BYTES to a uniquely-named temp file (basename of NAME) and return its path."
+  (let ((dir (%subbook-temp-dir)))
+    (ignore-errors (dotnet:static "System.IO.Directory" "CreateDirectory" dir))
+    (let ((path (format nil "~a~d-~a" dir (incf *subbook-temp-seq*) (%safe-temp-name name))))
+      (dotnet:static "System.IO.File" "WriteAllBytes" path bytes)
+      path)))
+
+(defgeneric book-subbooks (book)
+  (:documentation "List of (ENTRY-NAME . OPENER) for nested openable entries (#16).
+OPENER = (lambda () (values PATH TEMP-P)): PATH to feed open-path, TEMP-P non-nil if it is an
+extracted temp file to delete when the resulting book closes."))
+(defmethod book-subbooks ((b t)) nil)
+
+(defmethod book-subbooks ((b zip-book))
+  (let (out)
+    (dolist (e (%enum->list (dotnet:invoke (zb-archive b) "get_Entries")))
+      (let ((name (dotnet:invoke e "get_FullName")))
+        (when (subbook-name-p name)
+          (let ((entry e) (nm name))
+            (push (cons nm (lambda ()
+                             (let ((es (dotnet:invoke entry "Open")))
+                               (unwind-protect (values (%extract-to-temp (%stream->bytes es) nm) t)
+                                 (dotnet:invoke es "Dispose")))))
+                  out)))))
+    (nreverse out)))
+
+(defmethod book-subbooks ((b sharp-book))
+  (let (out)
+    (dolist (e (%enum->list (dotnet:invoke (sb2-archive b) "get_Entries")))
+      (unless (dotnet:invoke e "get_IsDirectory")
+        (let ((key (dotnet:invoke e "get_Key")))
+          (when (and key (subbook-name-p key))
+            (let ((entry e) (nm key))
+              (push (cons nm (lambda ()
+                               (let ((es (dotnet:invoke entry "OpenEntryStream")))
+                                 (unwind-protect (values (%extract-to-temp (%stream->bytes es) nm) t)
+                                   (dotnet:invoke es "Dispose")))))
+                    out))))))
+    (nreverse out)))
+
+(defvar *book-temp-files* (make-hash-table :test 'eq)
+  "Maps an opened nested book -> its backing temp file, deleted on book-close (#16).")
+(defmethod book-close :after ((b t))
+  (let ((tmp (gethash b *book-temp-files*)))
+    (when tmp
+      (ignore-errors (dotnet:static "System.IO.File" "Delete" tmp))
+      (remhash b *book-temp-files*))))
+
+(defun %subbook-temp-gc ()
+  "Delete the whole nested-book temp dir — startup safety net (per-book delete is best-effort, and
+a still-open loader handle can make File.Delete fail mid-session)."
+  (ignore-errors
+    (when (%dir-exists (%subbook-temp-dir))
+      (dotnet:static "System.IO.Directory" "Delete" (%subbook-temp-dir) t))))
+
 (defun open-book (path)
   "Open PATH (directory / archive / image file) as a book.
 Returns two values (book start-index)."

@@ -75,6 +75,7 @@
    (make-command :thumb-pane    "Shelf (Thumbnails)" '("T")   '%toggle-thumb-pane)
    (make-command :browse-pane   "Folder"           '("L")     '%toggle-browse-pane)
    (make-command :info          "Info Panel"       '("I")     '%toggle-info-pane)
+   (make-command :subbook       "Open Nested Book…" '("V")    '%open-subbook)
    (make-command :clip-add      "Add to Clip"      '("A")     '%clip-add-current)
    (make-command :export        "Export…"          '("E")     '%pane-export)
    (make-command :bookmark      "Toggle Bookmark"  '("B")     '%toggle-bookmark-current)
@@ -108,7 +109,7 @@
 ;;; %build-menu). Unlisted commands (internal operations like reading-fwd/bwd,
 ;;; escape) are not shown in the menu.
 (defparameter *command-menu*
-  '((:file "File"  :open-file :open-folder :settings :edit-menu :edit-gestures :quit)
+  '((:file "File"  :open-file :open-folder :subbook :settings :edit-menu :edit-gestures :quit)
     (:view "View"  :fullscreen :fit :fit-mode :rotate-left :rotate-right :loupe :slideshow
                      :spread :direction :recursive
                      :browse-pane :thumb-pane :clip-pane :info)

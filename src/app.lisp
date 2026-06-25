@@ -391,6 +391,7 @@ No-op on platforms without IActivatableLifetime."
   (setf *debug* (let ((e (dotnet:static "System.Environment" "GetEnvironmentVariable" "PAALAM_DEBUG")))
                   (and e (plusp (length e)) t)))
   (load-settings)
+  (%subbook-temp-gc)                    ; #16: clear stale nested-book temp extracts from last run
   (load-keybinds)
   (load-menu)
   (load-history)

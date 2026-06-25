@@ -413,6 +413,58 @@ Owner is the given viewer's window, else the first open window, else centered on
         (dotnet:invoke w "ShowDialog" owner)
         (dotnet:invoke w "Show"))))
 
+;;; Nested books (#16): list the openable entries inside the current archive (nested archive / PDF)
+;;; and open the chosen one. The book layer (book-subbooks) extracts the entry to a temp file; here
+;;; we just present a picker and route the temp path through open-path (= the normal open flow).
+(defun %pick-list (owner title items on-pick)
+  "Modal single-select list. ITEMS = display strings. Double-click / Enter calls (on-pick index)
+then closes; Esc cancels."
+  (let* ((w    (dotnet:new "Avalonia.Controls.Window"))
+         (root (dotnet:new "Avalonia.Controls.StackPanel"))
+         (lb   (dotnet:new "Avalonia.Controls.ListBox")))
+    (dotnet:invoke root "set_Margin" (dotnet:new "Avalonia.Thickness" 12d0))
+    (dotnet:invoke root "set_Spacing" 8d0)
+    (let ((coll (dotnet:invoke lb "get_Items")))
+      (dolist (s items) (dotnet:invoke coll "Add" s)))
+    (dotnet:invoke lb "set_SelectedIndex" 0)
+    (dotnet:invoke lb "set_MinWidth" 360d0)
+    (dotnet:invoke lb "set_MaxHeight" 360d0)
+    (labels ((commit ()
+               (let ((i (dotnet:invoke lb "get_SelectedIndex")))
+                 (dotnet:invoke w "Close")
+                 (when (>= i 0) (ignore-errors (funcall on-pick i))))))
+      (dotnet:add-event lb "DoubleTapped" (lambda (s e) (declare (ignore s e)) (commit)))
+      (dotnet:add-event w "KeyDown"
+        (lambda (s e) (declare (ignore s))
+          (let ((k (dotnet:invoke (dotnet:invoke e "get_Key") "ToString")))
+            (cond ((or (string= k "Return") (string= k "Enter"))
+                   (dotnet:invoke e "set_Handled" t) (commit))
+                  ((string= k "Escape")
+                   (dotnet:invoke e "set_Handled" t) (dotnet:invoke w "Close"))))))
+      (dotnet:invoke (dotnet:invoke root "get_Children") "Add" lb)
+      (dotnet:invoke w "set_Content" root)
+      (dotnet:invoke w "set_Title" title)
+      (dotnet:invoke w "set_CanResize" nil)
+      (dotnet:invoke w "set_SizeToContent" (dotnet:static "Avalonia.Controls.SizeToContent" "WidthAndHeight"))
+      (dotnet:invoke w "set_WindowStartupLocation"
+                     (dotnet:static "Avalonia.Controls.WindowStartupLocation"
+                                    (if owner "CenterOwner" "CenterScreen")))
+      (if owner (dotnet:invoke w "ShowDialog" owner) (dotnet:invoke w "Show")))))
+
+(defun %open-subbook (vw)
+  "List nested openable books (#16) in the current book and open the chosen one."
+  (let ((subs (book-subbooks (viewer-book vw))))
+    (if (null subs)
+        (%status vw "No nested books here")
+        (%pick-list (viewer-window vw) "Open nested book"
+                    (mapcar (lambda (s) (%basename (car s))) subs)
+                    (lambda (i)
+                      (multiple-value-bind (path tempp) (funcall (cdr (nth i subs)))
+                        (when path
+                          (open-path vw path)
+                          (when tempp (setf (gethash (viewer-book vw) *book-temp-files*) path))
+                          (%focus-viewport vw))))))))   ; restore key focus after the modal picker
+
 ;;; file association (#11, Windows): per-user (HKCU), so no administrator privileges needed. Register a
 ;;; ProgID and add it to the OpenWithProgids of the supported extensions (shows up in "Open with"). Making
 ;;; it the default cannot be automated per OS design, so after registering, guide the user to the
