@@ -306,7 +306,8 @@ and prefetch-request the next spread in reading direction too."
       (let ((si (max 0 (min (viewer-sindex vw) (1- m)))))
         (setf (viewer-sindex vw) si)
         ;; The LRU center is the *page* index (not the spread index — otherwise eviction distance is off).
-        (loader-request (viewer-loader vw) (%load-order vw) (%cur-page vw))
+        (loader-request (viewer-loader vw) (%load-order vw) (%cur-page vw)
+                        (aref spreads si))   ; pin the on-screen spread's pages from eviction
         (%dbg "show si=~a pages=~a hit=~a" si (aref spreads si)
               (mapcar (lambda (p) (if (%page-bitmap vw p) 1 0)) (aref spreads si)))
         (%render-spread vw)

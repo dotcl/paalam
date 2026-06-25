@@ -42,6 +42,7 @@ handle, hiding NAS bandwidth/latency (adjustable in the settings file).")
   (cv (make-condition-variable))
   (queue '())                         ; index awaiting load (in priority order)
   (current 0)                         ; LRU center (current page index)
+  (pinned '())                        ; pages of the on-screen spread — never evicted, even over budget
   (direction 1)                       ; reading direction (+1=index up / -1=down; eviction bias; #25)
   (done nil)
   workers                             ; list of worker threads
@@ -76,20 +77,23 @@ so it is kept until last."
     (maphash (lambda (k v) (declare (ignore k)) (incf total (%bmp-bytes v))) cache)
     (loop while (and (> (hash-table-count cache) 1)        ; keep at least 1
                      (or (> total budget) (> (hash-table-count cache) *cache-size*)))
-          do (let ((victim nil) (vscore -1))
+          do (let ((victim nil) (vscore -1) (pinned (loader-pinned ld)))
                (maphash (lambda (k v) (declare (ignore v))
-                          (let ((sc (%evict-score k cur dir)))
-                            (when (> sc vscore) (setf vscore sc victim k))))
+                          (unless (member k pinned)            ; never evict the on-screen spread
+                            (let ((sc (%evict-score k cur dir)))
+                              (when (> sc vscore) (setf vscore sc victim k)))))
                         cache)
-               (when (null victim) (return))
+               (when (null victim) (return))                  ; only pinned remain → stop (keep them)
                (let ((bmp (gethash victim cache)))
                  (decf total (%bmp-bytes bmp))
                  (remhash victim cache)
                  (ignore-errors (dotnet:invoke bmp "Dispose")))))))
 
-(defun loader-request (ld indices current)
-  "Request loading of indices in priority order (already-cached are skipped). current is the LRU center."
+(defun loader-request (ld indices current &optional (pinned '()))
+  "Request loading of indices in priority order (already-cached are skipped). current is the LRU
+center. PINNED are pages of the on-screen spread that eviction must keep even when over budget."
   (with-lock-held ((loader-lock ld))
+    (setf (loader-pinned ld) pinned)
     ;; Infer reading direction from the change in current (for eviction bias; keep previous direction if 0).
     (let ((prev (loader-current ld)))
       (setf (loader-direction ld) (cond ((> current prev) 1) ((< current prev) -1)
