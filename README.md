@@ -4,11 +4,13 @@
 
 **A NeeView-style image / comic / PDF viewer written with [dotcl](https://github.com/dotcl/dotcl) (Common Lisp on .NET) and [Avalonia](https://avaloniaui.net/).**
 
+*"paalam" means "goodbye" / "farewell" in Tagalog.*
+
 Almost everything — both the UI and the application logic — is written in Common Lisp (under `src/`, split by feature). The C# side (a single `Program.cs`) only handles boot and a thin slice of interop. The same code runs cross-platform as a GUI on Windows / macOS / Linux.
 
 > This project doubles as a technical demo of **how far you can push a practical GUI app in dotcl**. Read it as a worked example of "build an Avalonia `Window` from Common Lisp, express the domain model with CLOS, and prefetch on Lisp threads."
 
-## What's unusual about it
+## What makes it different
 
 - **The GUI is written in Common Lisp** — even the `Avalonia.Application` subclass is emitted from Lisp via `dotnet:define-class` (`Paalam.App`). Assembling `Window` / `Grid` / `Image`, wiring events, posting to the Dispatcher — all on the Lisp side.
 - **C# is only a thin boundary** — `Program.cs` (one file) preloads the Avalonia assemblies, loads the precompiled Lisp from a manifest, and calls `RUN-PAALAM`. What remains is just the interop that's simply easier to leave to managed libraries: PDF rasterization (`PdfDoc`, PDFtoImage/SkiaSharp), EXIF extraction (`Exif`, MetadataExtractor), native file dialogs (`DialogHelper`), and a macOS rendering fix (`MacRenderFix`). Note that PDF text / metadata / outline extraction has **migrated from the former C# shim `Paalam.PdfText` (P/Invoke) to Lisp FFI** (`src/pdf-ffi.lisp`, `dotnet:ffi`) — even raw native calls can be written on the Lisp side.

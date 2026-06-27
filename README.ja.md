@@ -4,6 +4,8 @@
 
 **[dotcl](https://github.com/dotcl/dotcl)（.NET 上の Common Lisp）と [Avalonia](https://avaloniaui.net/) で書いた、NeeView 風の画像/コミック/PDF ビューア。**
 
+*「paalam」はタガログ語で「さようなら」。*
+
 UI もアプリケーションロジックも、ほぼすべて Common Lisp（`src/` 配下、機能ごとに分割）で書かれています。C# 側（`Program.cs` 一枚）が担うのは起動（boot）と一部の interop だけ。Windows / macOS / Linux で同じコードが動くクロスプラットフォーム GUI です。
 
 > このプロジェクトは **dotcl で実用的な GUI アプリがどこまで書けるか** を示す技術デモを兼ねています。「Common Lisp で Avalonia の `Window` を組み立て、CLOS でドメインモデルを表現し、Lisp のスレッドで先読みする」——そういう構成の実例として読めます。
