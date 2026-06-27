@@ -24,8 +24,6 @@
 
     <!-- Suppress PDFtoImage's platform-annotation (CA1416) noise (only runs on supported OSes). -->
     <NoWarn>$(NoWarn);CA1416</NoWarn>
-    <!-- Exclude experiments/ (spike .cs / obj etc.) from the main build. -->
-    <DefaultItemExcludes>$(DefaultItemExcludes);experiments\**</DefaultItemExcludes>
     <!-- Embed the app icon in the exe (file-association DefaultIcon = exe,0 / taskbar). -->
     <ApplicationIcon>app.ico</ApplicationIcon>
 
