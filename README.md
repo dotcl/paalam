@@ -26,7 +26,7 @@ Almost everything — both the UI and the application logic — is written in Co
 - Page-thumbnail shelf / folder-tree shelf / file-info & EXIF side pane
 - History (remembers the last page per book and resumes) + bookmarks
 - PDF full-text search (`/`) with in-page highlighting of hits
-- Clip board — collect pages and export them to a zip
+- Clips — collect pages into named sets and export them to a zip
 - Drag & drop to open a book
 - Command palette (`:`) and customizable key bindings (settings window)
 

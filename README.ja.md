@@ -92,7 +92,7 @@ NuGet 参照のみ（dotcl repo へのソース依存なし）:
 - `DotCL.Runtime` — Common Lisp ランタイム + project-core build
 - `Avalonia` / `Avalonia.Desktop` / `Avalonia.Themes.Fluent`
 - `SharpCompress`（書庫）/ `PDFtoImage`（PDF）/ `SkiaSharp.Heic`（HEIC/HEIF）
-- `MetadataExtractor`（EXIF / メタデータ、#36 情報パネル）
+- `MetadataExtractor`（EXIF / メタデータ、情報パネル）
 
 ## Windows インストーラ
 
