@@ -14,7 +14,7 @@ UI もアプリケーションロジックも、ほぼすべて Common Lisp（`s
 
 - **GUI を Common Lisp で記述** — `Avalonia.Application` 派生クラスすら Lisp の `dotnet:define-class` で emit している（`Paalam.App`）。`Window` / `Grid` / `Image` の組み立て、イベント結線、Dispatcher への post まで Lisp 側。
 - **C# は薄い境界だけ** — `Program.cs`（1ファイル）は Avalonia アセンブリを先読みし、コンパイル済み Lisp を manifest からロードして `RUN-PAALAM` を呼ぶ。残るのはマネージドライブラリに任せた方が楽な interop だけ: PDFium のラスタライズ（`PdfDoc`、PDFtoImage/SkiaSharp）、EXIF 抽出（`Exif`、MetadataExtractor）、ネイティブのファイルダイアログ（`DialogHelper`）、macOS の描画修正（`MacRenderFix`）。なお PDF のテキスト/メタ/アウトライン抽出はかつての C# シム `Paalam.PdfText`（P/Invoke）から **Lisp の FFI（`src/pdf-ffi.lisp`、`dotnet:ffi`）へ移行済み**——raw なネイティブ呼び出しも Lisp 側で書ける。
-- **ビルド時に Lisp を精コンパイル** — `DotCL.Runtime` の project-core build（`<DotclProjectAsd>`）が、ビルド時に ASDF system（`src/paalam.asd`）を in-process で fasl に精コンパイルし、依存 fasl + manifest を出力に置く。実行時はソース非同梱・`compile-file` なしで一発ロード。
+- **ビルド時に Lisp を fasl へ事前コンパイル** — `DotCL.Runtime` の project-core build（`<DotclProjectAsd>`）が、ビルド時に ASDF system（`src/paalam.asd`）を in-process で fasl にコンパイルし、依存 fasl + manifest を出力に置く。実行時はソース非同梱・`compile-file` なしで一発ロード。
 - **book プロトコル** — ページの供給源（ディレクトリ / zip / rar・7z・tar / PDF）を CLOS のプロトコルで抽象化（`directory-book` / `zip-book` / `sharp-book` / `pdf-book`）。GUI とは独立。
 
 ## 機能
@@ -81,7 +81,7 @@ DialogHelper / MacRenderFix      book プロトコル (CLOS)
                                  先読みローダー (dotcl-thread)
 ```
 
-ビルド時に `src/paalam.asd` が fasl へ精コンパイルされ、`bin/.../dotcl-fasl/` に
+ビルド時に `src/paalam.asd` が fasl へ事前コンパイルされ、`bin/.../dotcl-fasl/` に
 依存 fasl + `dotcl.core` + manifest（`dotcl-deps.txt`）が出力されます。実行時は
 `Program.cs` が manifest を一括ロードするだけ（ソース非同梱）。
 
