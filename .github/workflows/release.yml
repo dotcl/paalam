@@ -1,0 +1,104 @@
+name: Release
+
+# Tag v<version> (matching :version in src/paalam.asd) to build all installers
+# and attach them to a draft release. Publish the draft by hand after review.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: tag must match src/paalam.asd :version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VER="$(sed -n 's/.*:version[[:space:]]*"\([^"]*\)".*/\1/p' src/paalam.asd | head -1)"
+          echo "tag=$TAG asd=$VER"
+          test "$TAG" = "$VER"
+
+  windows:
+    needs: check-version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: choco install innosetup -y --no-progress
+      - run: powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installers
+          path: dist/paalam-setup-*.exe
+          if-no-files-found: error
+
+  macos:
+    needs: check-version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: build .app (osx-arm64)
+        run: |
+          make app
+          ditto -c -k --keepParent dist/paalam.app "dist/paalam-${GITHUB_REF_NAME#v}-osx-arm64.app.zip"
+          rm -rf dist/paalam.app
+      - name: build .app (osx-x64, cross-publish)
+        run: |
+          make app RID=osx-x64
+          ditto -c -k --keepParent dist/paalam.app "dist/paalam-${GITHUB_REF_NAME#v}-osx-x64.app.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-apps
+          path: dist/*.app.zip
+          if-no-files-found: error
+
+  linux:
+    needs: check-version
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: make appimage
+      - run: make tarball
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.runner }}
+          path: |
+            dist/*.AppImage
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: [windows, macos, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: create draft release with all artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la artifacts/
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft \
+            --title "paalam $GITHUB_REF_NAME" \
+            --generate-notes \
+            artifacts/*
