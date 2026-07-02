@@ -126,7 +126,9 @@ make app        # dist/paalam.app を生成
 open dist/paalam.app
 ```
 
-framework-dependent なので起動には .NET 10 ランタイムが必要です。`.app` は
+バンドルは self-contained（.NET ランタイム同梱）なので、起動側のマシンにランタイムは
+不要です（framework-dependent だと Finder のダブルクリック起動が `DOTNET_ROOT` 等の
+シェル環境変数を継承せず、ランタイムを見つけられずに落ちることがあるため）。`.app` は
 署名していません（自分のマシンで使うぶんには起動できます）。他者へ配布する場合は
 Developer ID 署名 + 公証が別途必要で、受け取った側では quarantine 属性の解除
 （`xattr -dr com.apple.quarantine paalam.app`）が要ることがあります。

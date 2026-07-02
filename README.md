@@ -127,7 +127,10 @@ make app        # produces dist/paalam.app
 open dist/paalam.app
 ```
 
-It's framework-dependent, so launching requires the .NET 10 runtime. The `.app` is
+The bundle is self-contained (the .NET runtime is bundled), so the target machine
+needs no runtime installed. (A framework-dependent build breaks when launched from
+Finder: a double-click doesn't inherit shell env vars like `DOTNET_ROOT`, so it can
+fail to find the runtime before reaching `Main`.) The `.app` is
 unsigned (it launches fine for use on your own machine). To distribute it to others
 you additionally need Developer ID signing + notarization, and the recipient may
 need to clear the quarantine attribute (`xattr -dr com.apple.quarantine paalam.app`).
