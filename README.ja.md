@@ -6,6 +6,15 @@
 
 *「paalam」はタガログ語で「さようなら」。*
 
+![見開き表示](docs/screenshots/spread.png)
+
+<p align="center">
+<img src="docs/screenshots/thumbnails.png" width="49.5%" alt="ページサムネイル棚">
+<img src="docs/screenshots/palette.png" width="49.5%" alt="コマンドパレット">
+</p>
+
+<sub>スクリーンショット: <a href="https://archive.org/details/hokusaimanga07kats">『北斎漫画』七編</a>（1912年刷、パブリックドメイン、Internet Archive）。PDF を右綴じの book としてそのまま開いたところ。</sub>
+
 UI もアプリケーションロジックも、ほぼすべて Common Lisp（`src/` 配下、機能ごとに分割）で書かれています。C# 側（`Program.cs` 一枚）が担うのは起動（boot）と一部の interop だけ。Windows / macOS / Linux で同じコードが動くクロスプラットフォーム GUI です。
 
 > このプロジェクトは **dotcl で実用的な GUI アプリがどこまで書けるか** を示す技術デモを兼ねています。「Common Lisp で Avalonia の `Window` を組み立て、CLOS でドメインモデルを表現し、Lisp のスレッドで先読みする」——そういう構成の実例として読めます。

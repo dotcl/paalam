@@ -6,6 +6,15 @@
 
 *"paalam" means "goodbye" / "farewell" in Tagalog.*
 
+![Two-page spread view](docs/screenshots/spread.png)
+
+<p align="center">
+<img src="docs/screenshots/thumbnails.png" width="49.5%" alt="Page-thumbnail shelf">
+<img src="docs/screenshots/palette.png" width="49.5%" alt="Command palette">
+</p>
+
+<sub>Screenshots: <a href="https://archive.org/details/hokusaimanga07kats"><em>Hokusai Manga</em> vol. 7</a> (1912 printing, public domain, via the Internet Archive), opened directly as a PDF book with right-to-left binding.</sub>
+
 Almost everything — both the UI and the application logic — is written in Common Lisp (under `src/`, split by feature). The C# side (a single `Program.cs`) only handles boot and a thin slice of interop. The same code runs cross-platform as a GUI on Windows / macOS / Linux.
 
 > This project doubles as a technical demo of **how far you can push a practical GUI app in dotcl**. Read it as a worked example of "build an Avalonia `Window` from Common Lisp, express the domain model with CLOS, and prefetch on Lisp threads."
