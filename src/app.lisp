@@ -6,13 +6,13 @@
 ;;; add to the root Grid (the add order = Z-order, kept in build-main-window).
 
 (defun %build-folder-pane (vw)
-  "Leftmost folder-tree pane (#6 B, col 0), hidden by default. Select = expand/navigate,
+  "Folder-tree pane (#6 B, col 1), hidden by default. Select = expand/navigate,
 double-click = open."
   (let ((btree (dotnet:new "Avalonia.Controls.TreeView")))
     (dotnet:invoke btree "set_Width" 220d0)
     (dotnet:invoke btree "set_IsVisible" nil)
     (dotnet:invoke btree "set_Background" (dotnet:static "Avalonia.Media.Brushes" "DimGray"))
-    (dotnet:static "Avalonia.Controls.Grid" "SetColumn" btree 0)
+    (dotnet:static "Avalonia.Controls.Grid" "SetColumn" btree 1)
     (setf (viewer-browse-pane vw) btree (viewer-browse-tree vw) btree)
     (dotnet:add-event btree "SelectionChanged"
       (lambda (s e) (declare (ignore s e))
@@ -30,20 +30,33 @@ double-click = open."
               (when path (ignore-errors (open-path vw path)) (%focus-viewport vw)))))))
     btree))
 
+(defun %build-toc-pane (vw)
+  "Leftmost outline/TOC pane (#23, col 0), hidden by default. Shows the current book's bookmark
+hierarchy as a tree (PDF); selecting an entry jumps to its page. Toggle via :toc (O)."
+  (let ((tree (dotnet:new "Avalonia.Controls.TreeView")))
+    (dotnet:invoke tree "set_Width" 240d0)
+    (dotnet:invoke tree "set_IsVisible" nil)
+    (dotnet:invoke tree "set_Background" (dotnet:static "Avalonia.Media.Brushes" "DimGray"))
+    (dotnet:static "Avalonia.Controls.Grid" "SetColumn" tree 0)
+    (setf (viewer-toc-pane vw) tree (viewer-toc-tree vw) tree)
+    (dotnet:add-event tree "SelectionChanged"
+      (lambda (s e) (declare (ignore s e)) (%toc-pane-jump vw)))
+    tree))
+
 (defun %build-thumb-pane (vw)
-  "Page-thumbnail shelf (#6 A, col 1), hidden by default."
+  "Page-thumbnail shelf (#6 A, col 2), hidden by default."
   (let ((tpane  (dotnet:new "Avalonia.Controls.ScrollViewer"))
         (tstack (dotnet:new "Avalonia.Controls.StackPanel")))
     (dotnet:invoke tpane "set_Width" 180d0)
     (dotnet:invoke tpane "set_IsVisible" nil)
     (dotnet:invoke tpane "set_Background" (dotnet:static "Avalonia.Media.Brushes" "DimGray"))
     (dotnet:invoke tpane "set_Content" tstack)
-    (dotnet:static "Avalonia.Controls.Grid" "SetColumn" tpane 1)
+    (dotnet:static "Avalonia.Controls.Grid" "SetColumn" tpane 2)
     (setf (viewer-thumb-pane vw) tpane (viewer-thumb-stack vw) tstack)
     tpane))
 
 (defun %build-info-pane (vw)
-  "Rightmost file/EXIF info pane (#36, col 4), hidden by default."
+  "Rightmost file/EXIF info pane (#36, col 5), hidden by default."
   (let ((ipane  (dotnet:new "Avalonia.Controls.ScrollViewer"))
         (istack (dotnet:new "Avalonia.Controls.StackPanel")))
     (dotnet:invoke ipane "set_Width" (coerce *info-pane-width* 'double-float))
@@ -51,12 +64,12 @@ double-click = open."
     (dotnet:invoke ipane "set_Background" (dotnet:static "Avalonia.Media.Brushes" "DimGray"))
     (dotnet:invoke istack "set_Margin" (dotnet:new "Avalonia.Thickness" 8d0))
     (dotnet:invoke ipane "set_Content" istack)
-    (dotnet:static "Avalonia.Controls.Grid" "SetColumn" ipane 4)
+    (dotnet:static "Avalonia.Controls.Grid" "SetColumn" ipane 5)
     (setf (viewer-info-pane vw) ipane (viewer-info-stack vw) istack)
     ipane))
 
 (defun %build-dnd-overlay (vw)
-  "DnD drop-eligibility highlight frame (#20): a thick border over the whole grid (cols 0-4),
+  "DnD drop-eligibility highlight frame (#20): a thick border over the whole grid (cols 0-5),
 transparent inside, hit-testing disabled so it never blocks the drop."
   (let ((overlay (dotnet:new "Avalonia.Controls.Border")))
     (dotnet:invoke overlay "set_BorderBrush" (dotnet:static "Avalonia.Media.Brushes" "DeepSkyBlue"))
@@ -64,7 +77,7 @@ transparent inside, hit-testing disabled so it never blocks the drop."
     (dotnet:invoke overlay "set_IsHitTestVisible" nil)
     (dotnet:invoke overlay "set_IsVisible" nil)
     (dotnet:static "Avalonia.Controls.Grid" "SetColumn" overlay 0)
-    (dotnet:static "Avalonia.Controls.Grid" "SetColumnSpan" overlay 5)
+    (dotnet:static "Avalonia.Controls.Grid" "SetColumnSpan" overlay 6)
     (setf (viewer-dnd-overlay vw) overlay)
     overlay))
 
@@ -119,24 +132,25 @@ Avalonia Window (built on the calling thread). Two Images meet at the center of 
                         (lambda (s e) (declare (ignore s e)) (%apply-fit vw)))
       ;; root: [viewport* | material pane (Auto, hidden by default)] (#18 Phase 2)
       (let* ((root  (dotnet:new "Avalonia.Controls.Grid"))
-             (btree (%build-folder-pane vw))   ; folder tree (#6 B, col 0)
-             (tpane (%build-thumb-pane vw))     ; page-thumbnail shelf (#6 A, col 1)
+             (octree (%build-toc-pane vw))     ; outline / TOC tree (#23, col 0)
+             (btree (%build-folder-pane vw))   ; folder tree (#6 B, col 1)
+             (tpane (%build-thumb-pane vw))     ; page-thumbnail shelf (#6 A, col 2)
              (pane  (dotnet:new "Avalonia.Controls.DockPanel"))
              (ebtn  (dotnet:new "Avalonia.Controls.Button"))
              (pbtn  (dotnet:new "Avalonia.Controls.Button"))   ; preview (open clip as a book; #35 ⑤)
              (scr   (dotnet:new "Avalonia.Controls.ScrollViewer"))
              (stack (dotnet:new "Avalonia.Controls.StackPanel"))
-             (ipane (%build-info-pane vw))      ; info pane (#36, col 4)
-             (overlay (%build-dnd-overlay vw)))   ; DnD highlight frame (#20, spans cols 0-4)
-        ;; 5 columns: [folder(Auto) | thumbs(Auto) | viewport(star) | material(Auto) | info(Auto)]. Auto collapses when hidden.
+             (ipane (%build-info-pane vw))      ; info pane (#36, col 5)
+             (overlay (%build-dnd-overlay vw)))   ; DnD highlight frame (#20, spans cols 0-5)
+        ;; 6 columns: [outline(Auto) | folder(Auto) | thumbs(Auto) | viewport(star) | material(Auto) | info(Auto)]. Auto collapses when hidden.
         (let ((cols (dotnet:invoke root "get_ColumnDefinitions")))
-          (dolist (w (list "Auto" "Auto" "*" "Auto" "Auto"))
+          (dolist (w (list "Auto" "Auto" "Auto" "*" "Auto" "Auto"))
             (let ((c (dotnet:new "Avalonia.Controls.ColumnDefinition")))
               (unless (string= w "*")
                 (dotnet:invoke c "set_Width" (dotnet:static "Avalonia.Controls.GridLength" "Auto")))
               (dotnet:invoke cols "Add" c))))
-        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" vport 2)
-        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" pane  3)
+        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" vport 3)
+        (dotnet:static "Avalonia.Controls.Grid" "SetColumn" pane  4)
         (dotnet:invoke pane "set_Width" 220d0)
         (dotnet:invoke pane "set_IsVisible" nil)
         (dotnet:invoke pane "set_Background" (dotnet:static "Avalonia.Media.Brushes" "DimGray"))
@@ -166,6 +180,7 @@ Avalonia Window (built on the calling thread). Two Images meet at the center of 
           (dotnet:invoke pc "Add" actions)
           (dotnet:invoke pc "Add" scr))
         (let ((rc (dotnet:invoke root "get_Children")))
+          (dotnet:invoke rc "Add" octree)   ; outline / TOC pane (#23)
           (dotnet:invoke rc "Add" btree)
           (dotnet:invoke rc "Add" tpane)
           (dotnet:invoke rc "Add" vport)
@@ -175,12 +190,12 @@ Avalonia Window (built on the calling thread). Two Images meet at the center of 
           ;; : command bar (spans all columns, bottom, frontmost; #23)
           (let ((cb (%make-cmdbar vw)))
             (dotnet:static "Avalonia.Controls.Grid" "SetColumn" cb 0)
-            (dotnet:static "Avalonia.Controls.Grid" "SetColumnSpan" cb 5)
+            (dotnet:static "Avalonia.Controls.Grid" "SetColumnSpan" cb 6)
             (dotnet:invoke rc "Add" cb))
           ;; status display (spans all columns, top-center, frontmost; messages stay visible even in fullscreen; #23)
           (let ((st (%make-status vw)))
             (dotnet:static "Avalonia.Controls.Grid" "SetColumn" st 0)
-            (dotnet:static "Avalonia.Controls.Grid" "SetColumnSpan" st 5)
+            (dotnet:static "Avalonia.Controls.Grid" "SetColumnSpan" st 6)
             (dotnet:invoke rc "Add" st)))
         (setf (viewer-clip-pane vw) pane (viewer-clip-stack vw) stack)
         ;; add material via DnD onto the pane (#18 Phase 2b). Emphasize the pane background during DnD (#20).

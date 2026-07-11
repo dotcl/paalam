@@ -70,7 +70,10 @@
    (make-command :goto          "Go to Page (gg=first / G=last / [count]g)" '("G") '%goto-page)
    (make-command :palette       "Command Palette"  '("OemSemicolon") '%command-palette)
    (make-command :search        "Search (/)"        '("OemQuestion" "Divide") '%command-search)
-   (make-command :toc           "TOC (O)"           '("O")     '%command-toc)
+   ;; :toc keeps its id/key (O) so persisted keymaps (which saved :TOC "O") keep working — it now
+   ;; opens the persistent outline side pane. The old filter bar moves to the keyless :toc-search.
+   (make-command :toc           "Outline (目次)"    '("O")     '%toggle-toc-pane)
+   (make-command :toc-search    "Outline Search…"   '()        '%command-toc)
    (make-command :clip-pane     "Clip Pane"        '("P")     '%toggle-clip-pane)
    (make-command :thumb-pane    "Shelf (Thumbnails)" '("T")   '%toggle-thumb-pane)
    (make-command :browse-pane   "Folder"           '("L")     '%toggle-browse-pane)
@@ -112,10 +115,10 @@
   '((:file "File"  :open-file :open-folder :subbook :settings :edit-menu :edit-gestures :quit)
     (:view "View"  :fullscreen :fit :fit-mode :rotate-left :rotate-right :loupe :slideshow
                      :spread :direction :recursive
-                     :browse-pane :thumb-pane :clip-pane :info)
+                     :toc :browse-pane :thumb-pane :clip-pane :info)
     (:jump "Go"    :first-spread :prev-spread :next-spread :last-spread :goto
                      :prev-bookmark :next-bookmark)
-    (:tool "Tools" :palette :search :toc)
+    (:tool "Tools" :palette :search :toc-search)
     (:clip "Clip"  :clip-add :export :bookmark))
   "Menu config. Builds a submenu per group and lays out the matching commands.
 Persisted to menu.lisp by user editing and swapped in (#26).")

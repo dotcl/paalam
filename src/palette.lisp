@@ -232,6 +232,70 @@ An overlay at the bottom of the main body, not a separate window. While the bar 
       (let ((page (second e)))
         (when (and page (>= page 0)) (%jump-to-page vw page))))))
 
+;;; --- Outline / TOC side pane (persistent, browsable; NeeView-style 目次) ------------------
+;;; The bar above (%command-toc) is a transient filter/quick-jump. This pane keeps the whole
+;;; bookmark hierarchy visible as a tree so a PDF's index is discoverable at a glance.
+
+(defun %toc-tvi (title page)
+  "One outline TreeViewItem. Tag = the 0-based page index as a string (matches the browse pane's
+string-Tag convention, which round-trips reliably through dotcl marshalling; read back to jump)."
+  (let ((it (dotnet:new "Avalonia.Controls.TreeViewItem")))
+    (dotnet:invoke it "set_Header" (format nil "~a   p~d" title (1+ page)))
+    (dotnet:invoke it "set_Tag" (format nil "~d" page))
+    (dotnet:invoke it "set_IsExpanded" t)
+    it))
+
+(defun %toc-build-tree (vw entries)
+  "Fill the pane's TreeView with ENTRIES ((depth page title) ...), nesting by depth. A depth-d node
+is added under the most recent depth-(d-1) node (falling back to the root if the levels skip). With
+no entries, show a single disabled placeholder row so the user sees the pane responded."
+  (let* ((tree (viewer-toc-tree vw))
+         (root (dotnet:invoke tree "get_Items")))
+    (setf (viewer-toc-populating vw) t)   ; Clear/Add fire SelectionChanged — don't jump on rebuild
+    (unwind-protect
+        (progn
+          (dotnet:invoke root "Clear")
+          (if (null entries)
+              (let ((ph (dotnet:new "Avalonia.Controls.TreeViewItem")))
+                (dotnet:invoke ph "set_Header" "(no outline / bookmarks)")
+                (dotnet:invoke ph "set_IsEnabled" nil)
+                (dotnet:invoke root "Add" ph))
+              (let ((last-at (make-hash-table)))   ; depth -> last TreeViewItem at that depth
+                (dolist (e entries)
+                  (destructuring-bind (depth page title) e
+                    (let* ((d  (max 0 depth))
+                           (it (%toc-tvi title page))
+                           (parent (and (plusp d) (gethash (1- d) last-at)))
+                           (into (if parent (dotnet:invoke parent "get_Items") root)))
+                      (dotnet:invoke into "Add" it)
+                      (setf (gethash d last-at) it)))))))
+      (setf (viewer-toc-populating vw) nil))))
+
+(defun %toc-pane-jump (vw)
+  "Jump to the page of the selected outline node (unless we're mid-rebuild)."
+  (unless (viewer-toc-populating vw)
+    (let* ((tree (viewer-toc-tree vw))
+           (it   (and tree (dotnet:invoke tree "get_SelectedItem")))
+           (tag  (and it (dotnet:invoke it "get_Tag")))
+           (page (and tag (ignore-errors (parse-integer tag :junk-allowed t)))))
+      (when (and (integerp page) (>= page 0))
+        (%jump-to-page vw page)))))
+
+(defun %toc-pane-refresh (vw)
+  "Rebuild the outline tree for the current book, but only while the pane is visible."
+  (when (and (viewer-toc-pane vw) (dotnet:invoke (viewer-toc-pane vw) "get_IsVisible"))
+    (%toc-build-tree vw (ignore-errors (book-outline (viewer-book vw))))))
+
+(defun %toggle-toc-pane (vw)
+  "Toggle the outline (TOC) side pane. On show, build the tree from the current book's bookmarks
+(PDF); non-PDF or bookmark-less books get a placeholder row."
+  (let* ((pane (viewer-toc-pane vw))
+         (vis  (dotnet:invoke pane "get_IsVisible")))
+    (dotnet:invoke pane "set_IsVisible" (not vis))
+    (unless vis
+      (%toc-build-tree vw (ignore-errors (book-outline (viewer-book vw))))
+      (%focus-viewport vw))))   ; keep key focus on the view (the tree grabs it on populate)
+
 (defun %command-toc (vw)
   "Open the TOC bar (#23). Filter titles by input, Enter/click to go to that page. Notify if no TOC."
   (let ((es (ignore-errors (book-outline (viewer-book vw)))))

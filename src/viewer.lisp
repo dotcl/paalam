@@ -19,6 +19,8 @@
            (clip-count nil)             ; vi count prefix (#35 ④ Phase 2)
            thumb-pane thumb-stack       ; page thumbnail bookshelf (#6 A)
            browse-pane browse-tree      ; folder tree (#6 B)
+           toc-pane toc-tree            ; outline / TOC side pane (PDF bookmarks; #23)
+           (toc-populating nil)         ; guard: suppress jump-on-rebuild in the TOC pane
            info-pane info-stack         ; file info / EXIF panel (#36)
            (info-page nil)              ; page selected for the info pane (left/right pick in spread; #36)
            (reorder-from nil)           ; source index during drag reorder (Phase 3)
@@ -61,6 +63,7 @@ When source is nil (empty window / during clip preview), do nothing (#35 ⑤)."
                                                 (min keep (max 0 (1- (book-page-count book))))))
       (show-spread vw)
       (%thumb-pane-refresh vw)
+      (%toc-pane-refresh vw)       ; keep the outline pane in sync with the current book (#23)
       (%defer-free old-loader old-book))))
 
 (defun open-path (vw path)
@@ -83,6 +86,7 @@ Call this on the UI thread."
                   (viewer-sindex vw) (spread-index-of spreads page))
             (show-spread vw)
             (%thumb-pane-refresh vw)
+            (%toc-pane-refresh vw)     ; keep the outline pane in sync with the current book (#23)
             (%defer-free old-loader old-book))))
     (error (e) (log-err "open-path" e))))
 
