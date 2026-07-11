@@ -187,6 +187,25 @@ map for its context."
         ((and (= (length kn) 7) (string= (subseq kn 0 6) "NumPad")) (digit-char-p (char kn 6)))
         (t nil)))
 
+(defun %phys->key (phys)
+  "Map an Avalonia PhysicalKey enum name to the Key-style name the keymap uses. Only the few names
+that differ need fixing: DigitN -> DN, Enter -> Return. Letters (A..Z), Space, NumPadN already match."
+  (cond ((null phys) nil)
+        ((and (= (length phys) 6) (string= (subseq phys 0 5) "Digit")) (format nil "D~a" (char phys 5)))
+        ((string= phys "Enter") "Return")
+        (t phys)))
+
+(defun %event-key (e)
+  "Resolved key name (Avalonia Key.ToString) for a KeyEventArgs, with an IME fallback. On Windows a
+Japanese IME swallows bare letter/space/digit shortcuts and reports them as Key.ImeProcessed, so the
+keymap lookup finds nothing. PhysicalKey still carries the real key regardless of IME state — fall
+back to it (normalized) so shortcuts keep working."
+  (let ((key0 (dotnet:invoke (dotnet:invoke e "get_Key") "ToString")))
+    (if (string= key0 "ImeProcessed")
+        (or (%phys->key (ignore-errors (dotnet:invoke (dotnet:invoke e "get_PhysicalKey") "ToString")))
+            key0)
+        key0)))
+
 (defun %shift? (e)
   "Whether the KeyEventArgs carries the Shift modifier (for vi's g/G distinction; #23).
 KeyModifiers gives the same Key.G for upper/lower case, so we distinguish by the modifier."
@@ -210,7 +229,7 @@ While the command bar is shown, do nothing here (the TextBox handles input; prev
   (when (and (viewer-cmd-bar vw)
              (dotnet:invoke (viewer-cmd-bar vw) "get_IsVisible"))
     (return-from %on-key))
-  (let* ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString"))
+  (let* ((kn (%event-key e))
          (d  (%digit-key kn)))
     (cond
       ;; Arrow keys during the loupe move the loupe center (prevents turning into page turns; #28).
@@ -254,7 +273,7 @@ from the :clip keymap so they're customizable. count accumulates in viewer-clip-
 are double-press prefixes in viewer-clip-pending; Shift+P pastes before. Mark Handled only when
 we actually consume the key, so unbound keys still fall through to the window's %on-key (keeping
 globals like F11 alive while the clip has focus)."
-  (let* ((kn   (dotnet:invoke (dotnet:invoke e "get_Key") "ToString"))
+  (let* ((kn   (%event-key e))
          (d    (%digit-key kn))
          (cnt  (viewer-clip-count vw))
          (pend (viewer-clip-pending vw)))

@@ -584,7 +584,9 @@ then closes; Esc cancels."
     (dotnet:invoke w "set_Content" tb)
     (dotnet:add-event w "KeyDown"
       (lambda (s e) (declare (ignore s))
-        (let ((kn (dotnet:invoke (dotnet:invoke e "get_Key") "ToString")))
+        ;; Same IME fallback as %on-key: a Japanese IME reports letter/digit keys as Key.ImeProcessed,
+        ;; so resolve the real key via PhysicalKey when capturing a binding.
+        (let ((kn (%event-key e)))
           (unless (member kn *modifier-keys* :test #'string=)
             (dotnet:invoke e "set_Handled" t)
             (dotnet:invoke w "Close")
