@@ -72,7 +72,7 @@
    (make-command :search        "Search (/)"        '("OemQuestion" "Divide") '%command-search)
    ;; :toc keeps its id/key (O) so persisted keymaps (which saved :TOC "O") keep working — it now
    ;; opens the persistent outline side pane. The old filter bar moves to the keyless :toc-search.
-   (make-command :toc           "Outline (目次)"    '("O")     '%toggle-toc-pane)
+   (make-command :toc           "Outline"           '("O")     '%toggle-toc-pane)
    (make-command :toc-search    "Outline Search…"   '()        '%command-toc)
    (make-command :clip-pane     "Clip Pane"        '("P")     '%toggle-clip-pane)
    (make-command :thumb-pane    "Shelf (Thumbnails)" '("T")   '%toggle-thumb-pane)
