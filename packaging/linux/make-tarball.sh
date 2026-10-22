@@ -77,7 +77,9 @@ ICONS_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
 mkdir -p "$SHARE" "$BIN_DIR" "$APPS_DIR" "$ICONS_DIR"
 cp -R "$HERE/bin/." "$SHARE/"
 ln -sf "$SHARE/$APP" "$BIN_DIR/$APP"
-cp "$HERE/$APP.desktop" "$APPS_DIR/"
+# Exec as an absolute path: the desktop session's PATH need not include
+# ~/.local/bin (Debian's lightdm session does not read ~/.profile).
+sed "s|^Exec=$APP |Exec=$BIN_DIR/$APP |" "$HERE/$APP.desktop" > "$APPS_DIR/$APP.desktop"
 cp "$HERE/$APP.png" "$ICONS_DIR/"
 update-desktop-database "$APPS_DIR" 2>/dev/null || true
 
